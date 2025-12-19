@@ -81,7 +81,6 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
     // which quote are we inside? '\'' or '\"'
     char quote_inside = 0;
     ssize_t terminator_semicolon_idx = -1;
-    int line_ended_after_terminator = 0;
 
     while (1) {
         const char *src = NULL;
@@ -124,12 +123,10 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
 
         size_t i = 0;
         while (i < src_len) {
-            // if already saw a terminator, ignore everything until line ends
             if (terminator_semicolon_idx > -1) {
-                while (i < src_len && src[i] != '\n') i++;
-                if (i < src_len && src[i] == '\n') i++; // include newline
-                
-                line_ended_after_terminator = 1;
+                // consumes spaces
+                while (i < src_len && isspace(src[i])) i++;
+                // next statement starts on same line; keep it in stash
                 break;
             }
 
@@ -190,11 +187,10 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
         // the last byte of the line containing the terminator
         stash_consume_prefix(r, i);
 
-        if (line_ended_after_terminator) {
+        if (terminator_semicolon_idx >= 0) {
             // now acc contains everything up to and including newline after
             // ';'. Returns only up to and including semicolon.
-            if (terminator_semicolon_idx < 0 ||
-                    (size_t)terminator_semicolon_idx > acc_len) {
+            if ((size_t)terminator_semicolon_idx > acc_len) {
                 fprintf(stderr, "Semicolon terminator out-of-bouds.");
                 free(acc);
                 return -1;
@@ -204,13 +200,13 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
             // it
 
             // we may be at the end of the accumulator
-            if ((size_t)terminator_semicolon_idx == acc_len) {
+            if ((size_t)terminator_semicolon_idx + 1 == acc_len) {
                 if (!buf_append(&acc, &acc_len, &acc_cap, "\0", 1)) {
                     free(acc);
                     return -1;
                 }
             } else {
-                acc[terminator_semicolon_idx] = '\0';
+                acc[terminator_semicolon_idx + 1] = '\0';
             }
 
             strip_after_semicolon(acc);

@@ -22,8 +22,9 @@ void transport_r_clean(TransportReader *r);
  * is found that is not inside:
  *  - single quotes
  *  - double quotes
- * and the line containing the semicolon has ended (we have consumed '\n' or
- * EOF).
+ * and we've skipped any whitespace directly after it (newline is optional).
+ * Any non-whitespace bytes after the semicolon stay in the stash for the next
+ * iteration, which allows multiple statements on the same line.
  *
  * Returns:
  *  1 -> success, *out_sql is malloc'd.
