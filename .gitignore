@@ -6,6 +6,7 @@
 *.ko
 *.obj
 *.elf
+build/
 
 # Linker output
 *.ilk
@@ -53,3 +54,6 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# CCLS
+.ccls*
