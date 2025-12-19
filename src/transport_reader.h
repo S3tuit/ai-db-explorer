@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stddef.h>
 
+/* This entity reads SQL statements from a FILE. */
 typedef struct TransportReader {
     FILE *in;
 
@@ -15,10 +16,10 @@ typedef struct TransportReader {
 /* Initializes the reader, doesn't take ownership of FILE*. */
 void transport_r_init(TransportReader *r, FILE *in);
 
-/* Frees interla buffers. */
+/* Frees internal buffers. */
 void transport_r_clean(TransportReader *r);
 
-/* Reads next SQL statement from stdin. A statement ends when a semicolon ';'
+/* Reads next SQL statement from its FILE. A statement ends when a semicolon ';'
  * is found that is not inside:
  *  - single quotes
  *  - double quotes
