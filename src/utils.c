@@ -7,7 +7,16 @@
 void *xmalloc(size_t size) {
     void *ptr = malloc(size);
     if (!ptr) {
-        fprintf(stderr, "virtual memory exhausted\n");
+        fprintf(stderr, "xmalloc. virtual memory exhausted\n");
+        exit(1);
+    }
+    return ptr;
+}
+
+void *xcalloc(size_t n, size_t size) {
+    void *ptr = calloc(n, size);
+    if (!ptr) {
+        fprintf(stderr, "xcalloc. virtual memory exhausted\n");
         exit(1);
     }
     return ptr;
