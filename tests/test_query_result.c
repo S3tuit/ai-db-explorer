@@ -7,10 +7,11 @@
 #include "../src/query_result.h"
 
 static void test_create_and_basic_set_get(void) {
-    QueryResult *qr = qr_create(3, 2);
+    QueryResult *qr = qr_create(7, 3, 2);
     ASSERT_TRUE(qr != NULL);
     ASSERT_TRUE(qr->ncols == 3);
     ASSERT_TRUE(qr->nrows == 2);
+    ASSERT_TRUE(qr->id == 7);
 
     ASSERT_TRUE(qr_set_col(qr, 0, "id", "int4") == 1);
     ASSERT_TRUE(qr_set_col(qr, 1, "name", "text") == 1);
@@ -45,7 +46,7 @@ static void test_create_and_basic_set_get(void) {
 }
 
 static void test_deep_copy_outlives_input_buffers(void) {
-    QueryResult *qr = qr_create(2, 1);
+    QueryResult *qr = qr_create(1, 2, 1);
     ASSERT_TRUE(qr != NULL);
 
     char name_buf[32];
@@ -74,7 +75,7 @@ static void test_deep_copy_outlives_input_buffers(void) {
 }
 
 static void test_bounds_and_bad_inputs(void) {
-    QueryResult *qr = qr_create(2, 2);
+    QueryResult *qr = qr_create(1, 2, 2);
     ASSERT_TRUE(qr != NULL);
 
     // qr_set_col name cannot be NULL

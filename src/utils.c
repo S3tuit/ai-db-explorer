@@ -21,3 +21,13 @@ void *xcalloc(size_t n, size_t size) {
     }
     return ptr;
 }
+
+void *xrealloc(void *ptr, size_t size) {
+    if (!ptr) return xmalloc(size);
+    void *new = realloc(ptr, size);
+    if (!new) {
+        fprintf(stderr, "xrealloc. virtual memory exhausted\n");
+        exit(1);
+    }
+    return new;
+}

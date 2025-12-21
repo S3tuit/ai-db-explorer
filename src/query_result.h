@@ -12,6 +12,7 @@ typedef struct QRColumn {
 /* This is the only entity accepted by the Serializer. It's a materialized,
  * DB-agnostic query result. It owns cols and cells. */
 typedef struct QueryResult {
+    uint32_t id;        // id of the request
     uint32_t ncols;
     QRColumn *cols;     // malloc'd array of ncols length
 
@@ -22,7 +23,7 @@ typedef struct QueryResult {
 } QueryResult;
 
 /* Creates a QueryResult with allocated storage for cells (all NULL). */
-QueryResult *qr_create(uint32_t ncols, uint32_t nrows);
+QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows);
 
 /* Frees all owned memory, 'qr' itself too. */
 void qr_destroy(QueryResult *qr);
@@ -35,7 +36,7 @@ int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
 
 /* Returns the QRColumn at 'col' inside 'qr'. Returns NULL on bad input or if
  * that column is unset. */
-const QRColumn *qr_get_col(QueryResult *qr, uint32_t col);
+const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col);
 
 /* Copies 'value' inside the cell of 'qr' located based on 'row' and 'col'.
  * Overwrite existing value in that cell. If value is NULL stores SQL NULL.

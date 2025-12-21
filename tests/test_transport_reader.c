@@ -5,6 +5,8 @@
 #include "test.h"
 #include "../src/transport_reader.h"
 
+/* -------------------------------- helpers -------------------------------- */
+
 // Each helper function takes 'file' and 'line' in input so we can log the
 // line and file of the callee.
 
@@ -87,6 +89,7 @@ static void expect_error_impl(const char *input, const char *file, int line) {
 #define read_two(input, e1, e2) read_two_impl((input), (e1), (e2), __FILE__, __LINE__)
 #define expect_error(input) expect_error_impl((input), __FILE__, __LINE__)
 
+/* --------------------------------- tests --------------------------------- */
 static void test_cases(void) {
   // basic
   read_one("SELECT 1;\n", "SELECT 1;");

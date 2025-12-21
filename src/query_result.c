@@ -21,7 +21,7 @@ static inline char *dup_or_null(const char *s) {
     return p;
 }
 
-QueryResult *qr_create(uint32_t ncols, uint32_t nrows) {
+QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows) {
     // Overflow check for nrows*ncols
     if (ncols != 0 && nrows > (UINT32_MAX / ncols)) {
         return NULL;
@@ -32,6 +32,7 @@ QueryResult *qr_create(uint32_t ncols, uint32_t nrows) {
     qr->cols = (QRColumn *)xcalloc(ncols, sizeof(QRColumn));
     qr->cells = (char **)xcalloc(ncells, sizeof(char *));
 
+    qr->id = id;
     qr->ncols = ncols;
     qr->nrows = nrows;
     qr->exec_ms = 0;
@@ -87,7 +88,7 @@ int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
     return 1;
 }
 
-const QRColumn *qr_get_col(QueryResult *qr, uint32_t col) {
+const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col) {
     if (!qr || col >= qr->ncols) return NULL;
 
     // since cols are allocated using calloc, they're all 0. Returns NULL if
