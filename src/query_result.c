@@ -21,7 +21,7 @@ static inline char *dup_or_null(const char *s) {
     return p;
 }
 
-QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated) {
+QueryResult *qr_create_ok(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated) {
     // Overflow check for nrows*ncols
     if (ncols != 0 && nrows > (UINT32_MAX / ncols)) {
         return NULL;
@@ -33,6 +33,7 @@ QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t trun
     qr->cells = (char **)xcalloc(ncells, sizeof(char *));
 
     qr->id = id;
+    qr->status = QR_OK;
     qr->ncols = ncols;
     qr->nrows = nrows;
     qr->exec_ms = 0;
@@ -41,8 +42,29 @@ QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t trun
     return qr;
 }
 
+QueryResult *qr_create_err(uint32_t id, const char *err_msg) {
+    QueryResult *qr = xmalloc(sizeof(*qr));
+
+    qr->id = id;
+    qr->status = QR_ERROR;
+
+    const char *err = err_msg ? err_msg : "";
+    size_t len = strlen(err) + 1; // null term
+    qr->err_msg = xmalloc(len);
+    memcpy(qr->err_msg, err, len);
+
+    return qr;
+}
+
 void qr_destroy(QueryResult *qr) {
     if (!qr) return;
+   
+    // if it represent an error
+    if (qr->status == QR_ERROR) {
+        free(qr->err_msg);
+        free(qr);
+        return;
+    }
 
     // free all the storage for cells
     if (qr->cells && qr->ncols > 0 && qr->nrows > 0) {

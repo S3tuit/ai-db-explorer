@@ -9,23 +9,44 @@ typedef struct QRColumn {
     char *type;     // type name in text format like "int4", "text", "date"
 } QRColumn;
 
+typedef enum QRStatus : uint8_t {
+    QR_OK = 0,
+    QR_ERROR = 1
+} QRStatus;
+
 /* This is the only entity accepted by the Serializer. It's a materialized,
  * DB-agnostic query result. It owns cols and cells. */
 typedef struct QueryResult {
     uint32_t id;        // id of the request
-    uint32_t ncols;
-    QRColumn *cols;     // malloc'd array of ncols length
+    QRStatus status;
 
-    uint32_t nrows;
-    char **cells;       // length (nrows * ncols). To access an element:
-                        // cells[row*ncols + col];
-    uint64_t exec_ms;
-    uint8_t truncated;  // 1 if output row count is lower that the row count
-                        // of the query executed
+    union {
+        // valid if QR_OK
+        struct {
+            uint32_t ncols;
+            QRColumn *cols;     // malloc'd array of ncols length
+
+            uint32_t nrows;
+            char **cells;       // length (nrows * ncols). To access an element:
+                                // cells[row*ncols + col];
+            uint64_t exec_ms;
+            uint8_t truncated;  // 1 if output row count is lower that the row count
+                                // of the query executed
+        };
+
+        // valid if QR_ERROR
+        char *err_msg;
+    };
+
+    // valid if QR_ERROR
+
 } QueryResult;
 
 /* Creates a QueryResult with allocated storage for cells (all NULL). */
-QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated);
+QueryResult *qr_create_ok(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated);
+
+/* Creates a QueryResult that represents an error. malloc 'err_msg'. */
+QueryResult *qr_create_err(uint32_t id, const char *err_msg);
 
 /* Frees all owned memory, 'qr' itself too. */
 void qr_destroy(QueryResult *qr);

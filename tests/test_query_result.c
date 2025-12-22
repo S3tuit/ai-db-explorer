@@ -7,7 +7,7 @@
 #include "../src/query_result.h"
 
 static void test_create_and_basic_set_get(void) {
-    QueryResult *qr = qr_create(7, 3, 2, 1);
+    QueryResult *qr = qr_create_ok(7, 3, 2, 1);
     ASSERT_TRUE(qr != NULL);
     ASSERT_TRUE(qr->ncols == 3);
     ASSERT_TRUE(qr->nrows == 2);
@@ -47,7 +47,7 @@ static void test_create_and_basic_set_get(void) {
 }
 
 static void test_deep_copy_outlives_input_buffers(void) {
-    QueryResult *qr = qr_create(1, 2, 1, 0);
+    QueryResult *qr = qr_create_ok(1, 2, 1, 0);
     ASSERT_TRUE(qr != NULL);
     ASSERT_TRUE(qr->truncated == 0);
 
@@ -77,8 +77,9 @@ static void test_deep_copy_outlives_input_buffers(void) {
 }
 
 static void test_bounds_and_bad_inputs(void) {
-    QueryResult *qr = qr_create(1, 2, 2, 0);
+    QueryResult *qr = qr_create_ok(1, 2, 2, 0);
     ASSERT_TRUE(qr != NULL);
+    ASSERT_TRUE(qr->status == QR_OK);
 
     // qr_set_col name cannot be NULL
     ASSERT_TRUE(qr_set_col(qr, 0, NULL, "text") == -1);
@@ -103,10 +104,22 @@ static void test_bounds_and_bad_inputs(void) {
     qr_destroy(qr);
 }
 
+static void test_create_error(void) {
+    QueryResult *qr = qr_create_err(3, "An error.");
+
+    ASSERT_TRUE(qr != NULL);
+    ASSERT_TRUE(qr->id == 3);
+    ASSERT_TRUE(qr->status == QR_ERROR);
+    ASSERT_STREQ(qr->err_msg, "An error.");
+
+    qr_destroy(qr);
+}
+
 int main(void) {
     test_create_and_basic_set_get();
     test_deep_copy_outlives_input_buffers();
     test_bounds_and_bad_inputs();
+    test_create_error();
 
     fprintf(stderr, "OK: test_query_result\n");
     return 0;

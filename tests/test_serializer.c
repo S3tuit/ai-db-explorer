@@ -32,7 +32,7 @@ static void serialize_jsonrpc_impl(
         const char *expected_json,
         const char *file, int line) {
 
-    QueryResult *qr = qr_create(id, ncols, nrows, truncated);
+    QueryResult *qr = qr_create_ok(id, ncols, nrows, truncated);
     ASSERT_TRUE_AT(qr != NULL, file, line);
 
     qr->exec_ms = exec_ms;
@@ -119,7 +119,7 @@ static void test_serializer_basic_rows_and_nulls(void) {
 
 static void test_serializer_null_qrcolumn_safe_defaults(void) {
     /* 2 columns, but we only set column 0 */
-    QueryResult *qr = qr_create(100, 2, 1, 0);
+    QueryResult *qr = qr_create_ok(100, 2, 1, 0);
     ASSERT_TRUE(qr != NULL);
 
     qr->exec_ms = 42;
@@ -212,11 +212,32 @@ static void test_serializer_empty_result(void) {
     );
 }
 
+static void test_serializer_error_result(void) {
+    QueryResult *qr = qr_create_err(7, "bad \"x\"");
+    ASSERT_TRUE(qr != NULL);
+
+    const char *expected =
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{"
+          "\"message\":\"bad \\\"x\\\"\""
+        "}}";
+
+    char *json = NULL;
+    size_t json_len = 0;
+    int rc = serializer_qr_to_jsonrpc(qr, &json, &json_len);
+
+    ASSERT_TRUE(rc == 1);
+    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+    free(json);
+    qr_destroy(qr);
+}
+
 int main (void) {
     test_serializer_basic_rows_and_nulls();
     test_serializer_null_qrcolumn_safe_defaults();
     test_serializer_escapes_strings();
     test_serializer_empty_result();
+    test_serializer_error_result();
 
     fprintf(stderr, "OK: test_serializer\n");
     return(0);
