@@ -21,7 +21,7 @@ static inline char *dup_or_null(const char *s) {
     return p;
 }
 
-QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows) {
+QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated) {
     // Overflow check for nrows*ncols
     if (ncols != 0 && nrows > (UINT32_MAX / ncols)) {
         return NULL;
@@ -36,6 +36,7 @@ QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows) {
     qr->ncols = ncols;
     qr->nrows = nrows;
     qr->exec_ms = 0;
+    qr->truncated = truncated;
 
     return qr;
 }

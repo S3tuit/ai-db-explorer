@@ -20,10 +20,12 @@ typedef struct QueryResult {
     char **cells;       // length (nrows * ncols). To access an element:
                         // cells[row*ncols + col];
     uint64_t exec_ms;
+    uint8_t truncated;  // 1 if output row count is lower that the row count
+                        // of the query executed
 } QueryResult;
 
 /* Creates a QueryResult with allocated storage for cells (all NULL). */
-QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows);
+QueryResult *qr_create(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated);
 
 /* Frees all owned memory, 'qr' itself too. */
 void qr_destroy(QueryResult *qr);

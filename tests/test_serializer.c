@@ -25,13 +25,14 @@ static void serialize_jsonrpc_impl(
         uint32_t ncols,
         uint32_t nrows,
         uint64_t exec_ms,
+        uint8_t truncated,
         const char *const *col_names,
         const char *const *col_types,   
         const char *const *cells,
         const char *expected_json,
         const char *file, int line) {
 
-    QueryResult *qr = qr_create(id, ncols, nrows);
+    QueryResult *qr = qr_create(id, ncols, nrows, truncated);
     ASSERT_TRUE_AT(qr != NULL, file, line);
 
     qr->exec_ms = exec_ms;
@@ -100,7 +101,7 @@ static void test_serializer_basic_rows_and_nulls(void) {
             "[\"2\",null,\"99\"]"
           "],"
           "\"rowcount\":2,"
-          "\"truncated\":false"
+          "\"truncated\":true"
         "}}";
 
     SERIALIZE_JSONRPC(
@@ -108,6 +109,7 @@ static void test_serializer_basic_rows_and_nulls(void) {
         /* ncols */ 3,
         /* nrows */ 2,
         /* exec_ms */ 12,
+        /* truncated */ 1,
         col_names,
         col_types,
         cells,
@@ -117,7 +119,7 @@ static void test_serializer_basic_rows_and_nulls(void) {
 
 static void test_serializer_null_qrcolumn_safe_defaults(void) {
     /* 2 columns, but we only set column 0 */
-    QueryResult *qr = qr_create(100, 2, 1);
+    QueryResult *qr = qr_create(100, 2, 1, 0);
     ASSERT_TRUE(qr != NULL);
 
     qr->exec_ms = 42;
@@ -186,7 +188,7 @@ static void test_serializer_escapes_strings(void) {
         "}}";
 
     SERIALIZE_JSONRPC(
-        9, 1, 1, 5,
+        9, 1, 1, 5, 0,
         col_names, col_types, cells,
         expected
     );
@@ -204,7 +206,7 @@ static void test_serializer_empty_result(void) {
         "}}";
 
     SERIALIZE_JSONRPC(
-        42, 0, 0, 1,
+        42, 0, 0, 1, 0,
         NULL, NULL, NULL,
         expected
     );

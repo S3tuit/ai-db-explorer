@@ -290,11 +290,11 @@ int serializer_qr_to_jsonrpc(const QueryResult *qr, char **out_json,
 
     if (serializer_append(&sb, "]") != 1) goto err;
 
-    // rowcount + truncated (fixed false for now)
+    // rowcount + truncated
     if (serializer_append(&sb,
-            ",\"rowcount\":%u,\"truncated\":false"
+            ",\"rowcount\":%u,\"truncated\":%s"
             "}}",
-            qr->nrows) != 1) goto err;
+            qr->nrows, qr->truncated ? "true" : "false") != 1) goto err;
 
     // materialize output (exact size; not NUL-terminated)
     char *out = (char *)malloc(sb.len);
