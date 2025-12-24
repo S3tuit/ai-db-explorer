@@ -10,14 +10,37 @@ static inline int idx_ok(const QueryResult *qr, uint32_t row, uint32_t col) {
     return qr && qr->cols && qr->cells && row < qr->nrows && col < qr->ncols;
 }
 
-/* Returns a pointer to a duplicated value of 's' or NULL if 's' is NULL. */
+/* Returns a pointer to a duplicated value of 's' of at most 'cap' bytes or
+ * NULL if 's' is NULL. If the string is truncated appends "...\0" without
+ * going past the 'cap'. */
+static inline char *dupn_or_null(const char *s, size_t cap) {
+    if (!s || cap < 4) return NULL;
+
+    size_t n = strnlen(s, cap);
+
+    if (n == cap) { // not terminated within cap -> truncate to "...".
+        char *p = xmalloc(cap);
+        memcpy(p, s, cap - 4); 
+        p[cap - 4] = '.';
+        p[cap - 3] = '.';
+        p[cap - 2] = '.';
+        p[cap - 1] = '\0';
+        return p;
+    }
+
+    // fully fits (including '\0')
+    char *p = xmalloc(n + 1);
+    memcpy(p, s, n + 1); // includes '\0'
+    return p;
+}
+
 static inline char *dup_or_null(const char *s) {
     if (!s) return NULL;
-    char *p = strdup(s);
-    if (!p) {
-        fprintf(stderr, "strdup. returned NULL on a non-NULL input.\n");
-        exit(1);
-    }
+    size_t n = strlen(s);
+
+    // fully fits (including '\0')
+    char *p = xmalloc(n + 1);
+    memcpy(p, s, n + 1); // includes '\0'
     return p;
 }
 
@@ -119,6 +142,22 @@ const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col) {
     QRColumn zero = {0};
     if (memcmp(&qr->cols[col], &zero, sizeof(QRColumn)) == 0) return NULL;
     return &qr->cols[col];
+}
+
+int qr_set_cell_capped(QueryResult *qr, uint32_t row, uint32_t col,
+                        const char *value, uint32_t cap) {
+    if (!qr) return 0;
+    if (!idx_ok(qr, row, col)) return -1;
+
+    size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
+
+    // Overwrite existing value
+    free(qr->cells[idx]);
+    
+    // value may be NULL and it's ok to store NULL, it means SQL NULL
+    char *copy = dupn_or_null(value, (size_t)cap);
+    qr->cells[idx] = copy;
+    return 1;
 }
 
 int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value) {

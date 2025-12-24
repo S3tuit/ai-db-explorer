@@ -65,6 +65,9 @@ const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col);
  * Overwrite existing value in that cell. If value is NULL stores SQL NULL.
  * Returns 1 on success, 0 if 'qr' is NULL, -1 on error. */
 int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value);
+/* Like qr_set_cell but copies at most 'cap' bytes from 'value'. */
+int qr_set_cell_capped(QueryResult *qr, uint32_t row, uint32_t col,
+                        const char *value, uint32_t cap);
 
 /* Returns pointer to cell string (owned by qr) or NULL if SQL NULL/out of
  * range. */

@@ -46,6 +46,22 @@ static void test_create_and_basic_set_get(void) {
     qr_destroy(qr);
 }
 
+static void test_set_cell_capped_respects_cap(void) {
+    QueryResult *qr = qr_create_ok(1, 2, 1, 0);
+    ASSERT_TRUE(qr != NULL);
+
+    const char *str = "this should overflow";
+
+    ASSERT_TRUE(qr_set_cell_capped(qr, 0, 0, str, 10) == 1);
+    ASSERT_STREQ(qr_get_cell(qr, 0, 0), "this s...");
+
+    // cap lower than 4 -> dupn_or_null returns NULL, qr stores NULL
+    ASSERT_TRUE(qr_set_cell_capped(qr, 0, 0, str, 3) == 1);
+    ASSERT_TRUE(qr_get_cell(qr, 0, 0) == NULL);
+
+    qr_destroy(qr);
+}
+
 static void test_deep_copy_outlives_input_buffers(void) {
     QueryResult *qr = qr_create_ok(1, 2, 1, 0);
     ASSERT_TRUE(qr != NULL);
@@ -117,6 +133,7 @@ static void test_create_error(void) {
 
 int main(void) {
     test_create_and_basic_set_get();
+    test_set_cell_capped_respects_cap();
     test_deep_copy_outlives_input_buffers();
     test_bounds_and_bad_inputs();
     test_create_error();

@@ -23,9 +23,8 @@ typedef struct SafetyPolicy {
  * Initializes 'p' with safe defaults if some pointer points to NULL. Returns 1
  * on success, 0 on bad input.
  */
-int safety_policy_init_defaults(SafetyPolicy *p, int *read_only,
-                                uint32_t *max_rows, uint32_t *max_cell_bytes,
-                                uint32_t *statement_timeout_ms);
+int safety_policy_init(SafetyPolicy *p, int *read_only, uint32_t *max_rows,
+                        uint32_t *max_cell_bytes, uint32_t *statement_timeout_ms);
 
 #endif
 

@@ -1,16 +1,19 @@
 CC      := gcc
+PKG_CONFIG ?= pkg-config
+LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
+LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
 
 # Build flags
 CFLAGS  := -Wall -Wextra -std=c11 -g -O2
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
-INCLUDES := -Isrc
-LDFLAGS :=
+INCLUDES := -Isrc $(LIBPQ_CFLAGS)
+LDFLAGS := $(LIBPQ_LIBS)
 
 # Test flags
 TCFLAGS := -Wall -Wextra -std=c11 -g -O1 $(INCLUDES)
 TCFLAGS += -D_POSIX_C_SOURCE=200809L
 TSAN    := -fsanitize=address,undefined -fno-omit-frame-pointer
-TLDFLAGS := $(TSAN)
+TLDFLAGS := $(TSAN) $(LDFLAGS)
 
 # App sources (exclude main.c for reuse in tests)
 APP_MAIN := src/main.c
