@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* -------------------------------- ASSERTIONS ----------------------------- */
 #define ASSERT_TRUE_AT(cond, file, line) do { \
   if (!(cond)) { \
     fprintf(stderr, "ASSERT_TRUE failed: %s (%s:%d)\n", #cond, file, line); \
@@ -23,3 +24,25 @@
 #define ASSERT_STREQ(a,b) ASSERT_STREQ_AT(a, b, __FILE__, __LINE__)
 
 #endif
+
+/* ------------------------------- HELPERS --------------------------------- */
+
+/* Creates a memfile with the 'input' content and asserts it's being created. */
+FILE *memfile_impl(const char *input, const char *file, int line) {
+    (void)file; (void)line;
+#if defined(_GNU_SOURCE)
+    FILE *f = fmemopen((void *)input, strlen(input), "r");
+    ASSERT_TRUE_AT(f != NULL, file, line);
+    return f;
+#else
+    /* portable fallback: tmpfile */
+    FILE *f = tmpfile();
+    if (!f) return NULL;
+    fwrite(input, 1, strlen(input), f);
+    fflush(f);
+    fseek(f, 0, SEEK_SET);
+    ASSERT_TRUE_AT(f != NULL, file, line);
+    return f;
+#endif
+}
+#define MEMFILE(input) memfile_impl((input), __FILE__, __LINE__)

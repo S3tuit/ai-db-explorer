@@ -15,4 +15,7 @@ WORKDIR /app
 COPY . .
 
 RUN make
+
+# PIE linking may give error since we don't compile with -fPIE,
+# that why we put "-no-pie"
 CMD ["sh", "-lc", "make PIE_LDFLAGS=-no-pie test-postgres"]

@@ -10,13 +10,6 @@
 // Each helper function takes 'file' and 'line' in input so we can log the
 // line and file of the callee.
 
-/* Creates a memfile with the 'input' content and asserts it's being created. */
-static FILE *memfile_impl(const char *input, const char *file, int line) {
-  FILE *f = fmemopen((void*)input, strlen(input), "r");
-  ASSERT_TRUE_AT(f != NULL, file, line);
-  return f;
-}
-
 /* Tests if the reader consumes 'input' and gives back 'expected'. */
 static void read_one_impl(const char *input, const char *expected, const char *file, int line) {
   FILE *f = memfile_impl(input, file, line);
