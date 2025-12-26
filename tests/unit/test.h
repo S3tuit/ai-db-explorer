@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "utils.h"
+
 /* -------------------------------- ASSERTIONS ----------------------------- */
 #define ASSERT_TRUE_AT(cond, file, line) do { \
   if (!(cond)) { \
@@ -23,9 +25,7 @@
 
 #define ASSERT_STREQ(a,b) ASSERT_STREQ_AT(a, b, __FILE__, __LINE__)
 
-#endif
-
-/* ------------------------------- HELPERS --------------------------------- */
+/* ----------------------------- IN-MEMORY I/O ------------------------------- */
 
 /* Creates a memfile with the 'input' content and asserts it's being created. */
 FILE *memfile_impl(const char *input, const char *file, int line) {
@@ -45,4 +45,30 @@ FILE *memfile_impl(const char *input, const char *file, int line) {
     return f;
 #endif
 }
-#define MEMFILE(input) memfile_impl((input), __FILE__, __LINE__)
+#define MEMFILE_IN(input) memfile_impl((input), __FILE__, __LINE__)
+
+
+/* Output a memfile with write+read permission. */
+FILE *memfile_out_impl(const char *file, int line) {
+    FILE *f = tmpfile();
+    ASSERT_TRUE_AT(f != NULL, file, line);
+    return f;
+}
+#define MEMFILE_OUT() memfile_out_impl(__FILE__, __LINE__)
+
+/* Returns a pointer to a buffer with all the bytes of 'f'. Caller should free
+ * the returned pointer. */
+char *read_all(FILE *f) {
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    ASSERT_TRUE(sz >= 0);
+
+    char *buf = xmalloc((size_t)sz + 1);
+
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    buf[n] = '\0';
+    return buf;
+}
+
+#endif

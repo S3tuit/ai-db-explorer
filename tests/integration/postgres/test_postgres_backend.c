@@ -1,10 +1,10 @@
 #include "test.h"
 
-#include "../../src/postgres_backend.h"
-#include "../../src/db_backend.h"
-#include "../../src/utils.h"
-#include "../../src/safety_policy.h"
-#include "../../src/query_result.h"
+#include "postgres_backend.h"
+#include "db_backend.h"
+#include "utils.h"
+#include "safety_policy.h"
+#include "query_result.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -212,5 +212,7 @@ void test_postgres_backend(void) {
 
 int main(void) {
     test_postgres_backend();
+
+    fprintf(stderr, "OK: test_postgres_backend\n");
     return 0;
 }
