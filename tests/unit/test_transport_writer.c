@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "test.h"
-#include "../src/transport_writer.h"
+#include "transport_writer.h"
 
 static void test_write_basic_frame(void) {
   char *out_buf = NULL;

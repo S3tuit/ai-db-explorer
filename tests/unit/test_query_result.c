@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #include "test.h"
-#include "../src/query_result.h"
+#include "query_result.h"
 
 static void test_create_and_basic_set_get(void) {
     QueryResult *qr = qr_create_ok(7, 3, 2, 1);

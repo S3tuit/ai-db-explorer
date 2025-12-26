@@ -57,6 +57,7 @@ dkms.conf
 
 # CCLS
 .ccls*
+compile_commands.json
 
 # personal notes
 *notes

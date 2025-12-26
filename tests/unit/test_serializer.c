@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/query_result.h"
-#include "../src/serializer.h"
+#include "query_result.h"
+#include "serializer.h"
 #include "test.h"
 
 /* -------------------------------- helpers -------------------------------- */

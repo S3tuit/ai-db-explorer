@@ -6,14 +6,14 @@ LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
 # Build flags
 CFLAGS  := -Wall -Wextra -std=c11 -g -O2
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
-INCLUDES := -Isrc $(LIBPQ_CFLAGS)
+INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS)
 LDFLAGS := $(LIBPQ_LIBS)
 
 # Test flags
 TCFLAGS := -Wall -Wextra -std=c11 -g -O1 $(INCLUDES)
 TCFLAGS += -D_POSIX_C_SOURCE=200809L
 TSAN    := -fsanitize=address,undefined -fno-omit-frame-pointer
-TLDFLAGS := $(TSAN) $(LDFLAGS)
+TLDFLAGS := $(TSAN) $(LDFLAGS) $(PIE_LDFLAGS)
 
 # App sources (exclude main.c for reuse in tests)
 APP_MAIN := src/main.c
@@ -23,11 +23,15 @@ APP_SRC  := $(filter-out $(APP_MAIN),$(wildcard src/*.c))
 APP_OBJ := $(APP_SRC:src/%.c=build/%.o) build/main.o
 BIN := build/ai-db-explorer
 
-# Tests: each tests/test_foo.c -> build/tests/test_foo
-TEST_SRC := $(wildcard tests/test_*.c)
-TEST_BINS := $(patsubst tests/%.c,build/tests/%,$(TEST_SRC))
+# Unit tests: each tests/unit/test_foo.c -> build/tests/unit/test_foo
+UNIT_TEST_SRC := $(wildcard tests/unit/test_*.c)
+UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
 
-.PHONY: all clean run test
+# Integration tests: tests/integration/*/test_foo.c -> build/tests/integration/*/test_foo
+INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
+INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(INTEGRATION_TEST_SRC))
+
+.PHONY: all clean run test test-unit test-integration test-postgres test-build
 
 all: $(BIN)
 
@@ -62,14 +66,36 @@ build/tests/%: build/tests/%.o $(TEST_APP_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $^ -o $@ $(TLDFLAGS)
 
-# Run all tests
-test: $(TEST_BINS)
+# Run unit tests
+test-unit: $(UNIT_TEST_BINS)
 	@set -e; \
-	for t in $(TEST_BINS); do \
+	for t in $(UNIT_TEST_BINS); do \
 	  echo "==> $$t"; \
 	  ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 $$t; \
 	done; \
 	echo "ALL TESTS PASSED"
+
+# Run integration tests (docker)
+test-integration:
+	@set -e; \
+	docker compose -f tests/integration/postgres/postgres.test.yml up --build --abort-on-container-exit --exit-code-from test; \
+	docker compose -f tests/integration/postgres/postgres.test.yml down -v
+
+# Run all tests
+test: test-unit test-integration
+
+# Run postgres integration tests (used by docker)
+test-postgres: $(INTEGRATION_TEST_BINS)
+	@set -e; \
+	for t in $(INTEGRATION_TEST_BINS); do \
+	  echo "==> $$t"; \
+	  ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 $$t; \
+	done; \
+	echo "ALL TESTS PASSED"
+
+# Only builds tests, usefull for making the LSP recognize the header files
+# inside tests/
+test-build: $(UNIT_TEST_BINS) $(INTEGRATION_TEST_BINS)
 
 clean:
 	rm -rf build

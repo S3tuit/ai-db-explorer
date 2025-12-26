@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 #include "test.h"
-#include "../src/transport_reader.h"
+#include "transport_reader.h"
 
 /* -------------------------------- helpers -------------------------------- */
 

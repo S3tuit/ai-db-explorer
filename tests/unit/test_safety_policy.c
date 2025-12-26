@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 #include "test.h"
-#include "../src/safety_policy.h"
+#include "safety_policy.h"
 
 static void test_init_defaults_and_overrides(void) {
   SafetyPolicy p;

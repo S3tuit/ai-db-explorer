@@ -9,7 +9,7 @@ typedef struct QRColumn {
     char *type;     // type name in text format like "int4", "text", "date"
 } QRColumn;
 
-typedef enum QRStatus : uint8_t {
+typedef enum QRStatus {
     QR_OK = 0,
     QR_ERROR = 1
 } QRStatus;
