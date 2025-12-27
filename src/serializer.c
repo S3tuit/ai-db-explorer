@@ -1,71 +1,13 @@
 #include "serializer.h"
 #include "utils.h"
+#include "string_op.h"
 
-#include <inttypes.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-
-/* ------------------------- small growable buffer ------------------------- */
-
-typedef struct StrBuf {
-    char  *data;
-    size_t len;
-    size_t cap;
-} StrBuf;
-
-/* Clean the internal allocation of 'sb'. */
-static void sb_clean(StrBuf *sb) {
-    if (!sb) return;
-    free(sb->data);
-    sb->data = NULL;
-    sb->len = 0;
-    sb->cap = 0;
-}
-
-// TODO: think about the max size of the output and don't forget that an sql
-// query for libqp must be lower than 8k chars.
-
-/* Makes sure 'sb' has enough space for 'add' more bytes. Returns OK on success,
- * ERR on bad input or overflow. */
-static int sb_reserve(StrBuf *sb, size_t add) {
-    if (!sb) return ERR;
-    // overflow
-    if (add > SIZE_MAX - sb->len) return ERR;
-
-    // state unchanged
-    if (add == 0) return OK;
-
-    size_t needed = sb->len + add;
-    if (needed <= sb->cap) return OK;
-
-    size_t newcap = sb->cap ? sb->cap : 256;
-    while (newcap < needed) {
-        if (newcap > SIZE_MAX / 2) {
-            newcap = needed;
-            break;
-        }
-        newcap *= 2;
-    }
-
-    char *p = (char *)xrealloc(sb->data, newcap);
-
-    sb->data = p;
-    sb->cap  = newcap;
-    return OK;
-}
-
-/* Adds 'n' bytes starting from 'src' to sb. */
-static int sb_append_bytes(StrBuf *sb, const void *src, size_t n) {
-    if (!sb || (!src && n != 0)) return ERR;
-    if (n == 0) return OK;
-    if (sb_reserve(sb, n) != OK) return ERR;
-    memcpy(sb->data + sb->len, src, n);
-    sb->len += n;
-    return OK;
-}
 
 /* ------------------------------- serializer ------------------------------ */
 
@@ -316,8 +258,7 @@ int serializer_qr_to_jsonrpc(const QueryResult *qr, char **out_json,
     }
 
     // materialize output (exact size; not NUL-terminated)
-    char *out = (char *)malloc(sb.len);
-    if (!out) goto err;
+    char *out = xmalloc(sb.len);
     memcpy(out, sb.data, sb.len);
     *out_json = out;
     *out_len  = sb.len;
@@ -326,6 +267,63 @@ int serializer_qr_to_jsonrpc(const QueryResult *qr, char **out_json,
     return OK;
 
 err:
+    sb_clean(&sb);
+    *out_json = NULL;
+    *out_len  = 0;
+    return ERR;
+}
+
+int serializer_method_to_jsonrpc(const char *method, uint32_t id,
+        char **out_json, size_t *out_len, uint32_t key_no, ...) {
+
+    if (!out_json || !out_len || !method) return ERR;
+    *out_json = NULL;
+    *out_len  = 0;
+
+    StrBuf sb = {0};
+
+    // begin JSON-RPC envelope
+    if (serializer_append(&sb,
+            "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"%s\",\"params\":{",
+            id, method) != OK) goto err;
+
+    va_list ap;
+    va_start(ap, key_no);
+
+    for (uint32_t i = 0; i < key_no; i++) {
+        const char *key = va_arg(ap, const char *);
+        const char *value = va_arg(ap, const char *);
+
+        if (!key || !value) {
+            goto err;
+        }
+
+        if (i > 0) {
+            if (serializer_append(&sb, ",") != OK) {
+                goto err;
+            }
+        }
+        if (serializer_append(&sb, "\"%s\":\"%s\"", key, value) != OK) {
+            goto err;
+        }
+    }
+
+    va_end(ap);
+
+    if (serializer_append(&sb, "}}") != OK) goto err;
+
+
+    // materialize output (exact size; not NUL-terminated)
+    char *out = xmalloc(sb.len);
+    memcpy(out, sb.data, sb.len);
+    *out_json = out;
+    *out_len  = sb.len;
+
+    sb_clean(&sb);
+    return OK;
+
+err:
+    va_end(ap);
     sb_clean(&sb);
     *out_json = NULL;
     *out_len  = 0;

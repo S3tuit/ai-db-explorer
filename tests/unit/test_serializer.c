@@ -230,12 +230,65 @@ static void test_serializer_error_result(void) {
     qr_destroy(qr);
 }
 
+static void test_serializer_method_to_jsonrpc(void) {
+    char *json = NULL;
+    size_t json_len = 0;
+
+    int rc = serializer_method_to_jsonrpc(
+        "exec",
+        1,
+        &json,
+        &json_len,
+        2,
+        "sql",
+        "SELECT 1;",
+        "second_key",
+        "second_value");
+
+    ASSERT_TRUE(rc == OK);
+
+    // the second key should have an empty string as value since we haven't
+    // provided it
+    const char *expected =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{"
+          "\"sql\":\"SELECT 1;\","
+          "\"second_key\":\"second_value\""
+        "}}";
+
+    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+    free(json);
+}
+
+static void test_serializer_method_to_jsonrpc_no_params(void) {
+    char *json = NULL;
+    size_t json_len = 0;
+
+    int rc = serializer_method_to_jsonrpc(
+        "exec",
+        1,
+        &json,
+        &json_len,
+        0);
+
+    ASSERT_TRUE(rc == OK);
+
+    const char *expected =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{}}";
+
+    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+    free(json);
+}
+
 int main (void) {
     test_serializer_basic_rows_and_nulls();
     test_serializer_null_qrcolumn_safe_defaults();
     test_serializer_escapes_strings();
     test_serializer_empty_result();
     test_serializer_error_result();
+    test_serializer_method_to_jsonrpc();
+    test_serializer_method_to_jsonrpc_no_params();
 
     fprintf(stderr, "OK: test_serializer\n");
     return(0);

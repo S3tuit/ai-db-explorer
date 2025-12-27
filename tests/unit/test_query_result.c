@@ -55,9 +55,9 @@ static void test_set_cell_capped_respects_cap(void) {
     ASSERT_TRUE(qr_set_cell_capped(qr, 0, 0, str, 10) == OK);
     ASSERT_STREQ(qr_get_cell(qr, 0, 0), "this s...");
 
-    // cap lower than 4 -> dupn_or_null returns NULL, qr stores NULL
+    // cap lower than 4 -> no ellipsis, truncated to cap - 1
     ASSERT_TRUE(qr_set_cell_capped(qr, 0, 0, str, 3) == OK);
-    ASSERT_TRUE(qr_get_cell(qr, 0, 0) == NULL);
+    ASSERT_STREQ(qr_get_cell(qr, 0, 0), "th");
 
     qr_destroy(qr);
 }
