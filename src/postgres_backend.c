@@ -331,7 +331,7 @@ static int pg_exec(DbBackend *db, uint32_t request_id, const char *sql,
                 else val = PQgetvalue(res, (int)r, (int)c);
 
                 if (qr_set_cell_capped(qr, r, c, val,
-                            cap > 0 ? cap : UINT32_MAX) != 1) {
+                            cap > 0 ? cap : UINT32_MAX) != OK) {
                     pg_set_err(p, "qr_set_cell failed");
                     goto fail;
                 }
@@ -395,4 +395,3 @@ DbBackend *postgres_backend_create(void) {
     db->impl = impl;
     return db;
 }
-

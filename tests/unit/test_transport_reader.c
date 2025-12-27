@@ -20,7 +20,7 @@ static void read_one_impl(const char *input, const char *expected, const char *f
   char *res = NULL;
   int rc = transport_r_read_sql(&r, &res);
 
-  ASSERT_TRUE_AT(rc == 1, file, line);
+  ASSERT_TRUE_AT(rc == YES, file, line);
   ASSERT_TRUE_AT(res != NULL, file, line);
   ASSERT_STREQ_AT(res, expected, file, line);
 
@@ -40,20 +40,20 @@ static void read_two_impl(const char *input, const char *e1, const char *e2, con
 
   char *res1 = NULL;
   int rc1 = transport_r_read_sql(&r, &res1);
-  ASSERT_TRUE_AT(rc1 == 1, file, line);
+  ASSERT_TRUE_AT(rc1 == YES, file, line);
   ASSERT_STREQ_AT(res1, e1, file, line);
   free(res1);
 
   char *res2 = NULL;
   int rc2 = transport_r_read_sql(&r, &res2);
-  ASSERT_TRUE_AT(rc2 == 1, file, line);
+  ASSERT_TRUE_AT(rc2 == YES, file, line);
   ASSERT_STREQ_AT(res2, e2, file, line);
   free(res2);
 
   // then EOF
   char *res3 = NULL;
   int rc3 = transport_r_read_sql(&r, &res3);
-  ASSERT_TRUE_AT(rc3 == 0, file, line);
+  ASSERT_TRUE_AT(rc3 == NO, file, line);
   ASSERT_TRUE_AT(res3 == NULL, file, line);
 
   transport_r_clean(&r);
@@ -70,7 +70,7 @@ static void expect_error_impl(const char *input, const char *file, int line) {
   char *res = NULL;
   int rc = transport_r_read_sql(&r, &res);
 
-  ASSERT_TRUE_AT(rc == -1, file, line);
+  ASSERT_TRUE_AT(rc == ERR, file, line);
   ASSERT_TRUE_AT(res == NULL, file, line);
 
   transport_r_clean(&r);

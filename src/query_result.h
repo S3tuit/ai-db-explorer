@@ -52,8 +52,8 @@ QueryResult *qr_create_err(uint32_t id, const char *err_msg);
 void qr_destroy(QueryResult *qr);
 
 /* Copies 'name' and 'type' inside the column metadata of 'qr' at position
- * 'col'. If type is NULL it's stored as "unknown". Returns 1 if the column was
- * set, 0 if name and type are NULL, -1 on error. */
+ * 'col'. If type is NULL it's stored as "unknown". Returns OK on success, ERR
+ * on bad input or out-of-bounds. */
 int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
         const char *type);
 
@@ -63,7 +63,7 @@ const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col);
 
 /* Copies 'value' inside the cell of 'qr' located based on 'row' and 'col'.
  * Overwrite existing value in that cell. If value is NULL stores SQL NULL.
- * Returns 1 on success, 0 if 'qr' is NULL, -1 on error. */
+ * Returns OK on success, ERR on bad input or out-of-bounds. */
 int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value);
 /* Like qr_set_cell but copies at most 'cap' bytes from 'value'. */
 int qr_set_cell_capped(QueryResult *qr, uint32_t row, uint32_t col,
@@ -73,7 +73,7 @@ int qr_set_cell_capped(QueryResult *qr, uint32_t row, uint32_t col,
  * range. */
 const char *qr_get_cell(const QueryResult *qr, uint32_t row, uint32_t col);
 
-/* Returns 1 if cell is SQL NULL, 0 if non-NULL, -1 on error. */
+/* Returns YES if cell is SQL NULL, NO if non-NULL, ERR on error. */
 int qr_is_null(const QueryResult *qr, uint32_t row, uint32_t col);
 
 #endif

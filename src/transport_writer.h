@@ -16,9 +16,8 @@ typedef struct TransportWriter {
 void transport_w_init(TransportWriter *w, FILE *out);
 
 /* Writer one framed message. Returns:
- *  1: on success, flushes 'out' on success.
- *  0: if no bytes in input.
- * -1: on error. */
+ *  OK: on success (including zero bytes), flushes 'out'.
+ *  ERR: on error. */
 int transport_w_write(TransportWriter *w, const char *bytes, size_t n);
 
 void transport_w_clean(TransportWriter *w);

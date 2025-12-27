@@ -35,11 +35,11 @@ int session_run(SessionManager *s) {
         char *sql = NULL;
 
         int rc = transport_r_read_sql(&s->r, &sql);
-        if (rc == 0) {
+        if (rc == NO) {
             // EOF
             return OK;
         }
-        if (rc < 0) {
+        if (rc == ERR) {
             sm_set_err(s, "transport reader failed");
             free(sql);
             return ERR;
@@ -67,13 +67,13 @@ int session_run(SessionManager *s) {
         char *payload = NULL;
         size_t payload_len = 0;
 
-        if (serializer_qr_to_jsonrpc(qr, &payload, &payload_len) != 1 || !payload) {
+        if (serializer_qr_to_jsonrpc(qr, &payload, &payload_len) != OK || !payload) {
             qr_destroy(qr);
             sm_set_err(s, "serializer failed");
             return ERR;
         }
 
-        if (transport_w_write(&s->w, payload, payload_len) != 1) {
+        if (transport_w_write(&s->w, payload, payload_len) != OK) {
             free(payload);
             qr_destroy(qr);
             sm_set_err(s, "transport writer failed");

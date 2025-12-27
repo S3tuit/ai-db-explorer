@@ -5,9 +5,10 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Returns 1 if 'row' and 'col' form a valid index to access cells of 'qr'. */
+/* Returns YES if 'row' and 'col' form a valid index to access cells of 'qr'. */
 static inline int idx_ok(const QueryResult *qr, uint32_t row, uint32_t col) {
-    return qr && qr->cols && qr->cells && row < qr->nrows && col < qr->ncols;
+    return (qr && qr->cols && qr->cells && row < qr->nrows && col < qr->ncols)
+        ? YES : NO;
 }
 
 /* Returns a pointer to a duplicated value of 's' of at most 'cap' bytes or
@@ -111,13 +112,13 @@ void qr_destroy(QueryResult *qr) {
 
 int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
         const char *type) {
-    if (!qr) return 0;
+    if (!qr) return ERR;
 
     // out-of-bounds
-    if (!qr->cols || col >= qr->ncols) return -1;
+    if (!qr->cols || col >= qr->ncols) return ERR;
 
     // name is required, only type can be NULL
-    if (!name) return -1;
+    if (!name) return ERR;
 
     // we must not change 'name' and 'type' because qr should outlive them
     char *new_name = dup_or_null(name);
@@ -131,7 +132,7 @@ int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
 
     qr->cols[col].name = new_name;
     qr->cols[col].type = new_type;
-    return 1;
+    return OK;
 }
 
 const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col) {
@@ -146,8 +147,8 @@ const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col) {
 
 int qr_set_cell_capped(QueryResult *qr, uint32_t row, uint32_t col,
                         const char *value, uint32_t cap) {
-    if (!qr) return 0;
-    if (!idx_ok(qr, row, col)) return -1;
+    if (!qr) return ERR;
+    if (!idx_ok(qr, row, col)) return ERR;
 
     size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
 
@@ -157,12 +158,12 @@ int qr_set_cell_capped(QueryResult *qr, uint32_t row, uint32_t col,
     // value may be NULL and it's ok to store NULL, it means SQL NULL
     char *copy = dupn_or_null(value, (size_t)cap);
     qr->cells[idx] = copy;
-    return 1;
+    return OK;
 }
 
 int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value) {
-    if (!qr) return 0;
-    if (!idx_ok(qr, row, col)) return -1;
+    if (!qr) return ERR;
+    if (!idx_ok(qr, row, col)) return ERR;
 
     size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
 
@@ -172,7 +173,7 @@ int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value) 
     // value may be NULL and it's ok to store NULL, it means SQL NULL
     char *copy = dup_or_null(value);
     qr->cells[idx] = copy;
-    return 1;
+    return OK;
 }
 
 const char *qr_get_cell(const QueryResult *qr, uint32_t row, uint32_t col) {
@@ -182,8 +183,7 @@ const char *qr_get_cell(const QueryResult *qr, uint32_t row, uint32_t col) {
 }
 
 int qr_is_null(const QueryResult *qr, uint32_t row, uint32_t col) {
-    if (!idx_ok(qr, row, col)) return -1;
+    if (!idx_ok(qr, row, col)) return ERR;
     size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
-    return (qr->cells[idx] == NULL) ? 1 : 0;
+    return (qr->cells[idx] == NULL) ? YES : NO;
 }
-

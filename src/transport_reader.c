@@ -1,4 +1,5 @@
 #include "transport_reader.h"
+#include "utils.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -8,24 +9,23 @@
  * If the current 'cap' of the buffer is too small, it gets reallocated. 
  *
  * Returns:
- *  1: success, more than one byte appended.
- *  0: 0 bytes appended. 
- * -1: realloc error. */
+ *  OK: success.
+ *  ERR: realloc error. */
 static int buf_append(char **buf, size_t *len, size_t *cap, const char *src,
         size_t n) {
-    if (n == 0) return 0;
+    if (n == 0) return OK;
     if (*cap < *len + n + 1) {
         size_t newcap = (*cap == 0) ? 1024 : *cap;
         while (newcap < *len + n + 1) newcap *= 2;
         char *p = (char *)realloc(*buf, newcap);
-        if (!p) return -1;
+        if (!p) return ERR;
         *buf = p;
         *cap = newcap;
     }
     memcpy(*buf + *len, src, n);
     *len += n;
     (*buf)[*len] = '\0';
-    return 1;
+    return OK;
 }
 
 /* Deletes 'n' byte from the stash of 'r'. */
@@ -101,18 +101,18 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
                 free(line); // malloc'd by getline
                 if (acc_len == 0) {
                     if (acc) free(acc);
-                    return 0;
+                    return NO;
                 }
                 // only return if we saw terminator before EOF
                 if (terminator_semicolon_idx > -1) {
                     strip_after_semicolon(acc);
                     *out_sql = acc;
-                    return 1;
+                    return YES;
                 }
                 // incomplete statement at EOF
                 free(acc);
                 // TODO: custom error codes for portability
-                return -1;
+                return ERR;
             }
             // move line into stash so we use one codepath
             r->stash = line;
@@ -135,18 +135,18 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
                 if (c == quote_inside) {
                     // double quote is treated as escaped
                     if (i + 1 < src_len && src[i + 1] == quote_inside) {
-                        if (!buf_append(&acc, &acc_len, &acc_cap, src + i, 2)) {
+                        if (buf_append(&acc, &acc_len, &acc_cap, src + i, 2) != OK) {
                             free(acc);
-                            return -1;
+                            return ERR;
                         }
                         i += 2;
                         continue;
                     }
                     quote_inside = 0;
                 }
-                if (!buf_append(&acc, &acc_len, &acc_cap, &c, 1)) {
+                if (buf_append(&acc, &acc_len, &acc_cap, &c, 1) != OK) {
                     free(acc);
-                    return -1;
+                    return ERR;
                 }
                 i++;
                 continue;
@@ -155,9 +155,9 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
             // outside quotes, entering quotes?
             if (c == '\'' || c == '\"') {
                 quote_inside = c;
-                if (!buf_append(&acc, &acc_len, &acc_cap, &c, 1)) {
+                if (buf_append(&acc, &acc_len, &acc_cap, &c, 1) != OK) {
                     free(acc);
-                    return -1;
+                    return ERR;
                 }
                 i++;
                 continue;
@@ -165,9 +165,9 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
 
             // terminator detected outside any quotes
             if (c == ';') {
-                if (!buf_append(&acc, &acc_len, &acc_cap, &c, 1)) {
+                if (buf_append(&acc, &acc_len, &acc_cap, &c, 1) != OK) {
                     free(acc);
-                    return -1;
+                    return ERR;
                 }
                 terminator_semicolon_idx = acc_len - 1;
                 i++;
@@ -175,9 +175,9 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
             }
 
             // normal char
-            if (!buf_append(&acc, &acc_len, &acc_cap, &c, 1)) {
+            if (buf_append(&acc, &acc_len, &acc_cap, &c, 1) != OK) {
                 free(acc);
-                return -1;
+                return ERR;
             }
             i++;
         }
@@ -192,7 +192,7 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
             if ((size_t)terminator_semicolon_idx > acc_len) {
                 fprintf(stderr, "Semicolon terminator out-of-bouds.");
                 free(acc);
-                return -1;
+                return ERR;
             }
 
             // put '\0' after the terminator ';' so we ignore everything after
@@ -200,9 +200,9 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
 
             // we may be at the end of the accumulator
             if ((size_t)terminator_semicolon_idx + 1 == acc_len) {
-                if (!buf_append(&acc, &acc_len, &acc_cap, "\0", 1)) {
+                if (buf_append(&acc, &acc_len, &acc_cap, "\0", 1) != OK) {
                     free(acc);
-                    return -1;
+                    return ERR;
                 }
             } else {
                 acc[terminator_semicolon_idx + 1] = '\0';
@@ -210,7 +210,7 @@ int transport_r_read_sql(TransportReader *r, char **out_sql) {
 
             strip_after_semicolon(acc);
             *out_sql = acc;
-            return 1;
+            return YES;
         }
 
         // continue the loop and read more input

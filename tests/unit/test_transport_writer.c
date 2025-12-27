@@ -19,7 +19,7 @@ static void test_write_basic_frame(void) {
   size_t n = strlen(payload);
 
   int rc = transport_w_write(&w, payload, n);
-  ASSERT_TRUE(rc == 1);
+  ASSERT_TRUE(rc == OK);
 
   fclose(out);
 
@@ -50,7 +50,7 @@ static void test_write_zero_bytes_writes_nothing(void) {
   transport_w_init(&w, out);
 
   int rc = transport_w_write(&w, "IGNORED", 0);
-  ASSERT_TRUE(rc == 0);
+  ASSERT_TRUE(rc == OK);
 
   fclose(out);
 
@@ -72,7 +72,7 @@ static void test_write_null_bytes_with_nonzero_len_is_error(void) {
   transport_w_init(&w, out);
 
   int rc = transport_w_write(&w, NULL, 5);
-  ASSERT_TRUE(rc == -1);
+  ASSERT_TRUE(rc == ERR);
 
   fclose(out);
 
@@ -93,7 +93,7 @@ static void test_write_allows_null_bytes_if_len_zero(void) {
   transport_w_init(&w, out);
 
   int rc = transport_w_write(&w, NULL, 0);
-  ASSERT_TRUE(rc == 0);
+  ASSERT_TRUE(rc == OK);
 
   fclose(out);
   ASSERT_TRUE(out_len == 0);

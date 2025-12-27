@@ -42,14 +42,12 @@ static void serialize_jsonrpc_impl(
         const char *nm = col_names ? col_names[c] : NULL;
         const char *tp = col_types ? col_types[c] : NULL;
 
-        /* assumes that qr_set_col returns:
-           1 set, 0 if name AND type are NULL, -1 on error */
-        int rc = qr_set_col(qr, c, nm, tp);
-        if (nm == NULL && tp == NULL) {
-            ASSERT_TRUE_AT(rc == 0, file, line);
-        } else {
-            ASSERT_TRUE_AT(rc == 1, file, line);
+        if (!nm) {
+            ASSERT_TRUE_AT(tp == NULL, file, line);
+            continue;
         }
+        int rc = qr_set_col(qr, c, nm, tp);
+        ASSERT_TRUE_AT(rc == OK, file, line);
     }
 
     /* set cells */
@@ -58,7 +56,7 @@ static void serialize_jsonrpc_impl(
             size_t idx = (size_t)r * (size_t)ncols + (size_t)c;
             const char *val = cells ? cells[idx] : NULL;
             int rc = qr_set_cell(qr, r, c, val);
-            ASSERT_TRUE_AT(rc == 1, file, line);
+            ASSERT_TRUE_AT(rc == OK, file, line);
         }
     }
 
@@ -66,7 +64,7 @@ static void serialize_jsonrpc_impl(
     size_t json_len = 0;
     int rc = serializer_qr_to_jsonrpc(qr, &json, &json_len);
 
-    ASSERT_TRUE_AT(rc == 1, file, line);
+    ASSERT_TRUE_AT(rc == OK, file, line);
     assert_bytes_eq(json, json_len, expected_json, file, line);
 
     free(json);
@@ -125,14 +123,14 @@ static void test_serializer_null_qrcolumn_safe_defaults(void) {
     qr->exec_ms = 42;
 
     /* Set only column 0 */
-    ASSERT_TRUE(qr_set_col(qr, 0, "id", "int4") == 1);
+    ASSERT_TRUE(qr_set_col(qr, 0, "id", "int4") == OK);
 
     /* Column 1 is completely unset */
     ASSERT_TRUE(qr_get_col(qr, 1) == NULL);
 
     /* Set cells anyway (serializer must not rely on column metadata existing) */
-    ASSERT_TRUE(qr_set_cell(qr, 0, 0, "5") == 1);
-    ASSERT_TRUE(qr_set_cell(qr, 0, 1, "abc") == 1);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 0, "5") == OK);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 1, "abc") == OK);
 
     /* If qr_get_col returns NULL, serializer uses empty strings "" in output */
     const char *expected =
@@ -151,7 +149,7 @@ static void test_serializer_null_qrcolumn_safe_defaults(void) {
     size_t json_len = 0;
     int rc = serializer_qr_to_jsonrpc(qr, &json, &json_len);
 
-    ASSERT_TRUE(rc == 1);
+    ASSERT_TRUE(rc == OK);
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
 
     free(json);
@@ -225,7 +223,7 @@ static void test_serializer_error_result(void) {
     size_t json_len = 0;
     int rc = serializer_qr_to_jsonrpc(qr, &json, &json_len);
 
-    ASSERT_TRUE(rc == 1);
+    ASSERT_TRUE(rc == OK);
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
 
     free(json);

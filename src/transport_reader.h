@@ -28,9 +28,9 @@ void transport_r_clean(TransportReader *r);
  * iteration, which allows multiple statements on the same line.
  *
  * Returns:
- *  1 -> success, *out_sql is malloc'd.
- *  0 -> clean EOF with no pending statement.
- * -1 -> error (malloc/read). */
+ *  YES -> success, *out_sql is malloc'd.
+ *  NO  -> clean EOF with no pending statement.
+ *  ERR -> error (malloc/read). */
 int transport_r_read_sql(TransportReader *r, char **out_sql);
 
 #endif

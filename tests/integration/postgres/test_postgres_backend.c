@@ -112,7 +112,7 @@ static void test_select_null_cell(void) {
     ASSERT_TRUE(qr->nrows == 1);
 
     // Select NULL values should return NULL
-    ASSERT_TRUE(qr_is_null(qr, 0, 0) == 1);
+    ASSERT_TRUE(qr_is_null(qr, 0, 0) == YES);
     ASSERT_TRUE(qr_get_cell(qr, 0, 0) == NULL);
     ASSERT_STREQ(qr_get_cell(qr, 0, 1), "ok");
 
