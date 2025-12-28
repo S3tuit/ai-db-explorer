@@ -14,6 +14,7 @@ TCFLAGS := -Wall -Wextra -std=c11 -g -O1 $(INCLUDES)
 TCFLAGS += -D_POSIX_C_SOURCE=200809L
 TSAN    := -fsanitize=address,undefined -fno-omit-frame-pointer
 TLDFLAGS := $(TSAN) $(LDFLAGS) $(PIE_LDFLAGS)
+ASAN_RUN_OPTS ?= detect_leaks=1:abort_on_error=1
 
 # App sources (exclude main.c for reuse in tests)
 APP_MAIN := src/main.c
@@ -71,7 +72,7 @@ test-unit: $(UNIT_TEST_BINS)
 	@set -e; \
 	for t in $(UNIT_TEST_BINS); do \
 	  echo "==> $$t"; \
-	  ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 $$t; \
+	  ASAN_OPTIONS=$(ASAN_RUN_OPTS) $$t; \
 	done; \
 	echo "ALL TESTS PASSED"
 
@@ -89,7 +90,7 @@ test-postgres: $(INTEGRATION_TEST_BINS)
 	@set -e; \
 	for t in $(INTEGRATION_TEST_BINS); do \
 	  echo "==> $$t"; \
-	  ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 $$t; \
+	  ASAN_OPTIONS=$(ASAN_RUN_OPTS) $$t; \
 	done; \
 	echo "ALL TESTS PASSED"
 
