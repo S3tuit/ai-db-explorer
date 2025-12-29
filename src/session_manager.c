@@ -1,6 +1,7 @@
 #include "session_manager.h"
 #include "serializer.h"
 #include "query_result.h"
+#include "stdio_byte_channel.h"
 #include "utils.h"
 
 #include <stdlib.h>
@@ -22,7 +23,10 @@ int session_init(SessionManager *s, FILE *in, FILE *out, DbBackend *db) {
     s->next_id = 1;
     s->last_err[0] = '\0';
 
-    transport_r_init(&s->r, in);
+    ByteChannel *ch = stdio_bytechannel_create(in, NULL, 0);
+    if (!ch) return ERR;
+    s->r = query_reader_create(ch);
+    if (!s->r) return ERR;
     transport_w_init(&s->w, out);
 
     return OK;
@@ -34,7 +38,7 @@ int session_run(SessionManager *s) {
     for (;;) {
         char *sql = NULL;
 
-        int rc = transport_r_read_sql(&s->r, &sql);
+        int rc = query_reader_read_sql(s->r, &sql);
         if (rc == NO) {
             // EOF
             return OK;
@@ -87,7 +91,10 @@ int session_run(SessionManager *s) {
 
 void session_clean(SessionManager *s) {
     if (!s) return;
-    transport_r_clean(&s->r);
+    if (s->r) {
+        query_reader_destroy(s->r);
+        s->r = NULL;
+    }
     transport_w_clean(&s->w);
 }
 

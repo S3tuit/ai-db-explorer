@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "transport_reader.h"
+#include "query_reader.h"
 #include "transport_writer.h"
 #include "db_backend.h"
 
@@ -12,7 +12,7 @@
  * writes a given client. It also knows (but not owns) who is responsible to
  * execute queries for that client. */
 typedef struct SessionManager {
-    TransportReader r;
+    QueryReader *r;         // owned
     TransportWriter w;
     DbBackend *db;          // not owned (caller owns)
     uint32_t next_id;       // monotonically increasing request id

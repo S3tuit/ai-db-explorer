@@ -5,6 +5,115 @@
 #include "stdio_byte_channel.h"
 #include "test.h"
 
+// ByteChannel stub that intentionally returns short reads/writes.
+// Used to ensure bufio loops until it completes the requested length.
+typedef struct PartialByteChannelImpl {
+  const unsigned char *rbuf;
+  size_t rlen;
+  size_t rpos;
+  size_t read_chunk;
+  unsigned char *wbuf;
+  size_t wlen;
+  size_t wcap;
+  size_t write_chunk;
+  int read_calls;
+  int write_calls;
+} PartialByteChannelImpl;
+
+// Grow the write buffer as needed for capturing output.
+static void partial_ensure_cap(PartialByteChannelImpl *impl, size_t add) {
+  size_t need = impl->wlen + add;
+  if (need <= impl->wcap) return;
+  size_t newcap = impl->wcap ? impl->wcap : 64;
+  while (newcap < need) newcap *= 2;
+  impl->wbuf = (unsigned char *)xrealloc(impl->wbuf, newcap);
+  impl->wcap = newcap;
+}
+
+// Return at most read_chunk bytes to simulate partial reads.
+static ssize_t partial_read_some(ByteChannel *ch, void *buf, size_t cap) {
+  PartialByteChannelImpl *impl = (PartialByteChannelImpl *)ch->impl;
+  if (!impl || !buf) return -1;
+  if (cap == 0) return 0;
+  if (impl->rpos >= impl->rlen) return 0;
+
+  size_t remaining = impl->rlen - impl->rpos;
+  size_t n = remaining < cap ? remaining : cap;
+  if (impl->read_chunk > 0 && n > impl->read_chunk) n = impl->read_chunk;
+
+  memcpy(buf, impl->rbuf + impl->rpos, n);
+  impl->rpos += n;
+  impl->read_calls++;
+  return (ssize_t)n;
+}
+
+// Accept at most write_chunk bytes to simulate partial writes.
+static ssize_t partial_write_some(ByteChannel *ch, const void *buf, size_t len) {
+  PartialByteChannelImpl *impl = (PartialByteChannelImpl *)ch->impl;
+  if (!impl || !buf) return -1;
+  if (len == 0) return 0;
+
+  size_t n = len;
+  if (impl->write_chunk > 0 && n > impl->write_chunk) n = impl->write_chunk;
+  partial_ensure_cap(impl, n);
+  memcpy(impl->wbuf + impl->wlen, buf, n);
+  impl->wlen += n;
+  impl->write_calls++;
+  return (ssize_t)n;
+}
+
+// No-op flush to satisfy the vtable.
+static int partial_flush(ByteChannel *ch) {
+  (void)ch;
+  return OK;
+}
+
+// No-op shutdown; nothing to release.
+static int partial_shutdown_write(ByteChannel *ch) {
+  (void)ch;
+  return OK;
+}
+
+static BytePollable partial_get_pollable(const ByteChannel *ch) {
+  (void)ch;
+  return (BytePollable)-1;
+}
+
+static void partial_destroy(ByteChannel *ch) {
+  if (!ch) return;
+  PartialByteChannelImpl *impl = (PartialByteChannelImpl *)ch->impl;
+  if (impl) {
+    free(impl->wbuf);
+    free(impl);
+  }
+  free(ch);
+}
+
+static const ByteChannelVTable PARTIAL_VT = {
+  .read_some = partial_read_some,
+  .write_some = partial_write_some,
+  .flush = partial_flush,
+  .shutdown_write = partial_shutdown_write,
+  .get_pollable = partial_get_pollable,
+  .destroy = partial_destroy
+};
+
+// Create a partial channel; caller can inspect impl for call counts and output.
+static ByteChannel *partial_bytechannel_create(const unsigned char *rbuf, size_t rlen,
+                                               size_t read_chunk, size_t write_chunk,
+                                               PartialByteChannelImpl **out_impl) {
+  ByteChannel *ch = (ByteChannel *)xmalloc(sizeof(ByteChannel));
+  PartialByteChannelImpl *impl = (PartialByteChannelImpl *)xcalloc(1, sizeof(*impl));
+  impl->rbuf = rbuf;
+  impl->rlen = rlen;
+  impl->read_chunk = read_chunk;
+  impl->write_chunk = write_chunk;
+  ch->vt = &PARTIAL_VT;
+  ch->impl = impl;
+  if (out_impl) *out_impl = impl;
+  return ch;
+}
+
 static void test_bufreader_peek_find_and_read(void) {
   FILE *in = MEMFILE_IN("hello world");
   ByteChannel *ch = stdio_bytechannel_create(in, NULL, 0);
@@ -36,20 +145,37 @@ static void test_bufreader_peek_find_and_read(void) {
   fclose(in);
 }
 
-static void test_bufwriter_write_all(void) {
-  FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(NULL, out, 0);
+static void test_bufreader_partial_reads(void) {
+  const char *msg = "hello world";
+  PartialByteChannelImpl *impl = NULL;
+  ByteChannel *ch = partial_bytechannel_create((const unsigned char *)msg, 11, 2, 0, &impl);
+  BufReader *br = bufreader_create(ch);
+  ASSERT_TRUE(br != NULL);
+  ASSERT_TRUE(impl != NULL);
+
+  char buf[12];
+  ASSERT_TRUE(bufreader_read_n(br, buf, 11) == OK);
+  buf[11] = '\0';
+  ASSERT_TRUE(strcmp(buf, msg) == 0);
+  ASSERT_TRUE(impl->read_calls > 1);
+
+  bufreader_destroy(br);
+}
+
+static void test_bufwriter_partial_writes(void) {
+  const char *msg = "hello world";
+  PartialByteChannelImpl *impl = NULL;
+  ByteChannel *ch = partial_bytechannel_create(NULL, 0, 0, 2, &impl);
   BufWriter *bw = bufwriter_create(ch);
   ASSERT_TRUE(bw != NULL);
+  ASSERT_TRUE(impl != NULL);
 
-  ASSERT_TRUE(bufwriter_write_all(bw, "abc", 3) == OK);
+  ASSERT_TRUE(bufwriter_write_all(bw, msg, 11) == OK);
+  ASSERT_TRUE(impl->wlen == (size_t)11);
+  ASSERT_TRUE(memcmp(impl->wbuf, msg, 11) == 0);
+  ASSERT_TRUE(impl->write_calls > 1);
 
   bufwriter_destroy(bw);
-
-  char *res = read_all(out);
-  ASSERT_STREQ(res, "abc");
-  free(res);
-  fclose(out);
 }
 
 static void test_bufwriter_zero_len(void) {
@@ -70,7 +196,8 @@ static void test_bufwriter_zero_len(void) {
 
 int main(void) {
   test_bufreader_peek_find_and_read();
-  test_bufwriter_write_all();
+  test_bufreader_partial_reads();
+  test_bufwriter_partial_writes();
   test_bufwriter_zero_len();
 
   fprintf(stderr, "OK: test_bufio\n");

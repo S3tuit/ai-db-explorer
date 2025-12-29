@@ -10,8 +10,8 @@
  * - 'out' may be NULL if you only need read.
  *
  * Ownership:
- * - If close_on_destroy != 0: destroy()/close() will fclose() the streams.
- * - If close_on_destroy == 0: destroy()/close() will NOT fclose() them.
+ * - If close_on_destroy != 0: destroy() will fclose() the streams.
+ * - If close_on_destroy == 0: destroy() will NOT fclose() them.
  *
  * Note: If in == out, it will only fclose() once when owned.
  */

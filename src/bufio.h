@@ -32,9 +32,11 @@ void bufreader_destroy(BufReader *br);
 // Returns YES/NO/ERR, and sets EOF state if peer closes.
 int bufreader_ensure(BufReader *br, size_t need);
 
-// Returns pointer to contiguous available data and its length inside 'out_val'.
-// The returned pointer is valid until next ensure/read. Returns NULL if there's
-// nothing to peek.
+// Returns a pointer to available data buffered but not read and stores its
+// length inside 'out_val'. The returned pointer is valid until next
+// ensure/read. Returns NULL if there's nothing to peek.
+// NOTE: peek consider data already buffered, if this returns NULL it doesn't
+// mean it's EOF, call ensure for that.
 const uint8_t *bufreader_peek(const BufReader *br, size_t *out_avail);
 
 // Copies exactly 'n' bytes into 'dst', consuming them.
