@@ -24,6 +24,9 @@ typedef struct StrBuf {
     size_t cap;
 } StrBuf;
 
+// TODO: make this configurable via compile-time flags.
+#define STRBUF_MAX_BYTES (1u << 30)
+
 /* Adds 'n' bytes starting from 'src' to sb. */
 int sb_append_bytes(StrBuf *sb, const void *src, size_t n);
 

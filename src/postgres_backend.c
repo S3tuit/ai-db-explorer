@@ -11,6 +11,10 @@
 #include "safety_policy.h"
 #include "utils.h"
 
+enum {
+    PG_QUERY_MAX_BYTES = 8192
+};
+
 /* ------------------------------- internals ------------------------------- */
 
 typedef struct PgImpl {
@@ -237,6 +241,12 @@ static int pg_exec(DbBackend *db, uint32_t request_id, const char *sql,
     PgImpl *p = (PgImpl *)db->impl;
     if (!p->conn) {
         pg_set_err(p, "not connected");
+        goto fail;
+    }
+    
+    // even if this limit is version-dependent, it's a defensive check
+    if (strlen(sql) > PG_QUERY_MAX_BYTES) {
+        pg_set_err(p, "SQL exceeds 8192 bytes (libpq query buffer limit)");
         goto fail;
     }
     

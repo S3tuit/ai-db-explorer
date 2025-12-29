@@ -5,7 +5,8 @@
 #include <stdio.h>
 
 #include "query_reader.h"
-#include "transport_writer.h"
+#include "bufio.h"
+#include "frame_codec.h"
 #include "db_backend.h"
 
 /* This is the entity that owns the client-facing flow. It own who reads and
@@ -13,7 +14,7 @@
  * execute queries for that client. */
 typedef struct SessionManager {
     QueryReader *r;         // owned
-    TransportWriter w;
+    BufWriter *out_bw;      // owned
     DbBackend *db;          // not owned (caller owns)
     uint32_t next_id;       // monotonically increasing request id
     char last_err[256];     // last fatal error (best-effort)

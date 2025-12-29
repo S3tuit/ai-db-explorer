@@ -27,7 +27,19 @@ int session_init(SessionManager *s, FILE *in, FILE *out, DbBackend *db) {
     if (!ch) return ERR;
     s->r = query_reader_create(ch);
     if (!s->r) return ERR;
-    transport_w_init(&s->w, out);
+    ByteChannel *out_ch = stdio_bytechannel_create(NULL, out, 0);
+    if (!out_ch) {
+        query_reader_destroy(s->r);
+        s->r = NULL;
+        return ERR;
+    }
+    s->out_bw = bufwriter_create(out_ch);
+    if (!s->out_bw) {
+        bytech_destroy(out_ch);
+        query_reader_destroy(s->r);
+        s->r = NULL;
+        return ERR;
+    }
 
     return OK;
 }
@@ -77,7 +89,7 @@ int session_run(SessionManager *s) {
             return ERR;
         }
 
-        if (transport_w_write(&s->w, payload, payload_len) != OK) {
+        if (frame_write_cl(s->out_bw, payload, payload_len) != OK) {
             free(payload);
             qr_destroy(qr);
             sm_set_err(s, "transport writer failed");
@@ -95,7 +107,10 @@ void session_clean(SessionManager *s) {
         query_reader_destroy(s->r);
         s->r = NULL;
     }
-    transport_w_clean(&s->w);
+    if (s->out_bw) {
+        bufwriter_destroy(s->out_bw);
+        s->out_bw = NULL;
+    }
 }
 
 const char *session_last_error(const SessionManager *s) {

@@ -37,6 +37,7 @@ int main(void) {
     }
 
     int rc = session_run(&sm);
+    if (rc != OK) fprintf(stderr, "ERROR: %s\n", sm.last_err);
 
     session_clean(&sm);
     pg->vt->destroy(pg);

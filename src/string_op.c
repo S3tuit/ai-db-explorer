@@ -52,13 +52,13 @@ void sb_clean(StrBuf *sb) {
 }
 
 // TODO: think about the max size of the output of a QueryResult. Right now it 
-// may have 1k columns all of 10k char. And don't forget that an sql
-// query for libqp must be lower than 8k chars.
+// may have 1k columns all of 10k char.
 
 /* Makes sure 'sb' has enough space for 'add' more bytes. Returns OK on success,
  * ERR on bad input or overflow. */
 int sb_reserve(StrBuf *sb, size_t add) {
     if (!sb) return ERR;
+    if (add > STRBUF_MAX_BYTES) return ERR;
     // overflow
     if (add > SIZE_MAX - sb->len) return ERR;
 
@@ -66,6 +66,7 @@ int sb_reserve(StrBuf *sb, size_t add) {
     if (add == 0) return OK;
 
     size_t needed = sb->len + add;
+    if (needed > STRBUF_MAX_BYTES) return ERR;
     if (needed <= sb->cap) return OK;
 
     size_t newcap = sb->cap ? sb->cap : 256;
@@ -92,4 +93,3 @@ int sb_append_bytes(StrBuf *sb, const void *src, size_t n) {
     sb->len += n;
     return OK;
 }
-

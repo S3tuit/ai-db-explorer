@@ -60,10 +60,25 @@ static void test_sb_append_bytes(void) {
   ASSERT_TRUE(sb.cap == 0);
 }
 
+static void test_sb_append_hard_limit(void) {
+  StrBuf sb = {0};
+  char one = 'x';
+
+  ASSERT_TRUE(sb_append_bytes(&sb, &one, STRBUF_MAX_BYTES + 1) == ERR);
+
+  sb.data = (char *)xmalloc(1);
+  sb.len = STRBUF_MAX_BYTES;
+  sb.cap = STRBUF_MAX_BYTES;
+  ASSERT_TRUE(sb_append_bytes(&sb, &one, 1) == ERR);
+
+  sb_clean(&sb);
+}
+
 int main(void) {
   test_dup_functions_basic();
   test_dup_pretty();
   test_sb_append_bytes();
+  test_sb_append_hard_limit();
 
   fprintf(stderr, "OK: test_string_op\n");
   return 0;
