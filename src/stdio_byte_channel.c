@@ -23,6 +23,20 @@ static ssize_t stdio_read_some(ByteChannel *ch, void *buf, size_t cap) {
     if (!impl->in) return -1;
     if (cap == 0) return 0;
 
+#if defined(__unix__) || defined(__APPLE__)
+    // it's better to use read because we don't want any buffering. We want to
+    // read everything the user wrote when this functio is called
+    int fd = fileno(impl->in);
+    if (fd < 0) return -1;
+    for (;;) {
+        ssize_t n = read(fd, buf, cap);
+        if (n >= 0) return n;
+        // PTY slave returns EIO on hangup; treat it as EOF to match file/pipe
+        if (errno == EIO) return 0;
+        if (errno == EINTR) continue;
+        return -1;
+    }
+#else
     size_t n = fread(buf, 1, cap, impl->in);
 
     if (n > 0) return (ssize_t)n;
@@ -34,6 +48,7 @@ static ssize_t stdio_read_some(ByteChannel *ch, void *buf, size_t cap) {
 
     // fread returned 0, treat as EOF
     return 0;
+#endif
 }
 
 static ssize_t stdio_write_some(ByteChannel *ch, const void *buf, size_t len) {

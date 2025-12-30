@@ -25,6 +25,9 @@ static void read_one_impl(const char *input, const char *expected, const char *f
   ASSERT_TRUE_AT(res != NULL, file, line);
   ASSERT_STREQ_AT(res, expected, file, line);
 
+  char *ignored;
+  ASSERT_TRUE_AT(query_reader_read_sql(r, &ignored) == NO, file, line);
+
   free(res);
   query_reader_destroy(r);
   fclose(f);
