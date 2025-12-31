@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "query_reader.h"
+#include "command_reader.h"
 #include "bufio.h"
 #include "frame_codec.h"
 #include "db_backend.h"
@@ -13,7 +13,7 @@
  * writes a given client. It also knows (but not owns) who is responsible to
  * execute queries for that client. */
 typedef struct SessionManager {
-    QueryReader *r;         // owned
+    CommandReader *r;         // owned
     BufWriter *out_bw;      // owned
     DbBackend *db;          // not owned (caller owns)
     uint32_t next_id;       // monotonically increasing request id

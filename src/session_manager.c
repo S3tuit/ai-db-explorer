@@ -1,5 +1,5 @@
 #include "session_manager.h"
-#include "serializer.h"
+#include "json_codec.h"
 #include "query_result.h"
 #include "stdio_byte_channel.h"
 #include "utils.h"
@@ -25,18 +25,18 @@ int session_init(SessionManager *s, FILE *in, FILE *out, DbBackend *db) {
 
     ByteChannel *ch = stdio_bytechannel_create(in, NULL, 0);
     if (!ch) return ERR;
-    s->r = query_reader_create(ch);
+    s->r = command_reader_create(ch);
     if (!s->r) return ERR;
     ByteChannel *out_ch = stdio_bytechannel_create(NULL, out, 0);
     if (!out_ch) {
-        query_reader_destroy(s->r);
+        command_reader_destroy(s->r);
         s->r = NULL;
         return ERR;
     }
     s->out_bw = bufwriter_create(out_ch);
     if (!s->out_bw) {
         bytech_destroy(out_ch);
-        query_reader_destroy(s->r);
+        command_reader_destroy(s->r);
         s->r = NULL;
         return ERR;
     }
@@ -48,17 +48,49 @@ int session_run(SessionManager *s) {
     if (!s || !s->db || !s->db->vt) return ERR;
 
     for (;;) {
-        char *sql = NULL;
+        Command *cmd = NULL;
 
-        int rc = query_reader_read_sql(s->r, &sql);
+        int rc = command_reader_read_cmd(s->r, &cmd);
         if (rc == NO) {
             // EOF
             return OK;
         }
         if (rc == ERR) {
             sm_set_err(s, "transport reader failed");
-            free(sql);
+            command_destroy(cmd);
             return ERR;
+        }
+
+        if (cmd->type == CMD_META) {
+            uint32_t id = s->next_id++;
+            QueryResult *qr = qr_create_err(id, "meta commands not supported");
+            if (!qr) {
+                sm_set_err(s, "OOM creating meta command error");
+                command_destroy(cmd);
+                return ERR;
+            }
+
+            char *payload = NULL;
+            size_t payload_len = 0;
+            if (qr_to_jsonrpc(qr, &payload, &payload_len) != OK || !payload) {
+                qr_destroy(qr);
+                command_destroy(cmd);
+                sm_set_err(s, "json encoding failed");
+                return ERR;
+            }
+
+            if (frame_write_cl(s->out_bw, payload, payload_len) != OK) {
+                free(payload);
+                qr_destroy(qr);
+                command_destroy(cmd);
+                sm_set_err(s, "transport writer failed");
+                return ERR;
+            }
+
+            free(payload);
+            qr_destroy(qr);
+            command_destroy(cmd);
+            continue;
         }
 
         uint32_t id = s->next_id++;
@@ -66,9 +98,8 @@ int session_run(SessionManager *s) {
 
         // Backend contract: returns OK and always produces a QueryResult.
         // It returns ERR only on catastrophic errors. */
-        int exec_rc = s->db->vt->exec(s->db, id, sql, &qr);
-        free(sql);
-        sql = NULL;
+        int exec_rc = s->db->vt->exec(s->db, id, cmd->raw_sql, &qr);
+        command_destroy(cmd);
 
         if (exec_rc != OK || !qr) {
             // catastrophic backend failure
@@ -83,9 +114,9 @@ int session_run(SessionManager *s) {
         char *payload = NULL;
         size_t payload_len = 0;
 
-        if (serializer_qr_to_jsonrpc(qr, &payload, &payload_len) != OK || !payload) {
+        if (qr_to_jsonrpc(qr, &payload, &payload_len) != OK || !payload) {
             qr_destroy(qr);
-            sm_set_err(s, "serializer failed");
+            sm_set_err(s, "json encoding failed");
             return ERR;
         }
 
@@ -104,7 +135,7 @@ int session_run(SessionManager *s) {
 void session_clean(SessionManager *s) {
     if (!s) return;
     if (s->r) {
-        query_reader_destroy(s->r);
+        command_reader_destroy(s->r);
         s->r = NULL;
     }
     if (s->out_bw) {

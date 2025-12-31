@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "query_result.h"
-#include "serializer.h"
+#include "json_codec.h"
 #include "test.h"
 
 /* -------------------------------- helpers -------------------------------- */
@@ -19,8 +19,8 @@ static void assert_bytes_eq(const char *got, size_t got_len,
     ASSERT_TRUE_AT(memcmp(got, expected, exp_len) == 0, file, line);
 }
 
-/* builds a QueryResult, fills cols/cells, serializes, compares payload. */
-static void serialize_jsonrpc_impl(
+/* builds a QueryResult, fills cols/cells, encode into JSON, compares payload. */
+static void encode_jsonrpc_impl(
         uint32_t id,
         uint32_t ncols,
         uint32_t nrows,
@@ -62,7 +62,7 @@ static void serialize_jsonrpc_impl(
 
     char *json = NULL;
     size_t json_len = 0;
-    int rc = serializer_qr_to_jsonrpc(qr, &json, &json_len);
+    int rc = qr_to_jsonrpc(qr, &json, &json_len);
 
     ASSERT_TRUE_AT(rc == OK, file, line);
     assert_bytes_eq(json, json_len, expected_json, file, line);
@@ -71,12 +71,12 @@ static void serialize_jsonrpc_impl(
     qr_destroy(qr);
 }
 
-#define SERIALIZE_JSONRPC(...) serialize_jsonrpc_impl(__VA_ARGS__, __FILE__, __LINE__)
+#define ENCODE_JSONRPC(...) encode_jsonrpc_impl(__VA_ARGS__, __FILE__, __LINE__)
 
 
 /* ------------------------------ tests ------------------------------ */
 
-static void test_serializer_basic_rows_and_nulls(void) {
+static void test_json_basic_rows_and_nulls(void) {
     const char *col_names[] = {"id", "name", "amount"};
     const char *col_types[] = {"int4", "text", NULL}; /* amount -> "unknown" */
 
@@ -102,7 +102,7 @@ static void test_serializer_basic_rows_and_nulls(void) {
           "\"truncated\":true"
         "}}";
 
-    SERIALIZE_JSONRPC(
+    ENCODE_JSONRPC(
         /* id */ 7,
         /* ncols */ 3,
         /* nrows */ 2,
@@ -115,7 +115,7 @@ static void test_serializer_basic_rows_and_nulls(void) {
     );
 }
 
-static void test_serializer_null_qrcolumn_safe_defaults(void) {
+static void test_json_null_qrcolumn_safe_defaults(void) {
     /* 2 columns, but we only set column 0 */
     QueryResult *qr = qr_create_ok(100, 2, 1, 0);
     ASSERT_TRUE(qr != NULL);
@@ -128,11 +128,11 @@ static void test_serializer_null_qrcolumn_safe_defaults(void) {
     /* Column 1 is completely unset */
     ASSERT_TRUE(qr_get_col(qr, 1) == NULL);
 
-    /* Set cells anyway (serializer must not rely on column metadata existing) */
+    /* Set cells anyway (json must not rely on column metadata existing) */
     ASSERT_TRUE(qr_set_cell(qr, 0, 0, "5") == OK);
     ASSERT_TRUE(qr_set_cell(qr, 0, 1, "abc") == OK);
 
-    /* If qr_get_col returns NULL, serializer uses empty strings "" in output */
+    /* If qr_get_col returns NULL, json uses empty strings "" in output */
     const char *expected =
         "{\"jsonrpc\":\"2.0\",\"id\":100,\"result\":{"
           "\"exec_ms\":42,"
@@ -147,7 +147,7 @@ static void test_serializer_null_qrcolumn_safe_defaults(void) {
 
     char *json = NULL;
     size_t json_len = 0;
-    int rc = serializer_qr_to_jsonrpc(qr, &json, &json_len);
+    int rc = qr_to_jsonrpc(qr, &json, &json_len);
 
     ASSERT_TRUE(rc == OK);
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
@@ -156,7 +156,7 @@ static void test_serializer_null_qrcolumn_safe_defaults(void) {
     qr_destroy(qr);
 }
 
-static void test_serializer_escapes_strings(void) {
+static void test_json_escapes_strings(void) {
     const char *col_names[] = {"txt"};
     const char *col_types[] = {"text"};
 
@@ -185,14 +185,14 @@ static void test_serializer_escapes_strings(void) {
           "\"truncated\":false"
         "}}";
 
-    SERIALIZE_JSONRPC(
+    ENCODE_JSONRPC(
         9, 1, 1, 5, 0,
         col_names, col_types, cells,
         expected
     );
 }
 
-static void test_serializer_empty_result(void) {
+static void test_json_empty_result(void) {
     /* 0 cols, 0 rows */
     const char *expected =
         "{\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{"
@@ -203,14 +203,14 @@ static void test_serializer_empty_result(void) {
           "\"truncated\":false"
         "}}";
 
-    SERIALIZE_JSONRPC(
+    ENCODE_JSONRPC(
         42, 0, 0, 1, 0,
         NULL, NULL, NULL,
         expected
     );
 }
 
-static void test_serializer_error_result(void) {
+static void test_json_error_result(void) {
     QueryResult *qr = qr_create_err(7, "bad \"x\"");
     ASSERT_TRUE(qr != NULL);
 
@@ -221,7 +221,7 @@ static void test_serializer_error_result(void) {
 
     char *json = NULL;
     size_t json_len = 0;
-    int rc = serializer_qr_to_jsonrpc(qr, &json, &json_len);
+    int rc = qr_to_jsonrpc(qr, &json, &json_len);
 
     ASSERT_TRUE(rc == OK);
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
@@ -230,29 +230,21 @@ static void test_serializer_error_result(void) {
     qr_destroy(qr);
 }
 
-static void test_serializer_method_to_jsonrpc(void) {
+static void test_command_to_jsonrpc_sql(void) {
     char *json = NULL;
     size_t json_len = 0;
 
-    int rc = serializer_method_to_jsonrpc(
-        "exec",
-        1,
-        &json,
-        &json_len,
-        2,
-        "sql",
-        "SELECT 1;",
-        "second_key",
-        "second_value");
+    Command cmd = {
+        .type = CMD_SQL,
+        .raw_sql = "SELECT 1;"
+    };
+    int rc = command_to_jsonrpc(&cmd, 1, &json, &json_len);
 
     ASSERT_TRUE(rc == OK);
 
-    // the second key should have an empty string as value since we haven't
-    // provided it
     const char *expected =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{"
-          "\"sql\":\"SELECT 1;\","
-          "\"second_key\":\"second_value\""
+          "\"sql\":\"SELECT 1;\""
         "}}";
 
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
@@ -260,21 +252,44 @@ static void test_serializer_method_to_jsonrpc(void) {
     free(json);
 }
 
-static void test_serializer_method_to_jsonrpc_no_params(void) {
+static void test_command_to_jsonrpc_meta(void) {
     char *json = NULL;
     size_t json_len = 0;
 
-    int rc = serializer_method_to_jsonrpc(
-        "exec",
-        1,
-        &json,
-        &json_len,
-        0);
+    Command cmd = {
+        .type = CMD_META,
+        .cmd = "connect",
+        .args = "name=\"main\""
+    };
+    int rc = command_to_jsonrpc(&cmd, 1, &json, &json_len);
 
     ASSERT_TRUE(rc == OK);
 
     const char *expected =
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{}}";
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"connect\",\"params\":{"
+          "\"raw\":\"name=\\\"main\\\"\""
+        "}}";
+
+    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+    free(json);
+}
+
+static void test_command_to_jsonrpc_meta_no_params(void) {
+    char *json = NULL;
+    size_t json_len = 0;
+
+    Command cmd = {
+        .type = CMD_META,
+        .cmd = "status",
+        .args = NULL
+    };
+    int rc = command_to_jsonrpc(&cmd, 2, &json, &json_len);
+
+    ASSERT_TRUE(rc == OK);
+
+    const char *expected =
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"status\"}";
 
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
 
@@ -282,14 +297,15 @@ static void test_serializer_method_to_jsonrpc_no_params(void) {
 }
 
 int main (void) {
-    test_serializer_basic_rows_and_nulls();
-    test_serializer_null_qrcolumn_safe_defaults();
-    test_serializer_escapes_strings();
-    test_serializer_empty_result();
-    test_serializer_error_result();
-    test_serializer_method_to_jsonrpc();
-    test_serializer_method_to_jsonrpc_no_params();
+    test_json_basic_rows_and_nulls();
+    test_json_null_qrcolumn_safe_defaults();
+    test_json_escapes_strings();
+    test_json_empty_result();
+    test_json_error_result();
+    test_command_to_jsonrpc_sql();
+    test_command_to_jsonrpc_meta();
+    test_command_to_jsonrpc_meta_no_params();
 
-    fprintf(stderr, "OK: test_serializer\n");
+    fprintf(stderr, "OK: test_json\n");
     return(0);
 }

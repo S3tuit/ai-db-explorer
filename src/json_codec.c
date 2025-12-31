@@ -1,4 +1,4 @@
-#include "serializer.h"
+#include "json_codec.h"
 #include "utils.h"
 #include "string_op.h"
 
@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-/* ------------------------------- serializer ------------------------------ */
+/* -------------------------------- encoding ------------------------------- */
 
 /*
  * Escapes 's' into JSON string content (WITHOUT surrounding quotes) and
@@ -78,7 +78,7 @@ static int sb_append_json_escaped(StrBuf *sb, const char *s, size_t len) {
  *  - %u appends uint32_t
  *  - %U appends uint64_t
  */
-static int serializer_append(StrBuf *sb, const char *fmt, ...) {
+static int json_append(StrBuf *sb, const char *fmt, ...) {
     if (!sb || !fmt) return ERR;
 
     va_list ap;
@@ -157,7 +157,7 @@ static inline void safe_mul_u32(uint32_t a, uint32_t b, uint64_t *out) {
     *out = (uint64_t)a * (uint64_t)b;
 }
 
-static int serializer_qr_ok(StrBuf *sb, const QueryResult *qr) {
+static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
     // nrows*ncols should fit in addressable range of cells
     uint64_t cell_count_u64 = 0;
     safe_mul_u32(qr->nrows, qr->ncols, &cell_count_u64);
@@ -167,14 +167,14 @@ static int serializer_qr_ok(StrBuf *sb, const QueryResult *qr) {
     if (qr->ncols > 0 && !qr->cols) return ERR;
     if (cell_count_u64 > 0 && !qr->cells) return ERR;
 
-    if (serializer_append(sb,
+    if (json_append(sb,
             "\"result\":{\"exec_ms\":%U", qr->exec_ms) != OK) return ERR;
 
     // columns
-    if (serializer_append(sb, ",\"columns\":[") != OK) return ERR;
+    if (json_append(sb, ",\"columns\":[") != OK) return ERR;
     for (uint32_t c = 0; c < qr->ncols; ++c) {
         if (c > 0) {
-            if (serializer_append(sb, ",") != OK) return ERR;
+            if (json_append(sb, ",") != OK) return ERR;
         }
 
         const QRColumn *col = qr_get_col((QueryResult *)qr, c);
@@ -186,42 +186,42 @@ static int serializer_qr_ok(StrBuf *sb, const QueryResult *qr) {
             type = col->type ? col->type : "";
         }
 
-        if (serializer_append(sb,
+        if (json_append(sb,
                 "{\"name\":\"%s\",\"type\":\"%s\"}",
                 name, type) != OK) return ERR;
     }
-    if (serializer_append(sb, "]") != OK) return ERR;
+    if (json_append(sb, "]") != OK) return ERR;
 
     // rows
-    if (serializer_append(sb, ",\"rows\":[") != OK) return ERR;
+    if (json_append(sb, ",\"rows\":[") != OK) return ERR;
 
     for (uint32_t r = 0; r < qr->nrows; ++r) {
         if (r > 0) {
-            if (serializer_append(sb, ",") != OK) return ERR;
+            if (json_append(sb, ",") != OK) return ERR;
         }
-        if (serializer_append(sb, "[") != OK) return ERR;
+        if (json_append(sb, "[") != OK) return ERR;
 
         for (uint32_t c = 0; c < qr->ncols; ++c) {
             if (c > 0) {
-                if (serializer_append(sb, ",") != OK) return ERR;
+                if (json_append(sb, ",") != OK) return ERR;
             }
 
             const char *cell = qr_get_cell(qr, r, c);
             if (!cell) {
-                if (serializer_append(sb, "null") != OK) return ERR;
+                if (json_append(sb, "null") != OK) return ERR;
             } else {
                 /* quote + escaped string content + quote */
-                if (serializer_append(sb, "\"%s\"", cell) != OK) return ERR;
+                if (json_append(sb, "\"%s\"", cell) != OK) return ERR;
             }
         }
 
-        if (serializer_append(sb, "]") != OK) return ERR;
+        if (json_append(sb, "]") != OK) return ERR;
     }
 
-    if (serializer_append(sb, "]") != OK) return ERR;
+    if (json_append(sb, "]") != OK) return ERR;
 
     // rowcount + truncated
-    if (serializer_append(sb,
+    if (json_append(sb,
             ",\"rowcount\":%u,\"truncated\":%s"
             "}}",
             qr->nrows, qr->truncated ? "true" : "false") != OK) return ERR;
@@ -229,14 +229,14 @@ static int serializer_qr_ok(StrBuf *sb, const QueryResult *qr) {
     return OK;
 }
 
-static int serializer_qr_err(StrBuf *sb, const QueryResult *qr) {
+static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
     const char *msg = qr->err_msg ? qr->err_msg : "";
-    if (serializer_append(sb,
+    if (json_append(sb,
                 "\"error\":{\"message\":\"%s\"}}", msg) != OK) return ERR;
     return OK;
 }
 
-int serializer_qr_to_jsonrpc(const QueryResult *qr, char **out_json,
+int qr_to_jsonrpc(const QueryResult *qr, char **out_json,
                                 size_t *out_len) {
     if (!out_json || !out_len) return ERR;
     *out_json = NULL;
@@ -247,14 +247,14 @@ int serializer_qr_to_jsonrpc(const QueryResult *qr, char **out_json,
     StrBuf sb = {0};
 
     // begin JSON-RPC envelope
-    if (serializer_append(&sb,
+    if (json_append(&sb,
             "{\"jsonrpc\":\"2.0\",\"id\":%u,",
             qr->id) != OK) goto err;
 
     if (qr->status == QR_ERROR) {
-        if (serializer_qr_err(&sb, qr) != OK) goto err;
+        if (json_qr_err(&sb, qr) != OK) goto err;
     } else {
-        if (serializer_qr_ok(&sb, qr) != OK) goto err;
+        if (json_qr_ok(&sb, qr) != OK) goto err;
     }
 
     // materialize output (exact size; not NUL-terminated)
@@ -273,45 +273,36 @@ err:
     return ERR;
 }
 
-int serializer_method_to_jsonrpc(const char *method, uint32_t id,
-        char **out_json, size_t *out_len, uint32_t key_no, ...) {
+int command_to_jsonrpc(const Command *cmd, uint32_t id,
+        char **out_json, size_t *out_len) {
 
-    if (!out_json || !out_len || !method) return ERR;
+    if (!out_json || !out_len || !cmd) return ERR;
     *out_json = NULL;
     *out_len  = 0;
 
     StrBuf sb = {0};
 
-    // begin JSON-RPC envelope
-    if (serializer_append(&sb,
-            "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"%s\",\"params\":{",
-            id, method) != OK) goto err;
-
-    va_list ap;
-    va_start(ap, key_no);
-
-    for (uint32_t i = 0; i < key_no; i++) {
-        const char *key = va_arg(ap, const char *);
-        const char *value = va_arg(ap, const char *);
-
-        if (!key || !value) {
-            goto err;
+    if (cmd->type == CMD_SQL) {
+        if (!cmd->raw_sql) goto err;
+        if (json_append(&sb,
+                "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"exec\",\"params\":{"
+                "\"sql\":\"%s\"}}",
+                id, cmd->raw_sql) != OK) goto err;
+    } else if (cmd->type == CMD_META) {
+        if (!cmd->cmd) goto err;
+        if (cmd->args && cmd->args[0] != '\0') {
+            if (json_append(&sb,
+                    "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"%s\",\"params\":{"
+                    "\"raw\":\"%s\"}}",
+                    id, cmd->cmd, cmd->args) != OK) goto err;
+        } else {
+            if (json_append(&sb,
+                    "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"%s\"}",
+                    id, cmd->cmd) != OK) goto err;
         }
-
-        if (i > 0) {
-            if (serializer_append(&sb, ",") != OK) {
-                goto err;
-            }
-        }
-        if (serializer_append(&sb, "\"%s\":\"%s\"", key, value) != OK) {
-            goto err;
-        }
+    } else {
+        goto err;
     }
-
-    va_end(ap);
-
-    if (serializer_append(&sb, "}}") != OK) goto err;
-
 
     // materialize output (exact size; not NUL-terminated)
     char *out = xmalloc(sb.len);
@@ -323,7 +314,6 @@ int serializer_method_to_jsonrpc(const char *method, uint32_t id,
     return OK;
 
 err:
-    va_end(ap);
     sb_clean(&sb);
     *out_json = NULL;
     *out_len  = 0;

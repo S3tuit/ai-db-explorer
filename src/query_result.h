@@ -14,8 +14,7 @@ typedef enum QRStatus {
     QR_ERROR = 1
 } QRStatus;
 
-/* This is the only entity accepted by the Serializer. It's a materialized,
- * DB-agnostic query result. It owns cols and cells. */
+/* It's a materialized, DB-agnostic query result. It owns cols and cells. */
 typedef struct QueryResult {
     uint32_t id;        // id of the request
     QRStatus status;

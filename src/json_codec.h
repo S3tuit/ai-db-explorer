@@ -1,13 +1,14 @@
-#ifndef SERIALIZER_H
-#define SERIALIZER_H
+#ifndef JSON_CODEC_H
+#define JSON_CODEC_H
 
 #include <stddef.h>
 #include <stdint.h>
 
+#include "command_reader.h"
 #include "query_result.h"
 
 /* 
- * Everything is serialized into a JSON-RPC 2.0 payload (no Content-Length
+ * Everything is encoded into a JSON-RPC 2.0 payload (no Content-Length
  * frame).
  */
 
@@ -23,7 +24,7 @@
  *
  * NOTE: Caller must free(*out_json).
  */
-int serializer_qr_to_jsonrpc(const QueryResult *qr, char **out_json,
+int qr_to_jsonrpc(const QueryResult *qr, char **out_json,
         size_t *out_len);
 
 /* Serializes 'method' and a variable number of [key, value] strings. The keys
@@ -32,9 +33,21 @@ int serializer_qr_to_jsonrpc(const QueryResult *qr, char **out_json,
  * Format:
  *  {"jsonrpc":"2.0","id":<'id'>,"method":<'method'>,"params":{<key>:<value>}}
  * 
- * Returns the same as serializer_qr_to_jsonrpc.
+ * Returns the same as qr_to_jsonrpc.
  * */
-int serializer_method_to_jsonrpc(const char *method, uint32_t id,
-        char **out_json, size_t *out_len, uint32_t key_no, ...);
+/* Serializes a Command into JSON-RPC.
+ *
+ * Format:
+ *  CMD_SQL:
+ *    {"jsonrpc":"2.0","id":<u>,"method":"exec","params":{"sql":<s>}}
+ *  CMD_META (with args):
+ *    {"jsonrpc":"2.0","id":<u>,"method":<s>,"params":{"raw":<s>}}
+ *  CMD_META (no args):
+ *    {"jsonrpc":"2.0","id":<u>,"method":<s>}
+ *
+ * Returns the same as qr_to_jsonrpc.
+ * */
+int command_to_jsonrpc(const Command *cmd, uint32_t id,
+        char **out_json, size_t *out_len);
 
-#endif /* SERIALIZER_H */
+#endif
