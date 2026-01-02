@@ -23,7 +23,13 @@ typedef struct BufWriter {
 
 
 /* ------------------------------- Reader ---------------------------------- */
+/* Initializes a BufReader without allocating it. */
+int bufreader_init(BufReader *br, ByteChannel *ch);
+
 BufReader *bufreader_create(ByteChannel *ch);
+
+/* cleanup and close/destroy ByteChannel */
+void bufreader_clean(BufReader *br);
 
 /* cleanup and close/destroy ByteChannel */
 void bufreader_destroy(BufReader *br);
@@ -48,7 +54,13 @@ ssize_t bufreader_find(const BufReader *br, const void *needle, size_t needle_le
 
 
 /* ------------------------------- Writer ---------------------------------- */
+/* Initializes a BufWriter without allocating it. */
+int bufwriter_init(BufWriter *bw, ByteChannel *ch);
+
 BufWriter *bufwriter_create(ByteChannel *ch);
+
+/* cleanup and close/destroy ByteChannel */
+void bufwriter_clean(BufWriter *bw);
 
 /* cleanup and close/destroy ByteChannel */
 void bufwriter_destroy(BufWriter *bw);

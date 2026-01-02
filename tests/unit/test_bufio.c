@@ -116,32 +116,32 @@ static ByteChannel *partial_bytechannel_create(const unsigned char *rbuf, size_t
 
 static void test_bufreader_peek_find_and_read(void) {
   FILE *in = MEMFILE_IN("hello world");
-  ByteChannel *ch = stdio_bytechannel_create(in, NULL, 0);
-  BufReader *br = bufreader_create(ch);
-  ASSERT_TRUE(br != NULL);
+  ByteChannel *ch = stdio_bytechannel_create(fileno(in), -1, 0);
+  BufReader br;
+  ASSERT_TRUE(bufreader_init(&br, ch) == OK);
 
-  ASSERT_TRUE(bufreader_ensure(br, 11) == YES);
+  ASSERT_TRUE(bufreader_ensure(&br, 11) == YES);
 
   size_t avail = 0;
-  const uint8_t *peek = bufreader_peek(br, &avail);
+  const uint8_t *peek = bufreader_peek(&br, &avail);
   ASSERT_TRUE(avail == 11);
   ASSERT_TRUE(peek != NULL);
   ASSERT_TRUE(memcmp(peek, "hello world", 11) == 0);
 
-  ASSERT_TRUE(bufreader_find(br, "world", 5) == 6);
+  ASSERT_TRUE(bufreader_find(&br, "world", 5) == 6);
 
   char buf[8];
-  ASSERT_TRUE(bufreader_read_n(br, buf, 6) == OK);
+  ASSERT_TRUE(bufreader_read_n(&br, buf, 6) == OK);
   buf[6] = '\0';
   ASSERT_TRUE(strcmp(buf, "hello ") == 0);
 
-  ASSERT_TRUE(bufreader_read_n(br, buf, 5) == OK);
+  ASSERT_TRUE(bufreader_read_n(&br, buf, 5) == OK);
   buf[5] = '\0';
   ASSERT_TRUE(strcmp(buf, "world") == 0);
 
-  ASSERT_TRUE(bufreader_ensure(br, 1) == NO);
+  ASSERT_TRUE(bufreader_ensure(&br, 1) == NO);
 
-  bufreader_destroy(br);
+  bufreader_clean(&br);
   fclose(in);
 }
 
@@ -180,7 +180,7 @@ static void test_bufwriter_partial_writes(void) {
 
 static void test_bufwriter_zero_len(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(NULL, out, 0);
+  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
   BufWriter *bw = bufwriter_create(ch);
   ASSERT_TRUE(bw != NULL);
 

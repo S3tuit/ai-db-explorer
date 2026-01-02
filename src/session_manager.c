@@ -23,11 +23,15 @@ int session_init(SessionManager *s, FILE *in, FILE *out, DbBackend *db) {
     s->next_id = 1;
     s->last_err[0] = '\0';
 
-    ByteChannel *ch = stdio_bytechannel_create(in, NULL, 0);
+    int in_fd = fileno(in);
+    int out_fd = fileno(out);
+    if (in_fd < 0 || out_fd < 0) return ERR;
+
+    ByteChannel *ch = stdio_bytechannel_create(in_fd, -1, 0);
     if (!ch) return ERR;
     s->r = command_reader_create(ch);
     if (!s->r) return ERR;
-    ByteChannel *out_ch = stdio_bytechannel_create(NULL, out, 0);
+    ByteChannel *out_ch = stdio_bytechannel_create(-1, out_fd, 0);
     if (!out_ch) {
         command_reader_destroy(s->r);
         s->r = NULL;

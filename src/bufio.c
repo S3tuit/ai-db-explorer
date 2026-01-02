@@ -8,19 +8,28 @@
 #endif
 
 /* ------------------------------- Reader ---------------------------------- */
-BufReader *bufreader_create(ByteChannel *ch) {
-    if (!ch) return NULL;
-    BufReader *br = (BufReader *)xmalloc(sizeof(*br));
+int bufreader_init(BufReader *br, ByteChannel *ch) {
+    if (!br || !ch) return ERR;
     br->ch  = ch;
     br->buf.data = NULL;
     br->buf.len  = 0;
     br->buf.cap  = 0;
     br->rpos = 0;
     br->eof  = 0;
+    return OK;
+}
+
+BufReader *bufreader_create(ByteChannel *ch) {
+    if (!ch) return NULL;
+    BufReader *br = (BufReader *)xmalloc(sizeof(*br));
+    if (bufreader_init(br, ch) != OK) {
+        free(br);
+        return NULL;
+    }
     return br;
 }
 
-void bufreader_destroy(BufReader *br) {
+void bufreader_clean(BufReader *br) {
     if (!br) return;
     sb_clean(&br->buf);
     br->rpos = 0;
@@ -29,6 +38,11 @@ void bufreader_destroy(BufReader *br) {
         bytech_destroy(br->ch);
     }
     br->ch = NULL;
+}
+
+void bufreader_destroy(BufReader *br) {
+    if (!br) return;
+    bufreader_clean(br);
     free(br);
 }
 
@@ -71,6 +85,9 @@ static ssize_t bufreader_fill(BufReader *br) {
     }
 
     uint8_t tmp[BUFIO_READ_CHUNK];
+    
+    // TODO: maybe for non-blocking we should handle EAGAIN and EWOULDBLOCK
+
     ssize_t n = bytech_read_some(br->ch, tmp, sizeof(tmp));
     if (n > 0) {
         if (sb_append_bytes(&br->buf, tmp, (size_t)n) != OK) {
@@ -87,6 +104,9 @@ static ssize_t bufreader_fill(BufReader *br) {
     return -1;
 }
 
+// TODO: for non-blocking sockets, ensure is blocking and may stall other
+// clients
+
 int bufreader_ensure(BufReader *br, size_t need) {
     while (br_avail(br) < need) {
         ssize_t n = bufreader_fill(br);
@@ -101,7 +121,7 @@ int bufreader_ensure(BufReader *br, size_t need) {
 
 const uint8_t *bufreader_peek(const BufReader *br, size_t *out_avail) {
     size_t avail = br_avail(br);
-    *out_avail = avail;
+    if (out_avail) *out_avail = avail;
     if (avail == 0) return NULL;
     return (const uint8_t *)(br->buf.data + br->rpos);
 }
@@ -145,19 +165,33 @@ ssize_t bufreader_find(const BufReader *br, const void *needle, size_t needle_le
 }
 
 /* ------------------------------- Writer ---------------------------------- */
+int bufwriter_init(BufWriter *bw, ByteChannel *ch) {
+    if (!bw || !ch) return ERR;
+    bw->ch = ch;
+    return OK;
+}
+
 BufWriter *bufwriter_create(ByteChannel *ch) {
     if (!ch) return NULL;
     BufWriter *bw = (BufWriter *)xmalloc(sizeof(*bw));
-    bw->ch = ch;
+    if (bufwriter_init(bw, ch) != OK) {
+        free(bw);
+        return NULL;
+    }
     return bw;
 }
 
-void bufwriter_destroy(BufWriter *bw) {
+void bufwriter_clean(BufWriter *bw) {
     if (!bw) return;
     if (bw->ch) {
         bytech_destroy(bw->ch);
     }
     bw->ch = NULL;
+}
+
+void bufwriter_destroy(BufWriter *bw) {
+    if (!bw) return;
+    bufwriter_clean(bw);
     free(bw);
 }
 

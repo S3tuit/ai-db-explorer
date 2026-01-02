@@ -54,6 +54,7 @@ struct ByteChannel {
     void *impl; // channel-specific
 };
 
+// Add the helpers to DbBackend interface too
 /* Small helpers */
 static inline ssize_t bytech_read_some(ByteChannel *ch, void *buf, size_t cap) {
     return ch->vt->read_some(ch, buf, cap);

@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "string_op.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -318,4 +319,415 @@ err:
     *out_json = NULL;
     *out_len  = 0;
     return ERR;
+}
+
+/* --------------------------------- decode ------------------------------- */
+
+static const char *json_skip_ws(const char *p) {
+    if (!p) return NULL;
+    while (*p && isspace((unsigned char)*p)) p++;
+    return p;
+}
+
+/* Parses a JSON string. If 'out' is non-NULL, appends decoded bytes to it.
+ * Returns pointer to the first byte after the closing quote, or NULL on error. */
+static const char *json_parse_string(const char *p, StrBuf *out) {
+    if (!p || *p != '"') return NULL;
+    p++;
+    while (*p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') return p + 1;
+        if (c == '\\') {
+            p++;
+            if (!*p) return NULL;
+            switch (*p) {
+                case '"':  c = '"';  break;
+                case '\\': c = '\\'; break;
+                case '/':  c = '/';  break;
+                case 'b':  c = '\b'; break;
+                case 'f':  c = '\f'; break;
+                case 'n':  c = '\n'; break;
+                case 'r':  c = '\r'; break;
+                case 't':  c = '\t'; break;
+                default:
+                    return NULL;
+            }
+            if (out && sb_append_bytes(out, &c, 1) != OK) return NULL;
+            p++;
+            continue;
+        }
+        if (out && sb_append_bytes(out, &c, 1) != OK) return NULL;
+        p++;
+    }
+    return NULL;
+}
+
+static const char *json_skip_value(const char *p);
+
+static const char *json_skip_object(const char *p) {
+    if (!p || *p != '{') return NULL;
+    p = json_skip_ws(p + 1);
+    if (!p) return NULL;
+    if (*p == '}') return p + 1;
+
+    for (;;) {
+        p = json_skip_ws(p);
+        p = json_parse_string(p, NULL);
+        if (!p) return NULL;
+        p = json_skip_ws(p);
+        if (!p || *p != ':') return NULL;
+        p = json_skip_ws(p + 1);
+        p = json_skip_value(p);
+        if (!p) return NULL;
+        p = json_skip_ws(p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == '}') return p + 1;
+        return NULL;
+    }
+}
+
+static const char *json_skip_array(const char *p) {
+    if (!p || *p != '[') return NULL;
+    p = json_skip_ws(p + 1);
+    if (!p) return NULL;
+    if (*p == ']') return p + 1;
+
+    for (;;) {
+        p = json_skip_value(p);
+        if (!p) return NULL;
+        p = json_skip_ws(p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == ']') return p + 1;
+        return NULL;
+    }
+}
+
+static const char *json_skip_number(const char *p) {
+    if (!p) return NULL;
+    if (*p == '-') p++;
+    if (!isdigit((unsigned char)*p)) return NULL;
+    while (isdigit((unsigned char)*p)) p++;
+    if (*p == '.' || *p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '-' || *p == '+') p++;
+        if (!isdigit((unsigned char)*p)) return NULL;
+        while (isdigit((unsigned char)*p)) p++;
+    }
+    return p;
+}
+
+static const char *json_skip_value(const char *p) {
+    p = json_skip_ws(p);
+    if (!p || !*p) return NULL;
+    if (*p == '"') return json_parse_string(p, NULL);
+    if (*p == '{') return json_skip_object(p);
+    if (*p == '[') return json_skip_array(p);
+    if (*p == 't') return (strncmp(p, "true", 4) == 0) ? p + 4 : NULL;
+    if (*p == 'f') return (strncmp(p, "false", 5) == 0) ? p + 5 : NULL;
+    if (*p == 'n') return (strncmp(p, "null", 4) == 0) ? p + 4 : NULL;
+    if (*p == '-' || isdigit((unsigned char)*p)) return json_skip_number(p);
+    return NULL;
+}
+
+static int json_key_matches(const char *p, const char *key, const char **out_next) {
+    StrBuf sb = {0};
+    const char *next = json_parse_string(p, &sb);
+    if (!next) {
+        sb_clean(&sb);
+        return ERR;
+    }
+    if (sb_append_bytes(&sb, "\0", 1) != OK) {
+        sb_clean(&sb);
+        return ERR;
+    }
+    int match = (strcmp(sb.data ? sb.data : "", key) == 0);
+    sb_clean(&sb);
+    if (out_next) *out_next = next;
+    return match ? YES : NO;
+}
+
+static int json_find_in_object(const char *p, const char **parts, size_t depth,
+                               const char **out_val) {
+    if (!p || !parts || depth == 0) return ERR;
+    p = json_skip_ws(p);
+    if (!p || *p != '{') return ERR;
+    p = json_skip_ws(p + 1);
+    if (!p) return ERR;
+    if (*p == '}') return NO;
+
+    for (;;) {
+        p = json_skip_ws(p);
+        if (!p || *p != '"') return ERR;
+        int match = json_key_matches(p, parts[0], &p);
+        if (match == ERR) return ERR;
+        p = json_skip_ws(p);
+        if (!p || *p != ':') return ERR;
+        p = json_skip_ws(p + 1);
+        if (match == YES) {
+            if (depth == 1) {
+                if (out_val) *out_val = p;
+                return YES;
+            }
+            if (*p != '{') return ERR;
+            return json_find_in_object(p, parts + 1, depth - 1, out_val);
+        }
+        p = json_skip_value(p);
+        if (!p) return ERR;
+        p = json_skip_ws(p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == '}') return NO;
+        return ERR;
+    }
+}
+
+static int json_find_path_value(const char *json, char **parts, size_t depth,
+                                const char **out_val) {
+    if (!json || !parts || depth == 0) return ERR;
+    const char *p = json;
+    const char *val = NULL;
+
+    for (size_t i = 0; i < depth; i++) {
+        const char *single[1] = { parts[i] };
+        int rc = json_find_in_object(p, single, 1, &val);
+        if (rc != YES) return rc;
+        if (i + 1 == depth) {
+            if (out_val) *out_val = val;
+            return YES;
+        }
+        val = json_skip_ws(val);
+        if (!val || *val != '{') return ERR;
+        p = val;
+    }
+    return ERR;
+}
+static int json_split_path(const char *path, char **parts, size_t *out_n) {
+    if (!path || !parts || !out_n) return ERR;
+    size_t n = 0;
+    const char *start = path;
+    for (const char *p = path; ; p++) {
+        if (*p == '.' || *p == '\0') {
+            if (n >= 3 || p == start) {
+                for (size_t i = 0; i < n; i++) free(parts[i]);
+                return ERR;
+            }
+            size_t len = (size_t)(p - start);
+            char *s = xmalloc(len + 1);
+            memcpy(s, start, len);
+            s[len] = '\0';
+            parts[n++] = s;
+            if (*p == '\0') break;
+            start = p + 1;
+        }
+    }
+    *out_n = n;
+    return OK;
+}
+
+static int json_parse_uint(const char *p, uint64_t *out, const char **out_end) {
+    if (!p || !out) return ERR;
+    p = json_skip_ws(p);
+    if (!p) return ERR;
+    if (strncmp(p, "null", 4) == 0) return NO;
+    if (*p == '-') return ERR;
+    if (!isdigit((unsigned char)*p)) return ERR;
+
+    uint64_t v = 0;
+    while (isdigit((unsigned char)*p)) {
+        uint64_t d = (uint64_t)(*p - '0');
+        if (v > (UINT64_MAX - d) / 10) return ERR;
+        v = v * 10 + d;
+        p++;
+    }
+    *out = v;
+    if (out_end) *out_end = p;
+    return YES;
+}
+
+static int json_decode_string_value(const char *p, char **out, size_t *out_len,
+                                    const char **out_end) {
+    if (!p || !out) return ERR;
+    p = json_skip_ws(p);
+    if (!p) return ERR;
+    if (strncmp(p, "null", 4) == 0) return NO;
+    StrBuf sb = {0};
+    const char *next = json_parse_string(p, &sb);
+    if (!next) {
+        sb_clean(&sb);
+        return ERR;
+    }
+    size_t len = sb.len;
+    char *s = xmalloc(len + 1);
+    if (len > 0) memcpy(s, sb.data, len);
+    s[len] = '\0';
+    sb_clean(&sb);
+    *out = s;
+    if (out_len) *out_len = len;
+    if (out_end) *out_end = next;
+    return YES;
+}
+
+int json_get_value(const char *json, size_t json_len, const char *fmt, ...) {
+    if (!json || !fmt) return ERR;
+    if (json_len == SIZE_MAX) return ERR;
+
+    char *json_buf = (char *)xmalloc(json_len + 1);
+    if (json_len > 0) memcpy(json_buf, json, json_len);
+    json_buf[json_len] = '\0';
+
+    va_list ap;
+    va_start(ap, fmt);
+
+    for (size_t i = 0; fmt[i] != '\0'; i++) {
+        if (fmt[i] != '%') continue;
+        char spec = fmt[++i];
+        if (spec == '\0') {
+            va_end(ap);
+            return ERR;
+        }
+
+        const char *key = va_arg(ap, const char *);
+        if (!key) {
+            va_end(ap);
+            return ERR;
+        }
+
+        char *parts[3] = {0};
+        size_t depth = 0;
+        if (json_split_path(key, parts, &depth) != OK) {
+            va_end(ap);
+            return ERR;
+        }
+
+        const char *val = NULL;
+        int rc = json_find_path_value(json_buf, parts, depth, &val);
+        if (rc == NO) {
+            for (size_t j = 0; j < depth; j++) free(parts[j]);
+            va_end(ap);
+            free(json_buf);
+            return NO;
+        }
+        if (rc != YES || !val) {
+            for (size_t j = 0; j < depth; j++) free(parts[j]);
+            va_end(ap);
+            free(json_buf);
+            return ERR;
+        }
+
+        if (spec == 's') {
+            char **out = va_arg(ap, char **);
+            if (!out) {
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return ERR;
+            }
+            rc = json_decode_string_value(val, out, NULL, NULL);
+            if (rc == NO) {
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return NO;
+            }
+            if (rc != YES) {
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return ERR;
+            }
+            for (size_t j = 0; j < depth; j++) free(parts[j]);
+            continue;
+        }
+
+        if (spec == 'c') {
+            char *out = va_arg(ap, char *);
+            if (!out) {
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return ERR;
+            }
+            char *s = NULL;
+            size_t len = 0;
+            rc = json_decode_string_value(val, &s, &len, NULL);
+            if (rc == NO) {
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return NO;
+            }
+            if (rc != YES || !s || len != 1) {
+                free(s);
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return ERR;
+            }
+            *out = s[0];
+            free(s);
+            for (size_t j = 0; j < depth; j++) free(parts[j]);
+            continue;
+        }
+
+        if (spec == 'u' || spec == 'U') {
+            uint64_t v = 0;
+            rc = json_parse_uint(val, &v, NULL);
+            if (rc == NO) {
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return NO;
+            }
+            if (rc != YES) {
+                for (size_t j = 0; j < depth; j++) free(parts[j]);
+                va_end(ap);
+                free(json_buf);
+                return ERR;
+            }
+            if (spec == 'u') {
+                uint32_t *out = va_arg(ap, uint32_t *);
+                if (!out) {
+                    for (size_t j = 0; j < depth; j++) free(parts[j]);
+                    va_end(ap);
+                    free(json_buf);
+                    return ERR;
+                }
+                if (v > UINT32_MAX) {
+                    for (size_t j = 0; j < depth; j++) free(parts[j]);
+                    va_end(ap);
+                    free(json_buf);
+                    return ERR;
+                }
+                *out = (uint32_t)v;
+            } else {
+                uint64_t *out = va_arg(ap, uint64_t *);
+                if (!out) {
+                    for (size_t j = 0; j < depth; j++) free(parts[j]);
+                    va_end(ap);
+                    free(json_buf);
+                    return ERR;
+                }
+                *out = v;
+            }
+            for (size_t j = 0; j < depth; j++) free(parts[j]);
+            continue;
+        }
+
+        for (size_t j = 0; j < depth; j++) free(parts[j]);
+        va_end(ap);
+        free(json_buf);
+        return ERR;
+    }
+
+    va_end(ap);
+    free(json_buf);
+    return YES;
 }

@@ -296,6 +296,65 @@ static void test_command_to_jsonrpc_meta_no_params(void) {
     free(json);
 }
 
+static void test_json_encode_decode_present(void) {
+    char *json = NULL;
+    size_t json_len = 0;
+
+    Command cmd = {
+        .type = CMD_SQL,
+        .raw_sql = "SELECT 1;"
+    };
+    int rc = command_to_jsonrpc(&cmd, 7, &json, &json_len);
+    ASSERT_TRUE(rc == OK);
+
+    char *sql = NULL;
+    rc = json_get_value(json, json_len, "%s", "params.sql", &sql);
+    ASSERT_TRUE(rc == YES);
+    ASSERT_STREQ(sql, "SELECT 1;");
+
+    free(sql);
+    free(json);
+}
+
+static void test_json_encode_decode_missing(void) {
+    char *json = NULL;
+    size_t json_len = 0;
+
+    Command cmd = {
+        .type = CMD_META,
+        .cmd = "status",
+        .args = NULL
+    };
+    int rc = command_to_jsonrpc(&cmd, 1, &json, &json_len);
+    ASSERT_TRUE(rc == OK);
+
+    char *raw = NULL;
+    rc = json_get_value(json, json_len, "%s", "params.raw", &raw);
+    ASSERT_TRUE(rc == NO);
+
+    free(json);
+}
+
+static void test_json_get_value_strings(void) {
+    const char *json = "{\"a\":\"x\",\"b\":\"hello\"}";
+    char c = '\0';
+    char *s = NULL;
+
+    int rc = json_get_value(json, strlen(json), "%c%s", "a", &c, "b", &s);
+    ASSERT_TRUE(rc == YES);
+    ASSERT_TRUE(c == 'x');
+    ASSERT_STREQ(s, "hello");
+
+    free(s);
+}
+
+static void test_json_get_value_null(void) {
+    const char *json = "{\"a\":null}";
+    uint32_t v = 0;
+    int rc = json_get_value(json, strlen(json), "%u", "a", &v);
+    ASSERT_TRUE(rc == NO);
+}
+
 int main (void) {
     test_json_basic_rows_and_nulls();
     test_json_null_qrcolumn_safe_defaults();
@@ -305,6 +364,10 @@ int main (void) {
     test_command_to_jsonrpc_sql();
     test_command_to_jsonrpc_meta();
     test_command_to_jsonrpc_meta_no_params();
+    test_json_encode_decode_present();
+    test_json_encode_decode_missing();
+    test_json_get_value_strings();
+    test_json_get_value_null();
 
     fprintf(stderr, "OK: test_json\n");
     return(0);

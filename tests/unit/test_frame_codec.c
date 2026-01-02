@@ -14,7 +14,7 @@ static void write_be_u32(unsigned char *dst, uint32_t n) {
 
 static void test_frame_write_len(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(NULL, out, 0);
+  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
   BufWriter *bw = bufwriter_create(ch);
   ASSERT_TRUE(bw != NULL);
 
@@ -44,7 +44,7 @@ static void test_frame_read_len(void) {
   fflush(in);
   fseek(in, 0, SEEK_SET);
 
-  ByteChannel *ch = stdio_bytechannel_create(in, NULL, 0);
+  ByteChannel *ch = stdio_bytechannel_create(fileno(in), -1, 0);
   BufReader *br = bufreader_create(ch);
   ASSERT_TRUE(br != NULL);
 
@@ -67,7 +67,7 @@ static void test_frame_read_len_too_large(void) {
   fflush(in);
   fseek(in, 0, SEEK_SET);
 
-  ByteChannel *ch = stdio_bytechannel_create(in, NULL, 0);
+  ByteChannel *ch = stdio_bytechannel_create(fileno(in), -1, 0);
   BufReader *br = bufreader_create(ch);
   ASSERT_TRUE(br != NULL);
 
@@ -81,7 +81,7 @@ static void test_frame_read_len_too_large(void) {
 
 static void test_frame_write_cl(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(NULL, out, 0);
+  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
   BufWriter *bw = bufwriter_create(ch);
   ASSERT_TRUE(bw != NULL);
 

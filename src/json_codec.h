@@ -50,4 +50,23 @@ int qr_to_jsonrpc(const QueryResult *qr, char **out_json,
 int command_to_jsonrpc(const Command *cmd, uint32_t id,
         char **out_json, size_t *out_len);
 
+/* Extracts values from 'json' based on 'fmt' and key paths.
+ * 'json' is not required to be NUL-terminated; use 'json_len'.
+ *
+ * Format specifiers:
+ *  %c expects a JSON string of length 1 (stores into char *)
+ *  %s expects a JSON string (allocates into char **)
+ *  %u expects a JSON number into uint32_t *
+ *  %U expects a JSON number into uint64_t *
+ *
+ * Variadic layout: for each specifier, pass (const char *key, out_ptr).
+ * Keys are dot-delimited paths (max depth 3). Arrays are not supported.
+ *
+ * Returns:
+ *  YES -> all keys found and values stored.
+ *  NO  -> at least one key missing or value is null (outputs unchanged).
+ *  ERR -> parse/type error.
+ */
+int json_get_value(const char *json, size_t json_len, const char *fmt, ...);
+
 #endif

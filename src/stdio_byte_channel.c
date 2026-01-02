@@ -3,15 +3,15 @@
 
 #include <stdlib.h>
 #include <errno.h>
-#include <string.h>
+#include <unistd.h>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <unistd.h>  // fileno
-#endif
+// TODO: when adding support for Windows too, this should become fd_bytechannel
+// while on Windows we'll have handle_byechannel and the public stdio will be
+// the same
 
 typedef struct StdioByteChannelImpl {
-    FILE *in;
-    FILE *out;
+    int in_fd;
+    int out_fd;
     int close_on_destroy;
     int is_closed;
 } StdioByteChannelImpl;
@@ -20,52 +20,38 @@ static ssize_t stdio_read_some(ByteChannel *ch, void *buf, size_t cap) {
     StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
     if (!impl || impl->is_closed) return -1;
-    if (!impl->in) return -1;
+    if (impl->in_fd < 0) return -1;
     if (cap == 0) return 0;
 
-#if defined(__unix__) || defined(__APPLE__)
     // it's better to use read because we don't want any buffering. We want to
     // read everything the user wrote when this functio is called
-    int fd = fileno(impl->in);
-    if (fd < 0) return -1;
     for (;;) {
-        ssize_t n = read(fd, buf, cap);
+        ssize_t n = read(impl->in_fd, buf, cap);
         if (n >= 0) return n;
         // PTY slave returns EIO on hangup; treat it as EOF to match file/pipe
         if (errno == EIO) return 0;
         if (errno == EINTR) continue;
         return -1;
     }
-#else
-    size_t n = fread(buf, 1, cap, impl->in);
-
-    if (n > 0) return (ssize_t)n;
-
-    if (ferror(impl->in)) {
-        // errno set by stdio
-        return -1;
-    }
-
-    // fread returned 0, treat as EOF
-    return 0;
-#endif
 }
 
 static ssize_t stdio_write_some(ByteChannel *ch, const void *buf, size_t len) {
     StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
     if (!impl || impl->is_closed) return ERR;
-    if (!impl->out) return ERR;
+    if (impl->out_fd < 0) return ERR;
 
-    return fwrite(buf, 1, len, impl->out);
+    // same as read, we don't want buffering. We want to writer everything as
+    // soon as this func in called
+    return write(impl->out_fd, buf, len);
 }
 
 static int stdio_flush(ByteChannel *ch) {
     StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
     if (!impl || impl->is_closed) return ERR;
-    if (!impl->out) return ERR;
-    if(fflush(impl->out) != 0) return ERR;
+    if (impl->out_fd < 0) return ERR;
+    // No stdio buffering to flush; write(2) is synchronous.
     return OK;
 }
 
@@ -74,12 +60,9 @@ static int stdio_shutdown_write(ByteChannel *ch) {
     StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
     if (!impl || impl->is_closed) return ERR;
-    if (!impl->out) return OK;
-    if (fflush(impl->out) != 0) {
-        return ERR;
-    }
+    if (impl->out_fd < 0) return OK;
     // no more writes
-    impl->out = NULL;
+    impl->out_fd = -1;
     return OK;
 }
 
@@ -87,18 +70,12 @@ static BytePollable stdio_get_pollable(const ByteChannel *ch) {
     const StdioByteChannelImpl *impl = (const StdioByteChannelImpl *)ch->impl;
     if (!impl || impl->is_closed) return (BytePollable)-1;
 
-#if defined(__unix__) || defined(__APPLE__)
-    if (impl->in) return (BytePollable)fileno(impl->in);
+    if (impl->in_fd >= 0) return (BytePollable)impl->in_fd;
     return (BytePollable)-1;
-#else
-    // On non-POSIX platforms, there's no portable fileno/pollable handle
-    (void)impl;
-    return (BytePollable)-1;
-#endif
 }
 
-/* Closes underlying resource/handle, but doesn not free the ByteChannel 
- * itself. */
+/* Closes underlying resource/handle IF owned, but doesn not free the
+ * ByteChannel itself. */
 static int stdio_close(ByteChannel *ch) {
     StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
@@ -113,19 +90,19 @@ static int stdio_close(ByteChannel *ch) {
         return OK;
     }
 
-    // Owns streams: close them carefully, once if in==out.
-    if (impl->in && impl->out && impl->in == impl->out) {
-        if (fclose(impl->in) != 0) rc = ERR;
-        impl->in = NULL;
-        impl->out = NULL;
+    // Owns fds: close them carefully, once if in_fd==out_fd.
+    if (impl->in_fd >= 0 && impl->out_fd >= 0 && impl->in_fd == impl->out_fd) {
+        if (close(impl->in_fd) != 0) rc = ERR;
+        impl->in_fd = -1;
+        impl->out_fd = -1;
     } else {
-        if (impl->in) {
-            if (fclose(impl->in) != 0) rc = ERR;
-            impl->in = NULL;
+        if (impl->in_fd >= 0) {
+            if (close(impl->in_fd) != 0) rc = ERR;
+            impl->in_fd = -1;
         }
-        if (impl->out) {
-            if (fclose(impl->out) != 0) rc = ERR;
-            impl->out = NULL;
+        if (impl->out_fd >= 0) {
+            if (close(impl->out_fd) != 0) rc = ERR;
+            impl->out_fd = -1;
         }
     }
 
@@ -135,7 +112,6 @@ static int stdio_close(ByteChannel *ch) {
 
 static void stdio_destroy(ByteChannel *ch) {
     if (!ch) return;
-    // close underlying streams
     stdio_close(ch);
 
     // free impl + wrapper
@@ -153,16 +129,16 @@ static const ByteChannelVTable STDIO_BYTE_CHANNEL_VT = {
     .destroy        = stdio_destroy
 };
 
-ByteChannel *stdio_bytechannel_create(FILE *in, FILE *out, int close_on_destroy) {
-    if (!in && !out) {
+ByteChannel *stdio_bytechannel_create(int in_fd, int out_fd, int close_on_destroy) {
+    if (in_fd < 0 && out_fd < 0) {
         return NULL;
     }
 
     ByteChannel *ch = (ByteChannel *)xmalloc(sizeof(ByteChannel));
     StdioByteChannelImpl *impl = (StdioByteChannelImpl *)xmalloc(sizeof(StdioByteChannelImpl));
 
-    impl->in = in;
-    impl->out = out;
+    impl->in_fd = in_fd;
+    impl->out_fd = out_fd;
     impl->close_on_destroy = close_on_destroy ? 1 : 0;
     impl->is_closed = 0;
 
