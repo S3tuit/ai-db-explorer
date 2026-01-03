@@ -16,7 +16,7 @@ static void read_one_sql_impl(const char *input, const char *expected,
                               const char *file, int line) {
   FILE *f = memfile_impl(input, file, line);
 
-  ByteChannel *ch = stdio_bytechannel_create(fileno(f), -1, 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(f), -1);
   CommandReader *r = command_reader_create(ch);
 
   Command *cmd = NULL;
@@ -43,7 +43,7 @@ static void read_two_sql_impl(const char *input, const char *e1, const char *e2,
                               const char *file, int line) {
   FILE *f = memfile_impl(input, file, line);
 
-  ByteChannel *ch = stdio_bytechannel_create(fileno(f), -1, 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(f), -1);
   CommandReader *r = command_reader_create(ch);
 
   Command *res1 = NULL;
@@ -76,7 +76,7 @@ static void read_one_meta_impl(const char *input, const char *expected_cmd,
                                const char *file, int line) {
   FILE *f = memfile_impl(input, file, line);
 
-  ByteChannel *ch = stdio_bytechannel_create(fileno(f), -1, 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(f), -1);
   CommandReader *r = command_reader_create(ch);
 
   Command *cmd = NULL;
@@ -100,7 +100,7 @@ static void read_one_meta_impl(const char *input, const char *expected_cmd,
 static void expect_error_impl(const char *input, const char *file, int line) {
   FILE *f = memfile_impl(input, file, line);
 
-  ByteChannel *ch = stdio_bytechannel_create(fileno(f), -1, 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(f), -1);
   CommandReader *r = command_reader_create(ch);
 
   Command *res = NULL;

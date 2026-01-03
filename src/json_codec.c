@@ -237,8 +237,7 @@ static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
     return OK;
 }
 
-int qr_to_jsonrpc(const QueryResult *qr, char **out_json,
-                                size_t *out_len) {
+int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len) {
     if (!out_json || !out_len) return ERR;
     *out_json = NULL;
     *out_len  = 0;
@@ -286,7 +285,7 @@ int command_to_jsonrpc(const Command *cmd, uint32_t id,
     if (cmd->type == CMD_SQL) {
         if (!cmd->raw_sql) goto err;
         if (json_append(&sb,
-                "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"exec\",\"params\":{"
+                "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\""BROK_EXEC_CMD"\",\"params\":{"
                 "\"sql\":\"%s\"}}",
                 id, cmd->raw_sql) != OK) goto err;
     } else if (cmd->type == CMD_META) {

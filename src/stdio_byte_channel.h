@@ -9,11 +9,14 @@
  * - 'out_fd' may be -1 if you only need read.
  *
  * Ownership:
- * - If close_on_destroy != 0: destroy() will close() the fds.
- * - If close_on_destroy == 0: destroy() will NOT close() them.
+ * - open_fd takes ownership and will close() on destroy.
  *
- * Note: If in_fd == out_fd, it will only close() once when owned.
+ * Note: If in_fd == out_fd, open_fd will only close() once when owned.
  */
-ByteChannel *stdio_bytechannel_create(int in_fd, int out_fd, int close_on_destroy);
+ByteChannel *stdio_bytechannel_open_fd(int in_fd, int out_fd);
+
+/* Same as *_open_fd but this does NOT take ownership and will NOT close() on
+ * destroy.*/
+ByteChannel *stdio_bytechannel_wrap_fd(int in_fd, int out_fd);
 
 #endif

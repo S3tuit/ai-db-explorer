@@ -12,6 +12,11 @@
  * - Windows: HANDLE (named pipe, file, etc.)
  *
  * It supports partial reads (read_some) and full writes (write_all loops).
+ *
+ * Ownership:
+ * - ByteChannel implementations may own the underlying resource.
+ * - bytech_destroy() always frees the ByteChannel; it will close the underlying
+ *   resource only if the implementation owns it.
  */
 
 typedef struct ByteChannel ByteChannel;
@@ -22,6 +27,12 @@ typedef struct ByteChannel ByteChannel;
  * The type is intentionally opaque; platform code knows what it means.
  */
 typedef intptr_t BytePollable;
+
+/* Portable vector write descriptor. */
+typedef struct ByteChannelVec {
+    const void *base;
+    size_t len;
+} ByteChannelVec;
 
 typedef struct ByteChannelVTable {
     // Reads up to 'cap' bytes into 'buf'. Returns:
@@ -34,6 +45,10 @@ typedef struct ByteChannelVTable {
     // -1 if error.
     ssize_t (*write_some)(ByteChannel *ch, const void *buf, size_t len);
 
+    // Optional: vector write. Returns bytes written or -1 on error.
+    // When NULL, callers should fallback to write_some.
+    ssize_t (*writev_some)(ByteChannel *ch, const ByteChannelVec *vecs, int vcnt);
+
     // Optional: flush buffered output if any. Returns ok/err.
     // For sockets/pipes implement to NULL, then bytech_flush helper returns ok.
     int (*flush)(ByteChannel *ch);
@@ -45,7 +60,7 @@ typedef struct ByteChannelVTable {
     // one used to poll for readability (data available to read)
     BytePollable (*get_pollable)(const ByteChannel *ch);
 
-    // Frees the ByteChannel allocation and any impl.
+    // Frees the ByteChannel allocation.
     void (*destroy)(ByteChannel *ch);
 } ByteChannelVTable;
 
@@ -61,6 +76,11 @@ static inline ssize_t bytech_read_some(ByteChannel *ch, void *buf, size_t cap) {
 }
 static inline ssize_t bytech_write_some(ByteChannel *ch, const void *buf, size_t len) {
     return ch->vt->write_some(ch, buf, len);
+}
+static inline ssize_t bytech_writev_some(ByteChannel *ch,
+        const ByteChannelVec *vecs, int vcnt) {
+    if (!ch->vt->writev_some) return -1;
+    return ch->vt->writev_some(ch, vecs, vcnt);
 }
 static inline int bytech_flush(ByteChannel *ch){
     if (!ch->vt->flush) return OK;

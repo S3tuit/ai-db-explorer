@@ -14,13 +14,13 @@ static void write_be_u32(unsigned char *dst, uint32_t n) {
 
 static void test_frame_write_len(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
-  BufWriter *bw = bufwriter_create(ch);
-  ASSERT_TRUE(bw != NULL);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(-1, fileno(out));
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
 
   const char *payload = "hello";
-  ASSERT_TRUE(frame_write_len(bw, payload, 5) == OK);
-  bufwriter_destroy(bw);
+  ASSERT_TRUE(frame_write_len(bc, payload, 5) == OK);
+  bufch_destroy(bc);
 
   char *raw = read_all(out);
   ASSERT_TRUE(raw != NULL);
@@ -44,17 +44,17 @@ static void test_frame_read_len(void) {
   fflush(in);
   fseek(in, 0, SEEK_SET);
 
-  ByteChannel *ch = stdio_bytechannel_create(fileno(in), -1, 0);
-  BufReader *br = bufreader_create(ch);
-  ASSERT_TRUE(br != NULL);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
 
   StrBuf payload = {0};
-  ASSERT_TRUE(frame_read_len(br, &payload) == OK);
+  ASSERT_TRUE(frame_read_len(bc, &payload) == OK);
   ASSERT_TRUE(payload.len == 5);
   ASSERT_TRUE(memcmp(payload.data, "hello", 5) == 0);
 
   sb_clean(&payload);
-  bufreader_destroy(br);
+  bufch_destroy(bc);
   fclose(in);
 }
 
@@ -67,27 +67,27 @@ static void test_frame_read_len_too_large(void) {
   fflush(in);
   fseek(in, 0, SEEK_SET);
 
-  ByteChannel *ch = stdio_bytechannel_create(fileno(in), -1, 0);
-  BufReader *br = bufreader_create(ch);
-  ASSERT_TRUE(br != NULL);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
 
   StrBuf payload = {0};
-  ASSERT_TRUE(frame_read_len(br, &payload) == ERR);
+  ASSERT_TRUE(frame_read_len(bc, &payload) == ERR);
 
   sb_clean(&payload);
-  bufreader_destroy(br);
+  bufch_destroy(bc);
   fclose(in);
 }
 
 static void test_frame_write_cl(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
-  BufWriter *bw = bufwriter_create(ch);
-  ASSERT_TRUE(bw != NULL);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(-1, fileno(out));
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
 
   const char *payload = "abc";
-  ASSERT_TRUE(frame_write_cl(bw, payload, 3) == OK);
-  bufwriter_destroy(bw);
+  ASSERT_TRUE(frame_write_cl(bc, payload, 3) == OK);
+  bufch_destroy(bc);
 
   char *res = read_all(out);
   ASSERT_STREQ(res, "Content-Length: 3\r\n\r\nabc");

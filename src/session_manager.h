@@ -14,7 +14,7 @@
  * execute queries for that client. */
 typedef struct SessionManager {
     CommandReader *r;         // owned
-    BufWriter *out_bw;      // owned
+    BufChannel *out_bc;      // owned
     DbBackend *db;          // not owned (caller owns)
     uint32_t next_id;       // monotonically increasing request id
     char last_err[256];     // last fatal error (best-effort)

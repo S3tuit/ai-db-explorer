@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/uio.h>
 
 // TODO: when adding support for Windows too, this should become fd_bytechannel
 // while on Windows we'll have handle_byechannel and the public stdio will be
@@ -12,7 +13,7 @@
 typedef struct StdioByteChannelImpl {
     int in_fd;
     int out_fd;
-    int close_on_destroy;
+    int owns_fds;
     int is_closed;
 } StdioByteChannelImpl;
 
@@ -44,6 +45,21 @@ static ssize_t stdio_write_some(ByteChannel *ch, const void *buf, size_t len) {
     // same as read, we don't want buffering. We want to writer everything as
     // soon as this func in called
     return write(impl->out_fd, buf, len);
+}
+
+static ssize_t stdio_writev_some(ByteChannel *ch,
+        const ByteChannelVec *vecs, int vcnt) {
+    StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
+    if (!impl || impl->is_closed) return ERR;
+    if (impl->out_fd < 0) return ERR;
+    if (!vecs || vcnt <= 0) return ERR;
+
+    struct iovec iov[vcnt];
+    for (int i = 0; i < vcnt; i++) {
+        iov[i].iov_base = (void *)vecs[i].base;
+        iov[i].iov_len = vecs[i].len;
+    }
+    return writev(impl->out_fd, iov, vcnt);
 }
 
 static int stdio_flush(ByteChannel *ch) {
@@ -85,7 +101,7 @@ static int stdio_close(ByteChannel *ch) {
     int rc = OK;
 
     // If we don't own, just mark closed.
-    if (!impl->close_on_destroy) {
+    if (!impl->owns_fds) {
         impl->is_closed = 1;
         return OK;
     }
@@ -123,13 +139,14 @@ static void stdio_destroy(ByteChannel *ch) {
 static const ByteChannelVTable STDIO_BYTE_CHANNEL_VT = {
     .read_some      = stdio_read_some,
     .write_some     = stdio_write_some,
+    .writev_some    = stdio_writev_some,
     .flush          = stdio_flush,
     .shutdown_write = stdio_shutdown_write,
     .get_pollable   = stdio_get_pollable,
     .destroy        = stdio_destroy
 };
 
-ByteChannel *stdio_bytechannel_create(int in_fd, int out_fd, int close_on_destroy) {
+static ByteChannel *stdio_bytechannel_create_impl(int in_fd, int out_fd, int owns_fds) {
     if (in_fd < 0 && out_fd < 0) {
         return NULL;
     }
@@ -139,10 +156,18 @@ ByteChannel *stdio_bytechannel_create(int in_fd, int out_fd, int close_on_destro
 
     impl->in_fd = in_fd;
     impl->out_fd = out_fd;
-    impl->close_on_destroy = close_on_destroy ? 1 : 0;
+    impl->owns_fds = owns_fds ? 1 : 0;
     impl->is_closed = 0;
 
     ch->vt = &STDIO_BYTE_CHANNEL_VT;
     ch->impl = impl;
     return ch;
+}
+
+ByteChannel *stdio_bytechannel_open_fd(int in_fd, int out_fd) {
+    return stdio_bytechannel_create_impl(in_fd, out_fd, 1);
+}
+
+ByteChannel *stdio_bytechannel_wrap_fd(int in_fd, int out_fd) {
+    return stdio_bytechannel_create_impl(in_fd, out_fd, 0);
 }

@@ -7,7 +7,7 @@
 
 static void test_stdio_read_some(void) {
   FILE *in = MEMFILE_IN("abc");
-  ByteChannel *ch = stdio_bytechannel_create(fileno(in), -1, 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
   ASSERT_TRUE(ch != NULL);
 
   char buf[4] = {0};
@@ -28,7 +28,7 @@ static void test_stdio_read_some(void) {
 
 static void test_stdio_write_and_flush(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(-1, fileno(out));
   ASSERT_TRUE(ch != NULL);
 
   ssize_t n1 = bytech_write_some(ch, "hi", 2);
@@ -45,7 +45,7 @@ static void test_stdio_write_and_flush(void) {
 
 static void test_stdio_shutdown_write_blocks(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(-1, fileno(out));
   ASSERT_TRUE(ch != NULL);
 
   ssize_t n1 = bytech_write_some(ch, "x", 1);
@@ -65,7 +65,7 @@ static void test_stdio_shutdown_write_blocks(void) {
 
 static void test_close_on_destroy_false_keeps_stream_open(void) {
   FILE *out = MEMFILE_OUT();
-  ByteChannel *ch = stdio_bytechannel_create(-1, fileno(out), 0);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(-1, fileno(out));
   ASSERT_TRUE(ch != NULL);
 
   bytech_destroy(ch);

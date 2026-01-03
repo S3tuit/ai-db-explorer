@@ -8,12 +8,12 @@ typedef struct {
     int i;
 } SecurityContext;
 
-SecurityContext *security_ctx_create() {
+static inline SecurityContext *security_ctx_create() {
     SecurityContext *s = xmalloc(sizeof(*s));
     return s;
 }
 
-void security_ctx_destroy(SecurityContext *s) {
+static inline void security_ctx_destroy(SecurityContext *s) {
     free(s);
 }
 

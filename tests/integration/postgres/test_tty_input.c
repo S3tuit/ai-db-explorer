@@ -38,7 +38,7 @@ static int wait_for_output(int fd, const char *needle, int timeout_ms) {
 /* BUG tested: when the user of the app writes a terminated statements and then
  * hits Enter, out app should immidiately execute the statement. It should not
  * wait for an EOF to appear. This is a responsibility of the ByteChannel and
- * BufReader. */
+ * BufChannel. */
 static void test_tty_input_executes_on_newline(void) {
     // master-slave PTY
     int master_fd = posix_openpt(O_RDWR | O_NOCTTY);

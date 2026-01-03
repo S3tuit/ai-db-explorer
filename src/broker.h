@@ -9,14 +9,14 @@
 #include "db_backend.h"
 #include "security_context.h"
 
+
 /* The entity responsible for connecting to databases and running the commands
  * of the clients. */
 typedef struct Broker Broker;
 
 /* This entity stores the usefull data to communicate with each Client. */
 typedef struct BrokerClientSession {
-    BufReader br;
-    BufWriter bw;
+    BufChannel bc;
 
     /* Session state */
     char *current_dbname;   // owned string, may be NULL
@@ -34,5 +34,8 @@ void broker_destroy(Broker *b);
  * flag / signal handling.
  */
 int broker_run(Broker *b);
+
+// Valid commands for the Broker
+#define BROK_EXEC_CMD "exec"
 
 #endif

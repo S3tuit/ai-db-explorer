@@ -8,64 +8,59 @@
 #include "string_op.h"
 
 
-/* Buffered I/O on top of a ByteChannel. This layer is protocol-agnostic. */
+/* Buffered I/O on top of a ByteChannel. This layer is protocol-agnostic.
+ *
+ * Ownership: BufChannel always owns its ByteChannel and will destroy it.
+ * Use stdio_bytechannel_wrap_fd when you need a non-owning ByteChannel.
+ *
+ * Pattern:
+ * - One BufChannel per full-duplex transport (read + write on same fd).
+ * - Use separate BufChannels only when the underlying fds differ
+ *   (e.g., stdin and stdout).
+ */
 
-typedef struct BufReader {
-    ByteChannel *ch;   // owned; destroyed in bufreader_destroy
+typedef struct BufChannel {
+    ByteChannel *ch;   // owned; destroyed in bufch_destroy
     StrBuf buf;        // read buffer
     size_t rpos;       // read position within buf.data [0..buf.len]
     int eof;           // sticky EOF flag (seen 0 from read_some)
-} BufReader;
+} BufChannel;
 
-typedef struct BufWriter {
-    ByteChannel *ch;   // owned; destroyed in bufwriter_destroy
-} BufWriter;
+/* Initializes a BufChannel without allocating it. */
+int bufch_init(BufChannel *bc, ByteChannel *ch);
 
-
-/* ------------------------------- Reader ---------------------------------- */
-/* Initializes a BufReader without allocating it. */
-int bufreader_init(BufReader *br, ByteChannel *ch);
-
-BufReader *bufreader_create(ByteChannel *ch);
+BufChannel *bufch_create(ByteChannel *ch);
 
 /* cleanup and close/destroy ByteChannel */
-void bufreader_clean(BufReader *br);
+void bufch_clean(BufChannel *bc);
 
 /* cleanup and close/destroy ByteChannel */
-void bufreader_destroy(BufReader *br);
+void bufch_destroy(BufChannel *bc);
 
-// Ensures at least 'need' bytes are available to peek/consume from 'br'.
+// Ensures at least 'need' bytes are available to peek/consume from 'bc'.
 // Returns YES/NO/ERR, and sets EOF state if peer closes.
-int bufreader_ensure(BufReader *br, size_t need);
+int bufch_ensure(BufChannel *bc, size_t need);
 
 // Returns a pointer to available data buffered but not read and stores its
 // length inside 'out_val'. The returned pointer is valid until next
 // ensure/read. Returns NULL if there's nothing to peek.
 // NOTE: peek consider data already buffered, if this returns NULL it doesn't
 // mean it's EOF, call ensure for that.
-const uint8_t *bufreader_peek(const BufReader *br, size_t *out_avail);
+const uint8_t *bufch_peek(const BufChannel *bc, size_t *out_avail);
 
 // Copies exactly 'n' bytes into 'dst', consuming them.
-int bufreader_read_n(BufReader *br, void *dst, size_t n);
+int bufch_read_n(BufChannel *bc, void *dst, size_t n);
 
 // Finds a byte pattern in the buffered data. Returns index (offset from current
 // read position) if found, else -1. This is not efficient for long patterns.
-ssize_t bufreader_find(const BufReader *br, const void *needle, size_t needle_len);
+ssize_t bufch_find(const BufChannel *bc, const void *needle, size_t needle_len);
 
+/* Writes all 'n' bytes from 'src' to 'bc'. Returns ok/err. */
+int bufch_write_all(BufChannel *bc, const void *src, size_t n);
 
-/* ------------------------------- Writer ---------------------------------- */
-/* Initializes a BufWriter without allocating it. */
-int bufwriter_init(BufWriter *bw, ByteChannel *ch);
-
-BufWriter *bufwriter_create(ByteChannel *ch);
-
-/* cleanup and close/destroy ByteChannel */
-void bufwriter_clean(BufWriter *bw);
-
-/* cleanup and close/destroy ByteChannel */
-void bufwriter_destroy(BufWriter *bw);
-
-/* Writes all 'n' bytes from 'src' to 'bw'. Returns ok/err. */
-int bufwriter_write_all(BufWriter *bw, const void *src, size_t n);
+/* Writes header + payload with a vector fast path when available. */
+int bufch_write2v(BufChannel *bc,
+                    const void *h, size_t hlen,
+                    const void *p, size_t plen);
 
 #endif

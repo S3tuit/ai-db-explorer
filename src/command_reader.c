@@ -19,13 +19,13 @@ static void stash_consume_prefix(CommandReader *r, size_t n) {
 
 CommandReader *command_reader_create(ByteChannel *ch) {
     if (!ch) return NULL;
-    BufReader *br = bufreader_create(ch);
-    if (!br) {
+    BufChannel *bc = bufch_create(ch);
+    if (!bc) {
         bytech_destroy(ch);
         return NULL;
     }
     CommandReader *r = (CommandReader *)xmalloc(sizeof(*r));
-    r->br = br;
+    r->bc = bc;
     r->stash.data = NULL;
     r->stash.len = 0;
     r->stash.cap = 0;
@@ -36,15 +36,15 @@ void command_reader_destroy(CommandReader *r) {
     if (!r) return;
 
     sb_clean(&r->stash);
-    if (r->br) {
-        bufreader_destroy(r->br);
-        r->br = NULL;
+    if (r->bc) {
+        bufch_destroy(r->bc);
+        r->bc = NULL;
     }
     free(r);
 }
 
 /* Stores inside 'acc' all the bytes until, not including, a ';' that's not
- * enclosed in quotes. The remaining bytes of r->br are appended to r->stash. */
+ * enclosed in quotes. The remaining bytes of r->bc are appended to r->stash. */
 static int command_reader_read_stmt(CommandReader *r, StrBuf *acc) {
     if (!r || !acc) return ERR;
     acc->len = 0;
@@ -67,11 +67,11 @@ static int command_reader_read_stmt(CommandReader *r, StrBuf *acc) {
             src_len = r->stash.len;
         } else {
             size_t avail = 0;
-            const uint8_t *peek = bufreader_peek(r->br, &avail);
+            const uint8_t *peek = bufch_peek(r->bc, &avail);
 
             // no more bytes buffered, see if it's EOF or there are more bytes
             if (peek == NULL || avail == 0) {
-                int rc = bufreader_ensure(r->br, 1);
+                int rc = bufch_ensure(r->bc, 1);
                 if (rc == ERR) return ERR;
                 if (rc == NO) {
                     if (acc->len == 0) return NO;
@@ -81,7 +81,7 @@ static int command_reader_read_stmt(CommandReader *r, StrBuf *acc) {
             }
 
             tmp = (unsigned char *)xmalloc(avail);
-            if (bufreader_read_n(r->br, tmp, avail) != OK) {
+            if (bufch_read_n(r->bc, tmp, avail) != OK) {
                 free(tmp);
                 return ERR;
             }

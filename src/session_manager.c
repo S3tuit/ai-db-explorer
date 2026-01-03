@@ -27,18 +27,18 @@ int session_init(SessionManager *s, FILE *in, FILE *out, DbBackend *db) {
     int out_fd = fileno(out);
     if (in_fd < 0 || out_fd < 0) return ERR;
 
-    ByteChannel *ch = stdio_bytechannel_create(in_fd, -1, 0);
+    ByteChannel *ch = stdio_bytechannel_wrap_fd(in_fd, -1);
     if (!ch) return ERR;
     s->r = command_reader_create(ch);
     if (!s->r) return ERR;
-    ByteChannel *out_ch = stdio_bytechannel_create(-1, out_fd, 0);
+    ByteChannel *out_ch = stdio_bytechannel_wrap_fd(-1, out_fd);
     if (!out_ch) {
         command_reader_destroy(s->r);
         s->r = NULL;
         return ERR;
     }
-    s->out_bw = bufwriter_create(out_ch);
-    if (!s->out_bw) {
+    s->out_bc = bufch_create(out_ch);
+    if (!s->out_bc) {
         bytech_destroy(out_ch);
         command_reader_destroy(s->r);
         s->r = NULL;
@@ -83,7 +83,7 @@ int session_run(SessionManager *s) {
                 return ERR;
             }
 
-            if (frame_write_cl(s->out_bw, payload, payload_len) != OK) {
+            if (frame_write_cl(s->out_bc, payload, payload_len) != OK) {
                 free(payload);
                 qr_destroy(qr);
                 command_destroy(cmd);
@@ -124,7 +124,7 @@ int session_run(SessionManager *s) {
             return ERR;
         }
 
-        if (frame_write_cl(s->out_bw, payload, payload_len) != OK) {
+        if (frame_write_cl(s->out_bc, payload, payload_len) != OK) {
             free(payload);
             qr_destroy(qr);
             sm_set_err(s, "transport writer failed");
@@ -142,9 +142,9 @@ void session_clean(SessionManager *s) {
         command_reader_destroy(s->r);
         s->r = NULL;
     }
-    if (s->out_bw) {
-        bufwriter_destroy(s->out_bw);
-        s->out_bw = NULL;
+    if (s->out_bc) {
+        bufch_destroy(s->out_bc);
+        s->out_bc = NULL;
     }
 }
 

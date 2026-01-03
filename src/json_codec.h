@@ -6,11 +6,7 @@
 
 #include "command_reader.h"
 #include "query_result.h"
-
-/* 
- * Everything is encoded into a JSON-RPC 2.0 payload (no Content-Length
- * frame).
- */
+#include "broker.h"
 
 /*
  * Format:
@@ -24,11 +20,9 @@
  *
  * NOTE: Caller must free(*out_json).
  */
-int qr_to_jsonrpc(const QueryResult *qr, char **out_json,
-        size_t *out_len);
+int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len);
 
-/* Serializes 'method' and a variable number of [key, value] strings. The keys
- * and values must be exaclty 'key_no'.
+/* Serializes 'method' and a variable number of [key, value] strings.
  *
  * Format:
  *  {"jsonrpc":"2.0","id":<'id'>,"method":<'method'>,"params":{<key>:<value>}}
@@ -41,7 +35,7 @@ int qr_to_jsonrpc(const QueryResult *qr, char **out_json,
  *  CMD_SQL:
  *    {"jsonrpc":"2.0","id":<u>,"method":"exec","params":{"sql":<s>}}
  *  CMD_META (with args):
- *    {"jsonrpc":"2.0","id":<u>,"method":<s>,"params":{"raw":<s>}}
+ *    {"jsonrpc":"2.0","id":<u>,"method":<s>,"params":{"<arg>":<value>}}
  *  CMD_META (no args):
  *    {"jsonrpc":"2.0","id":<u>,"method":<s>}
  *
@@ -64,8 +58,11 @@ int command_to_jsonrpc(const Command *cmd, uint32_t id,
  *
  * Returns:
  *  YES -> all keys found and values stored.
- *  NO  -> at least one key missing or value is null (outputs unchanged).
+ *  NO  -> at least one key missing or value is null. The value of the outputs
+ *          is UB.
  *  ERR -> parse/type error.
+ *
+ * Note: output strings are NUL-terminated.
  */
 int json_get_value(const char *json, size_t json_len, const char *fmt, ...);
 

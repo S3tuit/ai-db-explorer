@@ -8,7 +8,7 @@
 
 /* This entity reads statements from a buffered byte stream. */
 typedef struct CommandReader {
-    BufReader *br;  // owned
+    BufChannel *bc;  // owned
     StrBuf stash;   // unconsumed bytes from previous reads (after ';')
 } CommandReader;
 
@@ -26,10 +26,10 @@ typedef struct {
     char *args;         // Valid if CMD_META. Raw arguments (may be NULL).
 } Command;
 
-/* Creates the reader and takes ownership of 'ch' (via BufReader). */
+/* Creates the reader and takes ownership of 'ch' (via BufChannel). */
 CommandReader *command_reader_create(ByteChannel *ch);
 
-/* Frees internal buffers and owned BufReader/ByteChannel. */
+/* Frees internal buffers and owned BufChannel/ByteChannel. */
 void command_reader_destroy(CommandReader *r);
 
 /* Reads next statement from its stream. A statement ends when a semicolon ';'

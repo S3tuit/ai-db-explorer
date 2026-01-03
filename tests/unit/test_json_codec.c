@@ -327,9 +327,10 @@ static void test_json_encode_decode_missing(void) {
     };
     int rc = command_to_jsonrpc(&cmd, 1, &json, &json_len);
     ASSERT_TRUE(rc == OK);
-
+    
+    uint32_t id = 0;
     char *raw = NULL;
-    rc = json_get_value(json, json_len, "%s", "params.raw", &raw);
+    rc = json_get_value(json, json_len, "%u%s", "id", &id, "params.raw", &raw);
     ASSERT_TRUE(rc == NO);
 
     free(json);
