@@ -13,10 +13,6 @@ static inline int idx_ok(const QueryResult *qr, uint32_t row, uint32_t col) {
 }
 
 QueryResult *qr_create_ok(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated) {
-    // Overflow check for nrows*ncols
-    if (ncols != 0 && nrows > (UINT32_MAX / ncols)) {
-        return NULL;
-    }
     QueryResult *qr = xmalloc(sizeof(*qr));
     size_t ncells = (size_t)ncols * (size_t)nrows;
 
@@ -44,6 +40,13 @@ QueryResult *qr_create_err(uint32_t id, const char *err_msg) {
     qr->err_msg = xmalloc(len);
     memcpy(qr->err_msg, err, len);
 
+    return qr;
+}
+
+QueryResult *qr_create_msg(uint32_t id, const char *msg) {
+    QueryResult *qr = qr_create_ok(id, 1, 1, 0);
+    qr_set_col(qr, 0, "message", "text");
+    qr_set_cell(qr, 0, 0, msg ? msg : "");
     return qr;
 }
 

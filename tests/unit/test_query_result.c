@@ -131,12 +131,35 @@ static void test_create_error(void) {
     qr_destroy(qr);
 }
 
+static void test_create_msg(void) {
+    QueryResult *qr = qr_create_msg(9, "Hello");
+    ASSERT_TRUE(qr != NULL);
+    ASSERT_TRUE(qr->id == 9);
+    ASSERT_TRUE(qr->status == QR_OK);
+    ASSERT_TRUE(qr->ncols == 1);
+    ASSERT_TRUE(qr->nrows == 1);
+    ASSERT_STREQ(qr_get_col(qr, 0)->name, "message");
+    ASSERT_STREQ(qr_get_col(qr, 0)->type, "text");
+    ASSERT_STREQ(qr_get_cell(qr, 0, 0), "Hello");
+    qr_destroy(qr);
+
+    QueryResult *qr_null = qr_create_msg(10, NULL);
+    ASSERT_TRUE(qr_null != NULL);
+    ASSERT_TRUE(qr_null->id == 10);
+    ASSERT_TRUE(qr_null->status == QR_OK);
+    ASSERT_TRUE(qr_null->ncols == 1);
+    ASSERT_TRUE(qr_null->nrows == 1);
+    ASSERT_STREQ(qr_get_cell(qr_null, 0, 0), "");
+    qr_destroy(qr_null);
+}
+
 int main(void) {
     test_create_and_basic_set_get();
     test_set_cell_capped_respects_cap();
     test_deep_copy_outlives_input_buffers();
     test_bounds_and_bad_inputs();
     test_create_error();
+    test_create_msg();
 
     fprintf(stderr, "OK: test_query_result\n");
     return 0;

@@ -41,11 +41,17 @@ typedef struct QueryResult {
 
 } QueryResult;
 
-/* Creates a QueryResult with allocated storage for cells (all NULL). */
+/* Creates a QueryResult with allocated storage for cells (all NULL). Can't
+ * return NULL. */
 QueryResult *qr_create_ok(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated);
 
-/* Creates a QueryResult that represents an error. malloc 'err_msg'. */
+/* Creates a QueryResult that represents an error. malloc 'err_msg'. Can't
+ * return NULL. */
 QueryResult *qr_create_err(uint32_t id, const char *err_msg);
+
+/* Creates a QueryResult with a single text column named "message" and one row.
+ * If msg is NULL, stores an empty string. Can't return NULL. */
+QueryResult *qr_create_msg(uint32_t id, const char *msg);
 
 /* Frees all owned memory, 'qr' itself too. */
 void qr_destroy(QueryResult *qr);

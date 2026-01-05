@@ -22,22 +22,24 @@
  */
 int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len);
 
-/* Serializes 'method' and a variable number of [key, value] strings.
- *
- * Format:
- *  {"jsonrpc":"2.0","id":<'id'>,"method":<'method'>,"params":{<key>:<value>}}
- * 
- * Returns the same as qr_to_jsonrpc.
- * */
 /* Serializes a Command into JSON-RPC.
  *
  * Format:
  *  CMD_SQL:
  *    {"jsonrpc":"2.0","id":<u>,"method":"exec","params":{"sql":<s>}}
  *  CMD_META (with args):
- *    {"jsonrpc":"2.0","id":<u>,"method":<s>,"params":{"<arg>":<value>}}
+ *    {"jsonrpc":"2.0","id":<u>,"method":<s>,"params":{<k>:<v>...}}
  *  CMD_META (no args):
  *    {"jsonrpc":"2.0","id":<u>,"method":<s>}
+ *
+ * Best-effort parsing (client never fails on args):
+ * - Values parse as positive integers only when all digits; otherwise string.
+ * - Quotes allow spaces in values; quotes are stripped (no escaping).
+ * - Tokens without '=' become {"token":""}.
+ * - Empty keys/values are allowed; duplicate keys: last wins.
+ * - Keys with no '=' are treated as empty (e.g., a b -> {"a":"", "b":""}).
+ * - The first '=' is treated as key-value separator, extra '=' in a token
+ *   become part of the value (e.g., a=1=b -> {"a":"1=b"}).
  *
  * Returns the same as qr_to_jsonrpc.
  * */

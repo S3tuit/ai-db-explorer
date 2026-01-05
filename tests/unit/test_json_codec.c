@@ -267,7 +267,7 @@ static void test_command_to_jsonrpc_meta(void) {
 
     const char *expected =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"connect\",\"params\":{"
-          "\"raw\":\"name=\\\"main\\\"\""
+          "\"name\":\"main\""
         "}}";
 
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
@@ -294,6 +294,92 @@ static void test_command_to_jsonrpc_meta_no_params(void) {
     assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
 
     free(json);
+}
+
+static void test_command_to_jsonrpc_meta_parse_args(void) {
+    char *json = NULL;
+    size_t json_len = 0;
+
+    Command cmd = {
+        .type = CMD_META,
+        .cmd = "connect",
+        .args = "timeout=123 timeout=7"
+    };
+    int rc = command_to_jsonrpc(&cmd, 3, &json, &json_len);
+
+    ASSERT_TRUE(rc == OK);
+
+    const char *expected =
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"connect\",\"params\":{"
+          "\"timeout\":7"
+        "}}";
+
+    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+    free(json);
+}
+
+static void test_command_to_jsonrpc_meta_no_equals(void) {
+    char *json = NULL;
+    size_t json_len = 0;
+
+    Command cmd = {
+        .type = CMD_META,
+        .cmd = "connect",
+        .args = "dbname postgres"
+    };
+    int rc = command_to_jsonrpc(&cmd, 4, &json, &json_len);
+
+    ASSERT_TRUE(rc == OK);
+
+    const char *expected =
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"connect\",\"params\":{"
+          "\"dbname\":\"\",\"postgres\":\"\""
+        "}}";
+
+    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+    free(json);
+}
+
+static void test_command_to_jsonrpc_meta_arg_cases(void) {
+    struct {
+        const char *args;
+        const char *expected_params;
+    } cases[] = {
+        { "key=\"value a b", "\"key\":\"value a b\"" },
+        { "a=1=b", "\"a\":\"1=b\"" },
+        { "=1", "\"\":1" },
+        { "overflow=123456789012345678901234567890",
+          "\"overflow\":\"123456789012345678901234567890\"" },
+        { "a=a a=b", "\"a\":\"b\"" },
+        { "string=123a", "\"string\":\"123a\"" },
+        { "timeout=123 55", "\"timeout\":123,\"55\":\"\"" },
+        { "peppa=\"pig\" pig=\"peppa\"", "\"peppa\":\"pig\",\"pig\":\"peppa\"" }
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *json = NULL;
+        size_t json_len = 0;
+
+        Command cmd = {
+            .type = CMD_META,
+            .cmd = "connect",
+            .args = (char *)cases[i].args
+        };
+        int rc = command_to_jsonrpc(&cmd, 5, &json, &json_len);
+        ASSERT_TRUE(rc == OK);
+
+        char expected[512];
+        int n = snprintf(expected, sizeof(expected),
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"connect\",\"params\":{%s}}",
+            cases[i].expected_params);
+        ASSERT_TRUE(n > 0);
+        ASSERT_TRUE((size_t)n < sizeof(expected));
+
+        assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+        free(json);
+    }
 }
 
 static void test_json_encode_decode_present(void) {
@@ -356,6 +442,13 @@ static void test_json_get_value_null(void) {
     ASSERT_TRUE(rc == NO);
 }
 
+static void test_json_get_value_u32_overflow(void) {
+    const char *json = "{\"a\":4294967296}";
+    uint32_t v = 0;
+    int rc = json_get_value(json, strlen(json), "%u", "a", &v);
+    ASSERT_TRUE(rc == ERR);
+}
+
 int main (void) {
     test_json_basic_rows_and_nulls();
     test_json_null_qrcolumn_safe_defaults();
@@ -365,10 +458,14 @@ int main (void) {
     test_command_to_jsonrpc_sql();
     test_command_to_jsonrpc_meta();
     test_command_to_jsonrpc_meta_no_params();
+    test_command_to_jsonrpc_meta_parse_args();
+    test_command_to_jsonrpc_meta_no_equals();
+    test_command_to_jsonrpc_meta_arg_cases();
     test_json_encode_decode_present();
     test_json_encode_decode_missing();
     test_json_get_value_strings();
     test_json_get_value_null();
+    test_json_get_value_u32_overflow();
 
     fprintf(stderr, "OK: test_json\n");
     return(0);

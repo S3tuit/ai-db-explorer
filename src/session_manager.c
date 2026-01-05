@@ -117,7 +117,6 @@ int session_run(SessionManager *s) {
 
         char *payload = NULL;
         size_t payload_len = 0;
-
         if (qr_to_jsonrpc(qr, &payload, &payload_len) != OK || !payload) {
             qr_destroy(qr);
             sm_set_err(s, "json encoding failed");

@@ -11,6 +11,7 @@ typedef struct DbBackend DbBackend;
 typedef struct DbBackendVTable {
     // Estabilishes a connection at 'conninfo' and makes sure statements sent
     // using 'db' comply with 'policy'. 'db' takes ownership of 'policy'.
+    // Returns ok/err.
     int (*connect)(DbBackend *db, const char *conninfo, const SafetyPolicy *policy);
     
     // Closes the connection of 'db' and frees its allocation

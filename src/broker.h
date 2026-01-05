@@ -17,6 +17,7 @@ typedef struct Broker Broker;
 /* This entity stores the usefull data to communicate with each Client. */
 typedef struct BrokerClientSession {
     BufChannel bc;
+    int fd;              // connection identity (owned by bc/ch)
 
     /* Session state */
     char *current_dbname;   // owned string, may be NULL
