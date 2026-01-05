@@ -21,19 +21,33 @@ static inline void security_ctx_destroy(SecurityContext *ctx) {
     free(ctx);
 }
 
-static inline char *security_ctx_get_connection(SecurityContext *ctx, DbBackend **out_db,
-                                    SafetyPolicy **out_policy, char *dbname) {
-    if (ctx && strcmp(dbname, "postgres") && out_db && out_policy) {
+/* Best-effort connector. Returns:
+ *  YES -> *out_db is connected and owned by caller.
+ *  NO  -> known db, but connection failed.
+ *  ERR -> unknown db or bad input. */
+static inline int security_ctx_connect(SecurityContext *ctx,
+        const char *dbname, DbBackend **out_db) {
+    if (!ctx || !dbname || !out_db) return ERR;
+    *out_db = NULL;
 
-        SafetyPolicy *policy = xmalloc(sizeof(*policy));
-        if (safety_policy_init(policy, NULL, NULL, NULL, NULL) != OK) goto error; 
-        *out_policy = policy;
-        *out_db = postgres_backend_create();
-        return "host=localhost port=5432 dbname=postgres user=postgres password=postgres";
+    if (strcmp(dbname, "postgres") != 0) return ERR;
+
+    DbBackend *db = postgres_backend_create();
+    SafetyPolicy policy = {0};
+    if (safety_policy_init(&policy, NULL, NULL, NULL, NULL) != OK) {
+        db->vt->destroy(db);
+        return NO;
     }
 
-error:
-    return NULL;
+    const char *conninfo =
+        "host=localhost port=5432 dbname=postgres user=postgres password=postgres";
+    if (db->vt->connect(db, conninfo, &policy) != OK) {
+        db->vt->destroy(db);
+        return NO;
+    }
+
+    *out_db = db;
+    return YES;
 }
 
 #endif

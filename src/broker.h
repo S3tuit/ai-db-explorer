@@ -10,6 +10,8 @@
 #include "security_context.h"
 
 
+#define SOCK_PATH "./build/aidbexplorer.sock"
+
 /* The entity responsible for connecting to databases and running the commands
  * of the clients. */
 typedef struct Broker Broker;
@@ -24,10 +26,6 @@ typedef struct BrokerClientSession {
     DbBackend *db;          // owned, may be NULL
 } BrokerClientSession;
 
-/* Create/destroy broker. */
-Broker *broker_create();
-void broker_destroy(Broker *b);
-
 /* Run broker event loop (blocking).
  * Returns OK on clean stop, ERR on fatal error.
  *
@@ -38,5 +36,9 @@ int broker_run(Broker *b);
 
 // Valid commands for the Broker
 #define BROK_EXEC_CMD "exec"
+
+/* Create/destroy broker. If sock_path is NULL, it uses the default. */
+Broker *broker_create(const char *sock_path);
+void broker_destroy(Broker *b);
 
 #endif

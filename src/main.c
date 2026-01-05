@@ -1,47 +1,59 @@
-#include "session_manager.h"
-#include "postgres_backend.h"
-#include "safety_policy.h"
+#include "client.h"
+#include "broker.h"
 #include "utils.h"
 
 #include <stdio.h>
+#include <string.h>
 
-static SafetyPolicy policy_default(void) {
-    SafetyPolicy p = {0};
-    p.read_only = 1;
-    p.statement_timeout_ms = 5000;
-    p.max_rows = 200;
-    p.max_cell_bytes = 4096;
-    return p;
+static void print_usage(const char *prog) {
+    fprintf(stderr, "Usage: %s [-client|-broker] [-sock <path>]\n", prog);
 }
 
-static const char *test_conninfo(void) {
-    return "host=localhost port=5432 dbname=postgres user=postgres password=postgres";
-}
+int main(int argc, char **argv) {
+    const char *sock_path = SOCK_PATH;
+    int run_client = 1;
 
-int main(void) {
-    SafetyPolicy policy = policy_default();
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-client") == 0) {
+            run_client = 1;
+        } else if (strcmp(argv[i], "-broker") == 0) {
+            run_client = 0;
+        } else if (strcmp(argv[i], "-sock") == 0) {
+            if (i + 1 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            sock_path = argv[++i];
+        } else {
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
 
-    DbBackend *pg = postgres_backend_create();
-    if (!pg) return 1;
+    if (run_client) {
+        Client c;
+        if (client_init(&c, stdin, stdout, sock_path) != OK) {
+            fprintf(stderr, "ERROR: client init failed\n");
+            return 1;
+        }
+        
+        // keep init logs inside stderr
+        fprintf(stderr, "LOG: client init success\n");
+        int rc = client_run(&c);
+        if (rc != OK) fprintf(stderr, "ERROR: %s\n", client_last_error(&c));
+        client_clean(&c);
+        return (rc == OK) ? 0 : 1;
+    }
 
-    if (pg->vt->connect(pg, test_conninfo(), &policy) != OK) {
-        fprintf(stderr, "Can't connect to: %s", test_conninfo());
-        pg->vt->destroy(pg);
+    Broker *b = broker_create(sock_path);
+    if (!b) {
+        fprintf(stderr, "ERROR: broker init failed\n");
         return 1;
     }
 
-    SessionManager sm;
-    if (session_init(&sm, stdin, stdout, pg) != OK) {
-        pg->vt->destroy(pg);
-        return 1;
-    }
-
-    int rc = session_run(&sm);
-    if (rc != OK) fprintf(stderr, "ERROR: %s\n", sm.last_err);
-
-    session_clean(&sm);
-    pg->vt->destroy(pg);
-
+    fprintf(stderr, "LOG: broker init success\n");
+    int rc = broker_run(b);
+    if (rc != OK) fprintf(stderr, "ERROR: broker run failed\n");
+    broker_destroy(b);
     return (rc == OK) ? 0 : 1;
 }
-

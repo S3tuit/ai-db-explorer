@@ -6,6 +6,7 @@
 #include "json_codec.h"
 #include "query_result.h"
 #include "stdio_byte_channel.h"
+#include "string_op.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -18,9 +19,10 @@
 #include <errno.h>
 
 
-#define SOCK_PATH "/tmp/aidbexplorer.sock"
 // TODO: make this configurable
 #define MAX_CLIENTS 5
+// Maximum size of a single request payload (bytes). Larger frames are rejected.
+#define MAX_REQ_LEN (8u * 1024u * 1024u)
 
 struct Broker {
     // TODO: abstract the fd because the Broker should have no knowledge if it's
@@ -28,6 +30,7 @@ struct Broker {
     int listen_fd;                  // file descriptor of the socket used to
                                     // accept incoming connection requets
     SecurityContext *security;      // owned
+    char *sock_path;                // owned, socket path for the broker
     
     /* Array to handle sessions.
      * TODO: use an hashmap. */
@@ -171,7 +174,7 @@ static void broker_remove_session_at(Broker *b, size_t idx) {
     b->nsessions--;
 }
 
-Broker *broker_create() {
+Broker *broker_create(const char *sock_path) {
     Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
     b->listen_fd = -1;
@@ -179,11 +182,16 @@ Broker *broker_create() {
     b->sessions = NULL;
     b->nsessions = 0;
     b->cap = 0;
-    
-    // TODO: add a small limit to the size of the incoming commands like 8Mb
+
+    const char *path = sock_path ? sock_path : SOCK_PATH;
+    b->sock_path = dup_or_null(path);
+    if (!b->sock_path) {
+        broker_destroy(b);
+        return NULL;
+    }
 
     // Listening socket
-    b->listen_fd = make_listen_socket(SOCK_PATH);
+    b->listen_fd = make_listen_socket(b->sock_path);
     if (b->listen_fd < 0) {
         broker_destroy(b);
         return NULL;
@@ -208,6 +216,9 @@ void broker_destroy(Broker *b) {
         safe_close_fd(&b->listen_fd);
         b->listen_fd = -1;
     }
+
+    free(b->sock_path);
+    b->sock_path = NULL;
     
     security_ctx_destroy(b->security);
     free(b);
@@ -227,33 +238,39 @@ static QueryResult *broker_cmd_connect(Broker *b, BrokerClientSession *sess,
         return qr_create_err(id, "Abnormal situation detected in the broker while executing \\connect. Please retry.");
     }
 
-    char *dbname;
-    if (json_get_value(req, req_len, "%s", "dbname", &dbname) != YES) {
-        return qr_create_err(id, "Bad input in \\connect. Usage \\connect dbname=\"db_to_connect\"");
+    char *dbname = NULL;
+    QueryResult *q_res = NULL;
+    if (json_get_value(req, req_len, "%s", "params.dbname", &dbname) != YES) {
+        goto clean_n_ret;
     }
     
     // if any previous connection, close what 'sess' owned
     session_clean_db(sess);
 
-    SafetyPolicy *policy = NULL;
-    char *conninfo = security_ctx_get_connection(b->security, &sess->db, &policy, dbname);   
-    if (!conninfo || !sess->db || policy) {
+    int conn_rc = security_ctx_connect(b->security, dbname, &sess->db);
+    if (conn_rc == ERR) {
         session_clean_db(sess);
         char buf[128];
         snprintf(buf, sizeof(buf), "Unknown dbname: %s", dbname);
-        return qr_create_err(id, buf);
+        q_res = qr_create_err(id, buf);
+        goto clean_n_ret;
     }
-    
-    if (sess->db->vt->connect(sess->db, conninfo, policy) != OK) {
+    if (conn_rc == NO || !sess->db) {
         session_clean_db(sess);
         char buf[128];
         snprintf(buf, sizeof(buf), "Unable to connect to: %s", dbname);
-        return qr_create_err(id, buf);
+        q_res = qr_create_err(id, buf);
+        goto clean_n_ret;
     }
 
     char buf[128];
     snprintf(buf, sizeof(buf), "Successfully connected to: %s", dbname);
-    return qr_create_msg(id, buf);
+    q_res = qr_create_msg(id, buf);
+
+clean_n_ret:
+    if (!q_res) q_res = qr_create_err(id, "Bad input in \\connect. Usage \\connect dbname=\"db_to_connect\"");
+    free(dbname);
+    return q_res;
 }
 
 /* Core request handler:
@@ -275,9 +292,9 @@ static int broker_handle_request(Broker *b, BrokerClientSession *sess,
     
     QueryResult *q_res = NULL;
     // generic errors
-    if (rc != OK) {
+    if (rc != YES) {
         // fallback to 0 if id not present
-        if (json_get_value(req, req_len, "%u", "id", &id) != OK) {
+        if (json_get_value(req, req_len, "%u", "id", &id) != YES) {
             id = 0;
             q_res = qr_create_err(id, "Something went wrong internally. Please retry.");
         } else {
@@ -293,7 +310,7 @@ static int broker_handle_request(Broker *b, BrokerClientSession *sess,
         }
 
         char *query = NULL;
-        if (json_get_value(req, req_len, "%s", "sql", &query) != OK) {
+        if (json_get_value(req, req_len, "%s", "params.sql", &query) != YES) {
             free(query);
             q_res = qr_create_err(id, "Unable to understand the input command. Make sure it was valid.");
             goto return_res;
@@ -309,7 +326,7 @@ static int broker_handle_request(Broker *b, BrokerClientSession *sess,
 
     // commands
     } else if (strcmp(method, "connect") == 0) {
-        broker_cmd_connect(b, sess, req, req_len, id);
+        q_res = broker_cmd_connect(b, sess, req, req_len, id);
 
     // unknown commands
     } else {
@@ -400,6 +417,7 @@ int broker_run(Broker *b) {
                 if (broker_add_client(b, cfd) != 0) {
                     // fatal-ish; we keep going for robustness
                 }
+                break;
                 // TODO: For now we accept one at a time; loop accepts multiple
                 // if queued
             }
@@ -421,20 +439,25 @@ int broker_run(Broker *b) {
                 BrokerClientSession *sess = &b->sessions[i];
 
                 StrBuf req = {0};
+                QueryResult *q_res = NULL;
                 // TODO: frame_codec and json_codec return different outputs,
                 // one char **out, uint32_t *len... the other StrBuf **out.
                 // Make them consistent.
                 int rr = frame_read_len(&sess->bc, &req);
-                if (rr != OK) {
+                if (rr != OK || req.len > MAX_REQ_LEN) {
                     // framing error -> drop client
                     sb_clean(&req);
                     broker_remove_session_at(b, i);
                     continue;
                 }
                 
-
-                /* Call user handler to produce response payload */
-                QueryResult *q_res = NULL;
+                if (req.len > MAX_REQ_LEN) {
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Error. Broker ignores message longer than %d bytes. Please, respect the limit", MAX_REQ_LEN);
+                    q_res = qr_create_err(0, buf);
+                    goto send_q_res;
+                }
+                
                 int hr = broker_handle_request(b, sess, req.data, req.len, &q_res);
 
                 if (hr != OK) {
@@ -445,6 +468,7 @@ int broker_run(Broker *b) {
                 }
 
                 // Send response frame
+send_q_res:
                 if (broker_write_q_res(sess, q_res) != OK) {
                     sb_clean(&req);
                     qr_destroy(q_res);

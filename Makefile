@@ -47,7 +47,7 @@ $(BIN): $(APP_OBJ)
 	$(CC) $(APP_OBJ) -o $@ $(LDFLAGS)
 
 run: $(BIN)
-	./$(BIN)
+	./$(BIN) $(RUN_ARGS)
 
 # --- Tests build rules ---
 # Compile each test source to an object with sanitizers enabled
