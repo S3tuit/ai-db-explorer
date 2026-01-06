@@ -39,15 +39,6 @@ static void pg_set_err_pg(PgImpl *p, PGconn *conn, const char *prefix) {
     snprintf(p->last_err, sizeof(p->last_err), "%s: %s", prefix, e ? e : "");
 }
 
-/* Returns the millisecond of the system's monotonic time. It doesn't give
- * meaningfull info per se, it's used to calculate the ms taken between 2
- * actions. */
-static uint64_t now_ms_monotonic(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
-}
-
 /* Executes one or more SQL commands (separated by ';') and requires COMMAND_OK.
  * Use this to send sql statements that don't return tuples. Returns ERR on bad
  * input or if the query produced an error. Stores error inside 'p'. */

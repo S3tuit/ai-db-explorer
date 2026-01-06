@@ -233,7 +233,8 @@ static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
 static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
     const char *msg = qr->err_msg ? qr->err_msg : "";
     if (json_append(sb,
-                "\"error\":{\"message\":\"%s\"}}", msg) != OK) return ERR;
+                "\"error\":{\"exec_ms\":%U,\"message\":\"%s\"}}",
+                qr->exec_ms, msg) != OK) return ERR;
     return OK;
 }
 

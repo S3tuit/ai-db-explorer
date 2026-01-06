@@ -12,6 +12,7 @@
  * Format:
  *  {"jsonrpc":"2.0","id":<u>,"result":{"exec_ms":<U>,columns:["name":<s>,
  *  "type":<s>...]},rows [[]...],"rowcount":<u>,"truncated":<s>}
+ *  {"jsonrpc":"2.0","id":<u>,"error":{"exec_ms":<U>,"message":<s>}}
  *
  * Returns:
  *  OK: success. *out_json points to a malloc'd buffer containing exactly

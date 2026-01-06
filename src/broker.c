@@ -440,6 +440,7 @@ int broker_run(Broker *b) {
 
                 StrBuf req = {0};
                 QueryResult *q_res = NULL;
+                uint64_t t0 = now_ms_monotonic();
                 // TODO: frame_codec and json_codec return different outputs,
                 // one char **out, uint32_t *len... the other StrBuf **out.
                 // Make them consistent.
@@ -469,6 +470,10 @@ int broker_run(Broker *b) {
 
                 // Send response frame
 send_q_res:
+                if (q_res && q_res->exec_ms == 0) {
+                    uint64_t t1 = now_ms_monotonic();
+                    q_res->exec_ms = (t1 >= t0) ? (t1 - t0) : 0;
+                }
                 if (broker_write_q_res(sess, q_res) != OK) {
                     sb_clean(&req);
                     qr_destroy(q_res);

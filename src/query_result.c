@@ -34,6 +34,7 @@ QueryResult *qr_create_err(uint32_t id, const char *err_msg) {
 
     qr->id = id;
     qr->status = QR_ERROR;
+    qr->exec_ms = 0;
 
     const char *err = err_msg ? err_msg : "";
     size_t len = strlen(err) + 1; // null term

@@ -18,6 +18,7 @@ typedef enum QRStatus {
 typedef struct QueryResult {
     uint32_t id;        // id of the request
     QRStatus status;
+    uint64_t exec_ms;   // execution time in ms for both OK and ERROR
 
     union {
         // valid if QR_OK
@@ -28,7 +29,6 @@ typedef struct QueryResult {
             uint32_t nrows;
             char **cells;       // length (nrows * ncols). To access an element:
                                 // cells[row*ncols + col];
-            uint64_t exec_ms;
             uint8_t truncated;  // 1 if output row count is lower that the row count
                                 // of the query executed
         };

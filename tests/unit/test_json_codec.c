@@ -216,6 +216,7 @@ static void test_json_error_result(void) {
 
     const char *expected =
         "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{"
+          "\"exec_ms\":0,"
           "\"message\":\"bad \\\"x\\\"\""
         "}}";
 

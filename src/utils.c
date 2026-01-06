@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <time.h>
 
 #include "utils.h"
 
@@ -30,4 +31,11 @@ void *xrealloc(void *ptr, size_t size) {
         exit(1);
     }
     return new;
+}
+
+/* Returns monotonic time in ms (for duration calculations). */
+uint64_t now_ms_monotonic(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
