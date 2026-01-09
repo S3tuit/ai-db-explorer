@@ -10,7 +10,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-/* -------------------------------- encoding ------------------------------- */
+/* -------------------------------- builder ------------------------------- */
 
 /*
  * Escapes 's' into JSON string content (WITHOUT surrounding quotes) and
@@ -78,6 +78,9 @@ static int sb_append_json_escaped(StrBuf *sb, const char *s, size_t len) {
  *  - %s appends a string
  *  - %u appends uint32_t
  *  - %U appends uint64_t
+ *  - %b appends bool (0 -> false, non-zero -> true)
+ *  - %d appends int
+ *  - %l appends long
  */
 static int json_append(StrBuf *sb, const char *fmt, ...) {
     if (!sb || !fmt) return ERR;
@@ -131,6 +134,28 @@ static int json_append(StrBuf *sb, const char *fmt, ...) {
                 if (sb_append_bytes(sb, tmp, (size_t)n) != OK) goto fail;
                 break;
             }
+            case 'b': {
+                int v = va_arg(ap, int);
+                const char *lit = v ? "true" : "false";
+                if (sb_append_bytes(sb, lit, strlen(lit)) != OK) goto fail;
+                break;
+            }
+            case 'd': {
+                int v = va_arg(ap, int);
+                char tmp[32];
+                int n = snprintf(tmp, sizeof(tmp), "%d", v);
+                if (n < 0) goto fail;
+                if (sb_append_bytes(sb, tmp, (size_t)n) != OK) goto fail;
+                break;
+            }
+            case 'l': {
+                long v = va_arg(ap, long);
+                char tmp[32];
+                int n = snprintf(tmp, sizeof(tmp), "%ld", v);
+                if (n < 0) goto fail;
+                if (sb_append_bytes(sb, tmp, (size_t)n) != OK) goto fail;
+                break;
+            }
             default:
                 goto fail;
         }
@@ -158,6 +183,110 @@ static inline void safe_mul_u32(uint32_t a, uint32_t b, uint64_t *out) {
     *out = (uint64_t)a * (uint64_t)b;
 }
 
+/* Adds a comma between elements when needed. This is a minimal state tracker
+ * based on the last emitted non-whitespace byte. */
+static int json_maybe_comma(StrBuf *sb) {
+    if (!sb) return ERR;
+    for (size_t i = sb->len; i > 0; i--) {
+        unsigned char c = (unsigned char)sb->data[i - 1];
+        if (isspace(c)) continue;
+        if (c == '{' || c == '[' || c == ':') return OK;
+        return sb_append_bytes(sb, ",", 1);
+    }
+    return OK;
+}
+
+int json_obj_begin(StrBuf *sb) {
+    if (!sb) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return sb_append_bytes(sb, "{", 1);
+}
+
+int json_obj_end(StrBuf *sb) {
+    if (!sb) return ERR;
+    return sb_append_bytes(sb, "}", 1);
+}
+
+int json_arr_begin(StrBuf *sb) {
+    if (!sb) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return sb_append_bytes(sb, "[", 1);
+}
+
+int json_arr_end(StrBuf *sb) {
+    if (!sb) return ERR;
+    return sb_append_bytes(sb, "]", 1);
+}
+
+int json_kv_obj_begin(StrBuf *sb, const char *key) {
+    if (!sb || !key) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    if (json_append(sb, "\"%s\":", key) != OK) return ERR;
+    return sb_append_bytes(sb, "{", 1);
+}
+
+int json_kv_arr_begin(StrBuf *sb, const char *key) {
+    if (!sb || !key) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    if (json_append(sb, "\"%s\":", key) != OK) return ERR;
+    return sb_append_bytes(sb, "[", 1);
+}
+
+int json_kv_str(StrBuf *sb, const char *key, const char *val) {
+    if (!sb || !key || !val) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "\"%s\":\"%s\"", key, val);
+}
+
+int json_kv_u64(StrBuf *sb, const char *key, uint64_t val) {
+    if (!sb || !key) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "\"%s\":%U", key, val);
+}
+
+int json_kv_l(StrBuf *sb, const char *key, long val) {
+    if (!sb || !key) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "\"%s\":%l", key, val);
+}
+
+int json_kv_bool(StrBuf *sb, const char *key, int val) {
+    if (!sb || !key) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "\"%s\":%b", key, val);
+}
+
+int json_arr_elem_str(StrBuf *sb, const char *val) {
+    if (!sb || !val) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "\"%s\"", val);
+}
+
+int json_arr_elem_u64(StrBuf *sb, uint64_t val) {
+    if (!sb) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "%U", val);
+}
+
+int json_arr_elem_l(StrBuf *sb, long val) {
+    if (!sb) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "%l", val);
+}
+
+int json_arr_elem_bool(StrBuf *sb, int val) {
+    if (!sb) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "%b", val);
+}
+
+int json_rpc_begin(StrBuf *sb) {
+    if (json_obj_begin(sb) != OK) return ERR;
+    return json_kv_str(sb, "jsonrpc", "2.0");
+}
+
+/* --------------------------- encoding objects --------------------------- */
+
 static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
     // nrows*ncols should fit in addressable range of cells
     uint64_t cell_count_u64 = 0;
@@ -168,16 +297,14 @@ static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
     if (qr->ncols > 0 && !qr->cols) return ERR;
     if (cell_count_u64 > 0 && !qr->cells) return ERR;
 
-    if (json_append(sb,
-            "\"result\":{\"exec_ms\":%U", qr->exec_ms) != OK) return ERR;
+    if (json_obj_begin(sb) != OK) return ERR;
+    if (json_kv_u64(sb, "exec_ms", qr->exec_ms) != OK) return ERR;
 
     // columns
-    if (json_append(sb, ",\"columns\":[") != OK) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    if (json_append(sb, "\"columns\":") != OK) return ERR;
+    if (json_arr_begin(sb) != OK) return ERR;
     for (uint32_t c = 0; c < qr->ncols; ++c) {
-        if (c > 0) {
-            if (json_append(sb, ",") != OK) return ERR;
-        }
-
         const QRColumn *col = qr_get_col((QueryResult *)qr, c);
         // defensive, in case internals are partially set or missing entirely
         const char *name = "";
@@ -187,54 +314,50 @@ static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
             type = col->type ? col->type : "";
         }
 
-        if (json_append(sb,
-                "{\"name\":\"%s\",\"type\":\"%s\"}",
-                name, type) != OK) return ERR;
+        if (json_obj_begin(sb) != OK) return ERR;
+        if (json_kv_str(sb, "name", name) != OK) return ERR;
+        if (json_kv_str(sb, "type", type) != OK) return ERR;
+        if (json_obj_end(sb) != OK) return ERR;
     }
-    if (json_append(sb, "]") != OK) return ERR;
+    if (json_arr_end(sb) != OK) return ERR;
 
     // rows
-    if (json_append(sb, ",\"rows\":[") != OK) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    if (json_append(sb, "\"rows\":") != OK) return ERR;
+    if (json_arr_begin(sb) != OK) return ERR;
 
     for (uint32_t r = 0; r < qr->nrows; ++r) {
-        if (r > 0) {
-            if (json_append(sb, ",") != OK) return ERR;
-        }
-        if (json_append(sb, "[") != OK) return ERR;
+        if (json_arr_begin(sb) != OK) return ERR;
 
         for (uint32_t c = 0; c < qr->ncols; ++c) {
-            if (c > 0) {
-                if (json_append(sb, ",") != OK) return ERR;
-            }
-
             const char *cell = qr_get_cell(qr, r, c);
             if (!cell) {
+                if (json_maybe_comma(sb) != OK) return ERR;
                 if (json_append(sb, "null") != OK) return ERR;
             } else {
                 /* quote + escaped string content + quote */
-                if (json_append(sb, "\"%s\"", cell) != OK) return ERR;
+                if (json_arr_elem_str(sb, cell) != OK) return ERR;
             }
         }
 
-        if (json_append(sb, "]") != OK) return ERR;
+        if (json_arr_end(sb) != OK) return ERR;
     }
-
-    if (json_append(sb, "]") != OK) return ERR;
+    if (json_arr_end(sb) != OK) return ERR;
 
     // rowcount + truncated
-    if (json_append(sb,
-            ",\"rowcount\":%u,\"truncated\":%s"
-            "}}",
-            qr->nrows, qr->truncated ? "true" : "false") != OK) return ERR;
+    if (json_kv_u64(sb, "rowcount", qr->nrows) != OK) return ERR;
+    if (json_kv_bool(sb, "truncated", qr->truncated ? 1 : 0) != OK) return ERR;
+    if (json_obj_end(sb) != OK) return ERR;
 
     return OK;
 }
 
 static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
     const char *msg = qr->err_msg ? qr->err_msg : "";
-    if (json_append(sb,
-                "\"error\":{\"exec_ms\":%U,\"message\":\"%s\"}}",
-                qr->exec_ms, msg) != OK) return ERR;
+    if (json_obj_begin(sb) != OK) return ERR;
+    if (json_kv_u64(sb, "exec_ms", qr->exec_ms) != OK) return ERR;
+    if (json_kv_str(sb, "message", msg) != OK) return ERR;
+    if (json_obj_end(sb) != OK) return ERR;
     return OK;
 }
 
@@ -248,15 +371,20 @@ int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len) {
     StrBuf sb = {0};
 
     // begin JSON-RPC envelope
-    if (json_append(&sb,
-            "{\"jsonrpc\":\"2.0\",\"id\":%u,",
-            qr->id) != OK) goto err;
+    if (json_obj_begin(&sb) != OK) goto err;
+    if (json_kv_str(&sb, "jsonrpc", "2.0") != OK) goto err;
+    if (json_kv_u64(&sb, "id", qr->id) != OK) goto err;
 
     if (qr->status == QR_ERROR) {
+        if (json_maybe_comma(&sb) != OK) goto err;
+        if (json_append(&sb, "\"error\":") != OK) goto err;
         if (json_qr_err(&sb, qr) != OK) goto err;
     } else {
+        if (json_maybe_comma(&sb) != OK) goto err;
+        if (json_append(&sb, "\"result\":") != OK) goto err;
         if (json_qr_ok(&sb, qr) != OK) goto err;
     }
+    if (json_obj_end(&sb) != OK) goto err;
 
     // materialize output (exact size; not NUL-terminated)
     char *out = xmalloc(sb.len);
@@ -274,279 +402,6 @@ err:
     return ERR;
 }
 
-/* Represents a key-value pair. */
-typedef struct ArgPair {
-    char *key;          // owned
-    int is_num;
-    uint64_t num;       // valid if is_num
-    char *sval;         // valid if !is_num. Owned
-} ArgPair;
-
-/* We use this to avoid reallocating all the JSON when parsing. We first create
- * an ArgList and then the JSON. */
-typedef struct ArgList {
-    ArgPair *items;     // owned
-    size_t len;
-    size_t cap;
-} ArgList;
-
-/* Resets 'al' to 0 elements and frees its previous ones. */
-static void arglist_clean(ArgList *al) {
-    if (!al) return;
-    for (size_t i = 0; i < al->len; i++) {
-        free(al->items[i].key);
-        free(al->items[i].sval);
-    }
-    free(al->items);
-    al->items = NULL;
-    al->len = 0;
-    al->cap = 0;
-}
-
-/* Adds 'key' to 'al' having value 'num' if 'is_num', else, 'sval'. Last key
- * wins if an equal key is already present. */
-static int arglist_set(ArgList *al, const char *key, size_t key_len,
-                       int is_num, uint64_t num, const char *sval, size_t sval_len) {
-    if (!al || !key) return ERR;
-
-    // see if key is already present
-    for (size_t i = 0; i < al->len; i++) {
-        if (strlen(al->items[i].key) == key_len &&
-            memcmp(al->items[i].key, key, key_len) == 0) {
-            
-            // last one wins
-            free(al->items[i].key);
-            free(al->items[i].sval);
-            al->items[i].key = xmalloc(key_len + 1);
-            memcpy(al->items[i].key, key, key_len);
-            al->items[i].key[key_len] = '\0';
-            al->items[i].is_num = is_num;
-            al->items[i].num = num;
-
-            // assing value
-            if (!is_num) {
-                al->items[i].sval = xmalloc(sval_len + 1);
-                if (sval_len > 0) memcpy(al->items[i].sval, sval, sval_len);
-                al->items[i].sval[sval_len] = '\0';
-            } else {
-                al->items[i].sval = NULL;
-            }
-            return OK;
-        }
-    }
-
-    if (al->len == al->cap) {
-        size_t newcap = al->cap ? al->cap * 2 : 8;
-        al->items = (ArgPair *)xrealloc(al->items, newcap * sizeof(*al->items));
-        al->cap = newcap;
-    }
-
-    // new key
-    ArgPair *p = &al->items[al->len++];
-    p->key = xmalloc(key_len + 1);
-    memcpy(p->key, key, key_len);
-    p->key[key_len] = '\0';
-    p->is_num = is_num;
-    p->num = num;
-    if (!is_num) {
-        p->sval = xmalloc(sval_len + 1);
-        if (sval_len > 0) memcpy(p->sval, sval, sval_len);
-        p->sval[sval_len] = '\0';
-    } else {
-        p->sval = NULL;
-    }
-    return OK;
-}
-
-/* Returns a substring of 's' without spaces before the first char and after the
- * last char. The substring starts at 'out_s' and is 'out_len' bytes long. */
-static void trim_span(const char *s, size_t len, const char **out_s, size_t *out_len) {
-    size_t start = 0;
-    while (start < len && isspace((unsigned char)s[start])) start++;
-    size_t end = len;
-    while (end > start && isspace((unsigned char)s[end - 1])) end--;
-    *out_s = s + start;
-    *out_len = end - start;
-}
-
-/* Check if 's' of 'len' bytes long represent an uint64_t. Return YES (out 
- * valorized), NO if string, ERR if overflow. */
-static int parse_uint64_digits(const char *s, size_t len, uint64_t *out) {
-    if (!s || len == 0 || !out) return NO;
-    uint64_t v = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (!isdigit((unsigned char)s[i])) return NO;
-        uint64_t d = (uint64_t)(s[i] - '0');
-
-        // handle overflow
-        if (v > (UINT64_MAX - d) / 10) return ERR;
-        v = v * 10 + d;
-    }
-    *out = v;
-    return YES;
-}
-
-/* Adds 'key' and 'val' to 'al'. */
-static int append_pair(ArgList *al, const char *key, size_t key_len,
-                       const char *val, size_t val_len) {
-    const char *k = NULL;
-    size_t klen = 0;
-    const char *v = NULL;
-    size_t vlen = 0;
-    trim_span(key, key_len, &k, &klen);
-    trim_span(val, val_len, &v, &vlen);
-
-    uint64_t num = 0;
-    int num_rc = parse_uint64_digits(v, vlen, &num);
-    if (num_rc == YES) {
-        return arglist_set(al, k, klen, 1, num, NULL, 0);
-    }
-    return arglist_set(al, k, klen, 0, 0, v, vlen);
-}
-
-/* Turns 'args' into an ArgList and assigns it to 'out'. */
-static int parse_args(const char *args, ArgList *out) {
-    if (!args || !out) return OK;
-
-    size_t i = 0;
-    // here we store the key-value string
-    StrBuf tok = {0};
-    while (args[i] != '\0') {
-        // skip leading spaces
-        while (args[i] && isspace((unsigned char)args[i])) i++;
-        if (!args[i]) break;
-
-        tok.len = 0;
-        // only double quotes are supported, single quotes are treated just
-        // like any other char
-        int in_quote = 0;
-        for (; args[i] != '\0'; i++) {
-            char c = args[i];
-            if (c == '"') {
-                in_quote = !in_quote;
-                continue;
-            }
-            // a space that's not inside quotes is treated as end of this
-            // key-value
-            if (!in_quote && isspace((unsigned char)c)) break;
-            if (sb_append_bytes(&tok, &c, 1) != OK) {
-                sb_clean(&tok);
-                return ERR;
-            }
-        }
-
-        // tok is the key-value string
-        const char *t = tok.data ? tok.data : "";
-        size_t tlen = tok.len;
-        // key-value is empty
-        if (tlen == 0) continue;
-        
-        // no '=' -> empty value
-        const char *eq = memchr(t, '=', tlen);
-        if (!eq) {
-            append_pair(out, t, tlen, "", 0);
-            continue;
-        }
-
-        // start of the value
-        const char *right = eq + 1;
-        size_t left_len = (size_t)(eq - t);
-        size_t right_len = tlen - left_len - 1;
-
-        append_pair(out, t, left_len, right, right_len);
-    }
-    sb_clean(&tok);
-    return OK;
-}
-
-int command_to_jsonrpc(const Command *cmd, uint32_t id,
-        char **out_json, size_t *out_len) {
-
-    if (!out_json || !out_len || !cmd) return ERR;
-    *out_json = NULL;
-    *out_len  = 0;
-
-    StrBuf sb = {0};
-
-    if (cmd->type == CMD_SQL) {
-        if (!cmd->raw_sql) goto err;
-        if (json_append(&sb,
-                "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\""BROK_EXEC_CMD"\",\"params\":{"
-                "\"sql\":\"%s\"}}",
-                id, cmd->raw_sql) != OK) goto err;
-
-    } else if (cmd->type == CMD_META) {
-        // empty command -> \;
-        if (!cmd->cmd) goto err;
-
-        // find all the key-value pairs
-        ArgList args = {0};
-        if (cmd->args && cmd->args[0] != '\0') {
-            if (parse_args(cmd->args, &args) != OK) goto err;
-        }
-
-        // turn the key-value pairs into json
-        if (json_append(&sb,
-                "{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"%s\"",
-                id, cmd->cmd) != OK) {
-            arglist_clean(&args);
-            goto err;
-        }
-
-        // append the key-value pairs
-        if (args.len > 0) {
-            if (json_append(&sb, ",\"params\":{") != OK) {
-                arglist_clean(&args);
-                goto err;
-            }
-            for (size_t i = 0; i < args.len; i++) {
-                ArgPair *p = &args.items[i];
-                if (i > 0) {
-                    if (json_append(&sb, ",") != OK) {
-                        arglist_clean(&args);
-                        goto err;
-                    }
-                }
-                if (p->is_num) {
-                    if (json_append(&sb, "\"%s\":%U", p->key, p->num) != OK) {
-                        arglist_clean(&args);
-                        goto err;
-                    }
-                } else {
-                    const char *val = p->sval ? p->sval : ""; // defensive
-                    if (json_append(&sb, "\"%s\":\"%s\"", p->key, val) != OK) {
-                        arglist_clean(&args);
-                        goto err;
-                    }
-                }
-            }
-            if (json_append(&sb, "}") != OK) {
-                arglist_clean(&args);
-                goto err;
-            }
-        }
-
-        arglist_clean(&args);
-        if (json_append(&sb, "}") != OK) goto err;
-    } else {
-        goto err;
-    }
-
-    // materialize output (exact size; not NUL-terminated)
-    char *out = xmalloc(sb.len);
-    memcpy(out, sb.data, sb.len);
-    *out_json = out;
-    *out_len  = sb.len;
-
-    sb_clean(&sb);
-    return OK;
-
-err:
-    sb_clean(&sb);
-    *out_json = NULL;
-    *out_len  = 0;
-    return ERR;
-}
 
 /* --------------------------------- decode ------------------------------- */
 
@@ -957,4 +812,41 @@ int json_get_value(const char *json, size_t json_len, const char *fmt, ...) {
     va_end(ap);
     free(json_buf);
     return YES;
+}
+
+/* Minimal validation for JSON-RPC inputs (NUL-terminated). */
+int json_simple_validation(const char *json) {
+    if (!json) return ERR;
+
+    const char *p = json_skip_ws(json);
+    if (!p || *p == '\0') return ERR;
+    if (*p != '{') return NO;
+    const char *end = json_skip_value(p);
+    if (!end) return ERR;
+    end = json_skip_ws(end);
+    if (*end != '\0') return ERR;
+
+    size_t len = strlen(json);
+    char *jsonrpc = NULL;
+    char *method = NULL;
+    uint64_t id = 0;
+
+    int rc = json_get_value(json, len, "%s%U%s",
+            "jsonrpc", &jsonrpc,
+            "id", &id,
+            "method", &method);
+    if (rc != YES) {
+        free(jsonrpc);
+        free(method);
+        return rc;
+    }
+
+    int ok = YES;
+    if (strcmp(jsonrpc, "2.0") != 0) ok = NO;
+    if (!method || method[0] == '\0') ok = NO;
+    if (id > UINT32_MAX) ok = NO;
+
+    free(jsonrpc);
+    free(method);
+    return ok;
 }

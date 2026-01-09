@@ -231,196 +231,73 @@ static void test_json_error_result(void) {
     qr_destroy(qr);
 }
 
-static void test_command_to_jsonrpc_sql(void) {
-    char *json = NULL;
-    size_t json_len = 0;
-
-    Command cmd = {
-        .type = CMD_SQL,
-        .raw_sql = "SELECT 1;"
-    };
-    int rc = command_to_jsonrpc(&cmd, 1, &json, &json_len);
-
-    ASSERT_TRUE(rc == OK);
+static void test_json_builder_object(void) {
+    StrBuf sb = {0};
+    ASSERT_TRUE(json_obj_begin(&sb) == OK);
+    ASSERT_TRUE(json_kv_str(&sb, "a", "x") == OK);
+    ASSERT_TRUE(json_kv_u64(&sb, "b", 2) == OK);
+    ASSERT_TRUE(json_kv_l(&sb, "c", -3) == OK);
+    ASSERT_TRUE(json_kv_bool(&sb, "d", 1) == OK);
+    ASSERT_TRUE(json_kv_bool(&sb, "e", 0) == OK);
+    ASSERT_TRUE(json_obj_end(&sb) == OK);
 
     const char *expected =
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{"
-          "\"sql\":\"SELECT 1;\""
-        "}}";
+        "{\"a\":\"x\",\"b\":2,\"c\":-3,\"d\":true,\"e\":false}";
+    assert_bytes_eq(sb.data, sb.len, expected, __FILE__, __LINE__);
+    sb_clean(&sb);
 
-    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
-
-    free(json);
+    ASSERT_TRUE(json_rpc_begin(&sb) == OK);
+    ASSERT_TRUE(json_kv_u64(&sb, "id", 1) == OK);
+    const char *exp2 = "{\"jsonrpc\":\"2.0\",\"id\":1";
+    assert_bytes_eq(sb.data, sb.len, exp2, __FILE__, __LINE__);
+    sb_clean(&sb);
 }
 
-static void test_command_to_jsonrpc_meta(void) {
-    char *json = NULL;
-    size_t json_len = 0;
+static void test_json_builder_array(void) {
+    StrBuf sb = {0};
+    ASSERT_TRUE(json_arr_begin(&sb) == OK);
+    ASSERT_TRUE(json_arr_elem_str(&sb, "x") == OK);
+    ASSERT_TRUE(json_arr_elem_u64(&sb, 2) == OK);
+    ASSERT_TRUE(json_arr_elem_l(&sb, -3) == OK);
+    ASSERT_TRUE(json_arr_elem_bool(&sb, 1) == OK);
+    ASSERT_TRUE(json_arr_elem_bool(&sb, 0) == OK);
+    ASSERT_TRUE(json_arr_end(&sb) == OK);
 
-    Command cmd = {
-        .type = CMD_META,
-        .cmd = "connect",
-        .args = "name=\"main\""
-    };
-    int rc = command_to_jsonrpc(&cmd, 1, &json, &json_len);
-
-    ASSERT_TRUE(rc == OK);
-
-    const char *expected =
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"connect\",\"params\":{"
-          "\"name\":\"main\""
-        "}}";
-
-    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
-
-    free(json);
+    const char *expected = "[\"x\",2,-3,true,false]";
+    assert_bytes_eq(sb.data, sb.len, expected, __FILE__, __LINE__);
+    sb_clean(&sb);
 }
 
-static void test_command_to_jsonrpc_meta_no_params(void) {
-    char *json = NULL;
-    size_t json_len = 0;
+static void test_json_builder_nested(void) {
+    StrBuf sb = {0};
+    ASSERT_TRUE(json_obj_begin(&sb) == OK);
+    ASSERT_TRUE(json_kv_obj_begin(&sb, "a") == OK);
+    ASSERT_TRUE(json_kv_u64(&sb, "b", 1) == OK);
+    ASSERT_TRUE(json_obj_end(&sb) == OK);
+    ASSERT_TRUE(json_kv_arr_begin(&sb, "c") == OK);
+    ASSERT_TRUE(json_arr_elem_bool(&sb, 1) == OK);
+    ASSERT_TRUE(json_arr_end(&sb) == OK);
+    ASSERT_TRUE(json_obj_end(&sb) == OK);
 
-    Command cmd = {
-        .type = CMD_META,
-        .cmd = "status",
-        .args = NULL
-    };
-    int rc = command_to_jsonrpc(&cmd, 2, &json, &json_len);
-
-    ASSERT_TRUE(rc == OK);
-
-    const char *expected =
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"status\"}";
-
-    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
-
-    free(json);
+    const char *expected = "{\"a\":{\"b\":1},\"c\":[true]}";
+    assert_bytes_eq(sb.data, sb.len, expected, __FILE__, __LINE__);
+    sb_clean(&sb);
 }
 
-static void test_command_to_jsonrpc_meta_parse_args(void) {
-    char *json = NULL;
-    size_t json_len = 0;
+static void test_json_simple_validation(void) {
+    const char *ok =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{}}";
+    const char *no_id =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"exec\"}";
+    const char *bad_ver =
+        "{\"jsonrpc\":\"2.1\",\"id\":1,\"method\":\"exec\"}";
+    const char *bad_json =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\"";
 
-    Command cmd = {
-        .type = CMD_META,
-        .cmd = "connect",
-        .args = "timeout=123 timeout=7"
-    };
-    int rc = command_to_jsonrpc(&cmd, 3, &json, &json_len);
-
-    ASSERT_TRUE(rc == OK);
-
-    const char *expected =
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"connect\",\"params\":{"
-          "\"timeout\":7"
-        "}}";
-
-    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
-
-    free(json);
-}
-
-static void test_command_to_jsonrpc_meta_no_equals(void) {
-    char *json = NULL;
-    size_t json_len = 0;
-
-    Command cmd = {
-        .type = CMD_META,
-        .cmd = "connect",
-        .args = "dbname postgres"
-    };
-    int rc = command_to_jsonrpc(&cmd, 4, &json, &json_len);
-
-    ASSERT_TRUE(rc == OK);
-
-    const char *expected =
-        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"connect\",\"params\":{"
-          "\"dbname\":\"\",\"postgres\":\"\""
-        "}}";
-
-    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
-
-    free(json);
-}
-
-static void test_command_to_jsonrpc_meta_arg_cases(void) {
-    struct {
-        const char *args;
-        const char *expected_params;
-    } cases[] = {
-        { "key=\"value a b", "\"key\":\"value a b\"" },
-        { "a=1=b", "\"a\":\"1=b\"" },
-        { "=1", "\"\":1" },
-        { "overflow=123456789012345678901234567890",
-          "\"overflow\":\"123456789012345678901234567890\"" },
-        { "a=a a=b", "\"a\":\"b\"" },
-        { "string=123a", "\"string\":\"123a\"" },
-        { "timeout=123 55", "\"timeout\":123,\"55\":\"\"" },
-        { "peppa=\"pig\" pig=\"peppa\"", "\"peppa\":\"pig\",\"pig\":\"peppa\"" }
-    };
-
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        char *json = NULL;
-        size_t json_len = 0;
-
-        Command cmd = {
-            .type = CMD_META,
-            .cmd = "connect",
-            .args = (char *)cases[i].args
-        };
-        int rc = command_to_jsonrpc(&cmd, 5, &json, &json_len);
-        ASSERT_TRUE(rc == OK);
-
-        char expected[512];
-        int n = snprintf(expected, sizeof(expected),
-            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"connect\",\"params\":{%s}}",
-            cases[i].expected_params);
-        ASSERT_TRUE(n > 0);
-        ASSERT_TRUE((size_t)n < sizeof(expected));
-
-        assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
-        free(json);
-    }
-}
-
-static void test_json_encode_decode_present(void) {
-    char *json = NULL;
-    size_t json_len = 0;
-
-    Command cmd = {
-        .type = CMD_SQL,
-        .raw_sql = "SELECT 1;"
-    };
-    int rc = command_to_jsonrpc(&cmd, 7, &json, &json_len);
-    ASSERT_TRUE(rc == OK);
-
-    char *sql = NULL;
-    rc = json_get_value(json, json_len, "%s", "params.sql", &sql);
-    ASSERT_TRUE(rc == YES);
-    ASSERT_STREQ(sql, "SELECT 1;");
-
-    free(sql);
-    free(json);
-}
-
-static void test_json_encode_decode_missing(void) {
-    char *json = NULL;
-    size_t json_len = 0;
-
-    Command cmd = {
-        .type = CMD_META,
-        .cmd = "status",
-        .args = NULL
-    };
-    int rc = command_to_jsonrpc(&cmd, 1, &json, &json_len);
-    ASSERT_TRUE(rc == OK);
-    
-    uint32_t id = 0;
-    char *raw = NULL;
-    rc = json_get_value(json, json_len, "%u%s", "id", &id, "params.raw", &raw);
-    ASSERT_TRUE(rc == NO);
-
-    free(json);
+    ASSERT_TRUE(json_simple_validation(ok) == YES);
+    ASSERT_TRUE(json_simple_validation(no_id) == NO);
+    ASSERT_TRUE(json_simple_validation(bad_ver) == NO);
+    ASSERT_TRUE(json_simple_validation(bad_json) == ERR);
 }
 
 static void test_json_get_value_strings(void) {
@@ -456,14 +333,10 @@ int main (void) {
     test_json_escapes_strings();
     test_json_empty_result();
     test_json_error_result();
-    test_command_to_jsonrpc_sql();
-    test_command_to_jsonrpc_meta();
-    test_command_to_jsonrpc_meta_no_params();
-    test_command_to_jsonrpc_meta_parse_args();
-    test_command_to_jsonrpc_meta_no_equals();
-    test_command_to_jsonrpc_meta_arg_cases();
-    test_json_encode_decode_present();
-    test_json_encode_decode_missing();
+    test_json_builder_object();
+    test_json_builder_array();
+    test_json_builder_nested();
+    test_json_simple_validation();
     test_json_get_value_strings();
     test_json_get_value_null();
     test_json_get_value_u32_overflow();

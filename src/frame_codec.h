@@ -20,4 +20,8 @@ int frame_read_len(BufChannel *bc, StrBuf *out_payload);
  * NOTE: use this only to write things the user should see. */
 int frame_write_cl(BufChannel *bc, const void *payload, size_t n);
 
+/* Reads Content-Length framed payload into out_payload.
+ * Returns OK on success, NO on clean EOF before header, ERR on framing error. */
+int frame_read_cl(BufChannel *bc, StrBuf *out_payload);
+
 #endif

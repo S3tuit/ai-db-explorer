@@ -3,6 +3,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <limits.h>
 
 int frame_write_len(BufChannel *bc, const void *payload, uint32_t n) {
     if (!bc) return ERR;
@@ -39,18 +41,11 @@ int frame_read_len(BufChannel *bc, StrBuf *out_payload) {
     out_payload->len = 0;
     if (n == 0) return OK;
 
-    // TODO: we can create a method inside BufChannel so we can read bytes
-    // and call a function passed in input. So we avoid double allocation.
-    unsigned char *tmp = (unsigned char *)xmalloc(n);
-    if (bufch_read_n(bc, tmp, (size_t)n) != OK) {
-        free(tmp);
+    char *dst = NULL;
+    if (sb_prepare_for_write(out_payload, (size_t)n, &dst) != OK) {
         return ERR;
     }
-    if (sb_append_bytes(out_payload, tmp, (size_t)n) != OK) {
-        free(tmp);
-        return ERR;
-    }
-    free(tmp);
+    if (bufch_read_n(bc, (unsigned char *)dst, (size_t)n) != OK) return ERR;
     return OK;
 }
 
@@ -59,8 +54,69 @@ int frame_write_cl(BufChannel *bc, const void *payload, size_t n) {
     if (!payload && n != 0) return ERR;
 
     char hdr[64];
+    // since we write in ASCII digits endianness is irrelevant
     int rc = snprintf(hdr, sizeof(hdr), "Content-Length: %zu\r\n\r\n", n);
     if (rc < 0 || (size_t)rc >= sizeof(hdr)) return ERR;
 
     return bufch_write2v(bc, hdr, (size_t)rc, payload, n);
+}
+
+/* Parses Content-Length from a header. */
+static int parse_content_length(const char *hdr, size_t len, size_t *out_len) {
+    if (!hdr || !out_len) return ERR;
+    *out_len = 0;
+    (void)len;
+
+    const char *needle = "Content-Length:";
+    const char *p = strstr(hdr, needle);
+    if (!p) return ERR;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') p++;
+
+    char *endptr = NULL;
+    unsigned long long v = strtoull(p, &endptr, 10);
+    if (endptr == p) return ERR;
+
+    // we can't handle these much bytes and makes no sense doing it
+    if (v > STRBUF_MAX_BYTES) return ERR;
+    if (v > SIZE_MAX) return ERR;
+
+    *out_len = (size_t)v;
+    return OK;
+}
+
+int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
+    if (!bc || !out_payload) return ERR;
+    out_payload->len = 0;
+
+    // Header is short: "Content-Length: " + up to 20 digits + "\r\n\r\n".
+    // 52 bytes is a strict cap to avoid unbounded scanning.
+    const size_t max_hdr_scan = 52;
+    ssize_t idx = bufch_findn(bc, "\r\n\r\n", 4, max_hdr_scan);
+    if (idx < 0) return NO;
+    size_t hdr_len = (size_t)idx + 4;
+
+    char *hdr = xmalloc(hdr_len + 1);
+    if (bufch_read_n(bc, hdr, hdr_len) != OK) {
+        free(hdr);
+        return ERR;
+    }
+    hdr[hdr_len] = '\0';
+
+    size_t payload_len = 0;
+    int prc = parse_content_length(hdr, hdr_len, &payload_len);
+    free(hdr);
+    if (prc != OK) return ERR;
+
+    if (payload_len == 0) return OK;
+
+    char *dst = NULL;
+    if (sb_prepare_for_write(out_payload, payload_len, &dst) != OK) {
+        return ERR;
+    }
+    if (bufch_read_n(bc, dst, payload_len) != OK) {
+        sb_clean(out_payload);
+        return ERR;
+    }
+    return OK;
 }

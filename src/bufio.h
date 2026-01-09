@@ -53,7 +53,11 @@ int bufch_read_n(BufChannel *bc, void *dst, size_t n);
 
 // Finds a byte pattern in the buffered data. Returns index (offset from current
 // read position) if found, else -1. This is not efficient for long patterns.
-ssize_t bufch_find(const BufChannel *bc, const void *needle, size_t needle_len);
+ssize_t bufch_find_buffered(const BufChannel *bc, const void *needle, size_t needle_len);
+// Finds a byte pattern within a bounded window and reads as needed to decide.
+// Returns index if found, -1 if not found within the window or error.
+ssize_t bufch_findn(BufChannel *bc, const void *needle, size_t needle_len,
+                    size_t max_dist);
 
 /* Writes all 'n' bytes from 'src' to 'bc'. Returns ok/err. */
 int bufch_write_all(BufChannel *bc, const void *src, size_t n);

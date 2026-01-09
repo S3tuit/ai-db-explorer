@@ -96,11 +96,33 @@ static void test_frame_write_cl(void) {
   fclose(out);
 }
 
+static void test_frame_read_cl(void) {
+  const char *raw = "Content-Length: 5\r\n\r\nhello";
+  FILE *in = MEMFILE_OUT();
+  fwrite(raw, 1, strlen(raw), in);
+  fflush(in);
+  fseek(in, 0, SEEK_SET);
+
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
+
+  StrBuf payload = {0};
+  ASSERT_TRUE(frame_read_cl(bc, &payload) == OK);
+  ASSERT_TRUE(payload.len == 5);
+  ASSERT_TRUE(memcmp(payload.data, "hello", 5) == 0);
+
+  sb_clean(&payload);
+  bufch_destroy(bc);
+  fclose(in);
+}
+
 int main(void) {
   test_frame_write_len();
   test_frame_read_len();
   test_frame_read_len_too_large();
   test_frame_write_cl();
+  test_frame_read_cl();
 
   fprintf(stderr, "OK: test_frame_codec\n");
   return 0;

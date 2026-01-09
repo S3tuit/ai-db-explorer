@@ -30,6 +30,10 @@ typedef struct StrBuf {
 /* Adds 'n' bytes starting from 'src' to sb. */
 int sb_append_bytes(StrBuf *sb, const void *src, size_t n);
 
+/* Reserves and exposes a writable span of length 'n'. The returned pointer
+ * points to the new region at the end of sb and sb->len is advanced. */
+int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst);
+
 /* Clean the internal allocation of 'sb'. */
 void sb_clean(StrBuf *sb);
 

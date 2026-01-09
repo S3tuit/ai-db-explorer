@@ -4,9 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "command_reader.h"
 #include "query_result.h"
-#include "broker.h"
+#include "string_op.h"
 
 /*
  * Format:
@@ -23,29 +22,24 @@
  */
 int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len);
 
-/* Serializes a Command into JSON-RPC.
- *
- * Format:
- *  CMD_SQL:
- *    {"jsonrpc":"2.0","id":<u>,"method":"exec","params":{"sql":<s>}}
- *  CMD_META (with args):
- *    {"jsonrpc":"2.0","id":<u>,"method":<s>,"params":{<k>:<v>...}}
- *  CMD_META (no args):
- *    {"jsonrpc":"2.0","id":<u>,"method":<s>}
- *
- * Best-effort parsing (client never fails on args):
- * - Values parse as positive integers only when all digits; otherwise string.
- * - Quotes allow spaces in values; quotes are stripped (no escaping).
- * - Tokens without '=' become {"token":""}.
- * - Empty keys/values are allowed; duplicate keys: last wins.
- * - Keys with no '=' are treated as empty (e.g., a b -> {"a":"", "b":""}).
- * - The first '=' is treated as key-value separator, extra '=' in a token
- *   become part of the value (e.g., a=1=b -> {"a":"1=b"}).
- *
- * Returns the same as qr_to_jsonrpc.
- * */
-int command_to_jsonrpc(const Command *cmd, uint32_t id,
-        char **out_json, size_t *out_len);
+/* JSON helpers for building objects/arrays with automatic comma handling. */
+int json_obj_begin(StrBuf *sb);
+int json_obj_end(StrBuf *sb);
+int json_arr_begin(StrBuf *sb);
+int json_arr_end(StrBuf *sb);
+int json_kv_obj_begin(StrBuf *sb, const char *key);
+int json_kv_arr_begin(StrBuf *sb, const char *key);
+int json_kv_str(StrBuf *sb, const char *key, const char *val);
+int json_kv_u64(StrBuf *sb, const char *key, uint64_t val);
+int json_kv_l(StrBuf *sb, const char *key, long val);
+int json_kv_bool(StrBuf *sb, const char *key, int val);
+int json_arr_elem_str(StrBuf *sb, const char *val);
+int json_arr_elem_u64(StrBuf *sb, uint64_t val);
+int json_arr_elem_l(StrBuf *sb, long val);
+int json_arr_elem_bool(StrBuf *sb, int val);
+
+// helper to init a json object and add "jsonrpc":"2.0"
+int json_rpc_begin(StrBuf *sb);
 
 /* Extracts values from 'json' based on 'fmt' and key paths.
  * 'json' is not required to be NUL-terminated; use 'json_len'.
@@ -68,5 +62,10 @@ int command_to_jsonrpc(const Command *cmd, uint32_t id,
  * Note: output strings are NUL-terminated.
  */
 int json_get_value(const char *json, size_t json_len, const char *fmt, ...);
+
+/* Validates a JSON-RPC request. Expects a NUL-terminated JSON string.
+ * Returns YES if the payload is valid and has jsonrpc/id/method, NO if it
+ * doesn't match the schema, ERR on parse errors. */
+int json_simple_validation(const char *json);
 
 #endif

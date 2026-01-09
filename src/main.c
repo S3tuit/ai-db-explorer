@@ -1,4 +1,4 @@
-#include "client.h"
+#include "mcp_server.h"
 #include "broker.h"
 #include "utils.h"
 
@@ -31,17 +31,17 @@ int main(int argc, char **argv) {
     }
 
     if (run_client) {
-        Client c;
-        if (client_init(&c, stdin, stdout, sock_path) != OK) {
-            fprintf(stderr, "ERROR: client init failed\n");
+        McpServer s;
+        if (mcpser_init(&s, stdin, stdout, sock_path) != OK) {
+            fprintf(stderr, "ERROR: server init failed\n");
             return 1;
         }
         
         // keep init logs inside stderr
-        fprintf(stderr, "LOG: client init success\n");
-        int rc = client_run(&c);
-        if (rc != OK) fprintf(stderr, "ERROR: %s\n", client_last_error(&c));
-        client_clean(&c);
+        fprintf(stderr, "LOG: server init success\n");
+        int rc = mcpser_run(&s);
+        if (rc != OK) fprintf(stderr, "ERROR: %s\n", mcpser_last_error(&s));
+        mcpser_clean(&s);
         return (rc == OK) ? 0 : 1;
     }
 

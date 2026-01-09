@@ -32,7 +32,7 @@ UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
 INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(INTEGRATION_TEST_SRC))
 
-.PHONY: all clean run test test-unit test-integration test-postgres test-build
+.PHONY: all clean run test test-unit test-integration test-postgres test-build test-mcp
 
 all: $(BIN)
 
@@ -84,6 +84,14 @@ test-integration:
 
 # Run all tests
 test: test-unit test-integration
+
+# Run integration tests with a dummy MCP host in python
+test-mcp: $(BIN)
+	@set -e; \
+	for t in tests/integration/python/*.py; do \
+	  echo "==> $$t"; \
+	  python3 $$t; \
+	done
 
 # Run postgres integration tests (used by docker)
 test-postgres: $(INTEGRATION_TEST_BINS)

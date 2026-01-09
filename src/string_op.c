@@ -93,3 +93,13 @@ int sb_append_bytes(StrBuf *sb, const void *src, size_t n) {
     sb->len += n;
     return OK;
 }
+
+int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst) {
+    if (!sb || !out_dst) return ERR;
+    *out_dst = NULL;
+    if (n == 0) return OK;
+    if (sb_reserve(sb, n) != OK) return ERR;
+    *out_dst = sb->data + sb->len;
+    sb->len += n;
+    return OK;
+}

@@ -59,5 +59,8 @@ dkms.conf
 .ccls*
 compile_commands.json
 
+# python
+__pycache__*
+
 # personal notes
 *notes

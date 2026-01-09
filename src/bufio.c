@@ -145,7 +145,43 @@ int bufch_read_n(BufChannel *bc, void *dst, size_t n) {
     return OK;
 }
 
-ssize_t bufch_find(const BufChannel *bc, const void *needle, size_t needle_len) {
+ssize_t bufch_findn(BufChannel *bc, const void *needle, size_t needle_len,
+                    size_t max_dist) {
+    if (!bc || !needle || needle_len == 0) return 0;
+
+    size_t need = max_dist + needle_len;
+    if (need < max_dist) return -1; // overflow
+
+    // Ensure enough bytes so we can decide the search window.
+    while (bc_avail(bc) < need) {
+        int rc = bufch_ensure(bc, need);
+        if (rc == YES) break;
+        if (rc == NO) break; // EOF: use what we have
+        return -1;
+    }
+
+    size_t avail = bc_avail(bc);
+    if (avail == 0) {
+        return -1;
+    }
+    if (avail < needle_len) return -1;
+
+    size_t limit = max_dist;
+    if (limit > avail - needle_len) limit = avail - needle_len;
+
+    const uint8_t *hay = (const uint8_t *)(bc->buf.data + bc->rpos);
+    const uint8_t *ndl = (const uint8_t *)needle;
+
+    // Simple O(n*m) scan; for small delimiters like "\r\n\r\n" this is fine
+    for (size_t i = 0; i <= limit; i++) {
+        if (hay[i] == ndl[0] && memcmp(hay + i, ndl, needle_len) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+ssize_t bufch_find_buffered(const BufChannel *bc, const void *needle, size_t needle_len) {
     if (!needle || needle_len == 0) return 0;
 
     size_t avail = bc_avail(bc);

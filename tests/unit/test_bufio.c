@@ -164,7 +164,9 @@ static void test_bufch_peek_find_and_read(void) {
   ASSERT_TRUE(peek != NULL);
   ASSERT_TRUE(memcmp(peek, "hello world", 11) == 0);
 
-  ASSERT_TRUE(bufch_find(&bc, "world", 5) == 6);
+  ASSERT_TRUE(bufch_find_buffered(&bc, "world", 5) == 6);
+  ASSERT_TRUE(bufch_findn(&bc, "world", 5, 5) == -1);
+  ASSERT_TRUE(bufch_findn(&bc, "world", 5, 6) == 6);
 
   char buf[8];
   ASSERT_TRUE(bufch_read_n(&bc, buf, 6) == OK);

@@ -60,6 +60,30 @@ static void test_sb_append_bytes(void) {
   ASSERT_TRUE(sb.cap == 0);
 }
 
+static void test_sb_prepare_for_write(void) {
+  StrBuf sb = {0};
+  char *dst = NULL;
+
+  ASSERT_TRUE(sb_prepare_for_write(&sb, 3, &dst) == OK);
+  ASSERT_TRUE(dst != NULL);
+  memcpy(dst, "abc", 3);
+  ASSERT_TRUE(sb.len == 3);
+  ASSERT_TRUE(memcmp(sb.data, "abc", 3) == 0);
+
+  dst = (char *)0x1;
+  ASSERT_TRUE(sb_prepare_for_write(&sb, 0, &dst) == OK);
+  ASSERT_TRUE(dst == NULL);
+  ASSERT_TRUE(sb.len == 3);
+
+  ASSERT_TRUE(sb_prepare_for_write(&sb, 2, &dst) == OK);
+  ASSERT_TRUE(dst != NULL);
+  memcpy(dst, "de", 2);
+  ASSERT_TRUE(sb.len == 5);
+  ASSERT_TRUE(memcmp(sb.data, "abcde", 5) == 0);
+
+  sb_clean(&sb);
+}
+
 static void test_sb_append_hard_limit(void) {
   StrBuf sb = {0};
   char one = 'x';
@@ -78,6 +102,7 @@ int main(void) {
   test_dup_functions_basic();
   test_dup_pretty();
   test_sb_append_bytes();
+  test_sb_prepare_for_write();
   test_sb_append_hard_limit();
 
   fprintf(stderr, "OK: test_string_op\n");
