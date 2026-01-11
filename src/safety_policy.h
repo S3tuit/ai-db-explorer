@@ -15,6 +15,8 @@ typedef struct SafetyPolicy {
     uint32_t max_rows;              // how many rows the resulting QueryResult
                                     // will have at max. The DB may still compute
                                     // more rows.
+
+    // TODO: this should become the max bytes of the whole QueryResult
     uint32_t max_cell_bytes;        // how many bytes can contain at most one
                                     // cell of the QueryResult.
 } SafetyPolicy;

@@ -150,7 +150,7 @@ static int mcpser_handshake(McpServer *s) {
     uint32_t id = 0;
     (void)json_get_value(json, req.len, "%u", "id", &id);
 
-    int vrc = json_simple_validation(json);
+    int vrc = json_simple_rpc_validation(json);
     if (vrc != YES) {
         free(json);
         sb_clean(&req);
@@ -243,7 +243,7 @@ int mcpser_run(McpServer *s) {
         uint32_t id = 0;
         (void)json_get_value(json, req.len, "%u", "id", &id);
 
-        int vrc = json_simple_validation(json);
+        int vrc = json_simple_rpc_validation(json);
         if (vrc != YES) {
             const char *msg = (vrc == ERR)
                 ? "Malformed JSON-RPC request."

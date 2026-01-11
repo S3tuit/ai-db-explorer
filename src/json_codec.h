@@ -66,6 +66,6 @@ int json_get_value(const char *json, size_t json_len, const char *fmt, ...);
 /* Validates a JSON-RPC request. Expects a NUL-terminated JSON string.
  * Returns YES if the payload is valid and has jsonrpc/id/method, NO if it
  * doesn't match the schema, ERR on parse errors. */
-int json_simple_validation(const char *json);
+int json_simple_rpc_validation(const char *json);
 
 #endif

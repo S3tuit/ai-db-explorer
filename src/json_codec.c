@@ -815,7 +815,7 @@ int json_get_value(const char *json, size_t json_len, const char *fmt, ...) {
 }
 
 /* Minimal validation for JSON-RPC inputs (NUL-terminated). */
-int json_simple_validation(const char *json) {
+int json_simple_rpc_validation(const char *json) {
     if (!json) return ERR;
 
     const char *p = json_skip_ws(json);

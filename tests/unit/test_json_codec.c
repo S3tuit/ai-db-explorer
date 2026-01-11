@@ -284,7 +284,7 @@ static void test_json_builder_nested(void) {
     sb_clean(&sb);
 }
 
-static void test_json_simple_validation(void) {
+static void test_json_simple_rpc_validation(void) {
     const char *ok =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{}}";
     const char *no_id =
@@ -294,10 +294,10 @@ static void test_json_simple_validation(void) {
     const char *bad_json =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\"";
 
-    ASSERT_TRUE(json_simple_validation(ok) == YES);
-    ASSERT_TRUE(json_simple_validation(no_id) == NO);
-    ASSERT_TRUE(json_simple_validation(bad_ver) == NO);
-    ASSERT_TRUE(json_simple_validation(bad_json) == ERR);
+    ASSERT_TRUE(json_simple_rpc_validation(ok) == YES);
+    ASSERT_TRUE(json_simple_rpc_validation(no_id) == NO);
+    ASSERT_TRUE(json_simple_rpc_validation(bad_ver) == NO);
+    ASSERT_TRUE(json_simple_rpc_validation(bad_json) == ERR);
 }
 
 static void test_json_get_value_strings(void) {
@@ -336,7 +336,7 @@ int main (void) {
     test_json_builder_object();
     test_json_builder_array();
     test_json_builder_nested();
-    test_json_simple_validation();
+    test_json_simple_rpc_validation();
     test_json_get_value_strings();
     test_json_get_value_null();
     test_json_get_value_u32_overflow();

@@ -7,6 +7,8 @@
 #include "query_result.h"
 #include "stdio_byte_channel.h"
 #include "string_op.h"
+#include "packed_array.h"
+#include "safety_policy.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -19,8 +21,9 @@
 #include <errno.h>
 
 
-// TODO: make this configurable
-#define MAX_CLIENTS 5
+// TODO: we should be able to accept more than 1 McpServer with just one Broker.
+// We should make the code async, and use a real connection pool.
+#define MAX_CLIENTS 1
 // Maximum size of a single request payload (bytes). Larger frames are rejected.
 #define MAX_REQ_LEN (8u * 1024u * 1024u)
 
@@ -32,11 +35,7 @@ struct Broker {
     SecurityContext *security;      // owned
     char *sock_path;                // owned, socket path for the broker
     
-    /* Array to handle sessions.
-     * TODO: use an hashmap. */
-    BrokerClientSession *sessions;
-    size_t nsessions;
-    size_t cap;
+    PackedArray *sessions;
 };
 
 static inline void safe_close_fd(int *fd) {
@@ -46,29 +45,11 @@ static inline void safe_close_fd(int *fd) {
   }
 }
 
-/* --------------------------------- Sessions ----------------------------- */
+/* --------------------------------- Sessions ------------------------------ */
 
-/* Makes sure 'b'->sessions has enough space to store 'need' bytes. */
-static void sessions_ensure_cap(Broker *b, size_t need) {
-    if (b->cap >= need) return;
-    size_t newcap = b->cap ? b->cap * 2 : 8;
-    if (newcap < need) newcap = need;
-
-    BrokerClientSession *p = (BrokerClientSession *)xrealloc(b->sessions, newcap * sizeof(BrokerClientSession));
-
-    // zero new area
-    for (size_t i = b->cap; i < newcap; i++) {
-        memset(&p[i], 0, sizeof(BrokerClientSession));
-    }
-
-    b->sessions = p;
-    b->cap = newcap;
-}
-
-/* Initializes 'sess' and assigns 'cfd' to it. */
-static int session_init(BrokerClientSession *sess, int cfd) {
+static int session_init(BrokerMcpSession *sess, int cfd) {
     if (!sess) return ERR;
-    
+
     // The BufChannel owns the ByteChannel, which owns the fd.
     ByteChannel *channel = stdio_bytechannel_open_fd(cfd, cfd);
     if (!channel) {
@@ -76,37 +57,45 @@ static int session_init(BrokerClientSession *sess, int cfd) {
         return ERR;
     }
 
-    bufch_init(&sess->bc, channel);
+    if (bufch_init(&sess->bc, channel) != OK) {
+        bytech_destroy(channel);
+        return ERR;
+    }
     sess->fd = cfd;
-
-    sess->current_dbname = NULL;
-    sess->db = NULL;
     return OK;
 }
 
-/* Frees the entities owned by 's' but not its BufChannel. */
-static void session_clean_db(BrokerClientSession *s) {
-    if (s->db) {
-        s->db->vt->destroy(s->db);
-        s->db = NULL;
-    }
-    free(s->current_dbname);
-    s->current_dbname = NULL;
-}
-
-/* Frees all the entities owned by 's' and closes its BufChannel. */
-static void session_clean(BrokerClientSession *s) {
-    if (s->db) {
-        s->db->vt->destroy(s->db);
-        s->db = NULL;
-    }
-    free(s->current_dbname);
-    s->current_dbname = NULL;
-
-    // we use clean and not destroy because they're embedded
+/* Callback function to pass to PackedArray to close the BufChannel owned by
+ * the BrokerMcpSession 'obj'. */
+static void sessions_cleanup(void *obj, void *ctx) {
+    (void)ctx;
+    BrokerMcpSession *s = (BrokerMcpSession *)obj;
+    if (!s) return;
     bufch_clean(&s->bc);
+    s->fd = -1;
 }
 
+/* Adds and initializes a new BrokerMcpSession to 'parr' identified by 'cfd'.
+ * A pointer to the new session is assigned to 'out_sess' if not NULL. Returns
+ * ok/err.*/
+static int sessions_add(PackedArray *parr, int cfd,
+                                BrokerMcpSession **out_sess) {
+    if (out_sess) *out_sess = NULL;
+    if (!parr) return ERR;
+
+    BrokerMcpSession *sess = NULL;
+    size_t idx = parr_emplace(parr, (void **)&sess);
+    if (idx == SIZE_MAX || !sess) return ERR;
+
+    if (session_init(sess, cfd) != OK) {
+        // delete the session if we failed to init it
+        parr_drop_swap(parr, idx);
+        return ERR;
+    }
+
+    if (out_sess) *out_sess = sess;
+    return OK;
+}
 
 /* --------------------------------- Broker ------------------------------- */
 
@@ -141,47 +130,16 @@ static int make_listen_socket(const char *path) {
     return fd;
 }
 
-/* Adds a new BrokerClientSession to 'b'->sessions that writes and read at
- * 'cfd'. */
-static int broker_add_client(Broker *b, int cfd) {
-    if (MAX_CLIENTS > 0 && b->nsessions >= MAX_CLIENTS) {
-        safe_close_fd(&cfd);
-        return NO;
-    }
-    sessions_ensure_cap(b, b->nsessions + 1);
-
-    BrokerClientSession *s = &b->sessions[b->nsessions];
-    if (session_init(s, cfd) != OK) {
-        safe_close_fd(&cfd);
-        return ERR;
-    }
-    b->nsessions++;
-
-    return YES;
-}
-
-/* Remove the 'idx'th session from 'b'->sessions. Note: the sessions from 'idx'
- * till the end will change. */
-static void broker_remove_session_at(Broker *b, size_t idx) {
-    if (idx >= b->nsessions) return;
-    session_clean(&b->sessions[idx]);
-
-    // swap-remove
-    size_t last = b->nsessions - 1;
-    if (idx != last) {
-        b->sessions[idx] = b->sessions[last];
-    }
-    b->nsessions--;
-}
-
 Broker *broker_create(const char *sock_path) {
     Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
     b->listen_fd = -1;
     b->security = security_ctx_create();
-    b->sessions = NULL;
-    b->nsessions = 0;
-    b->cap = 0;
+
+    // The PackedArray is responsible for cleaning up the resources of the
+    // sessions
+    b->sessions = parr_create(sizeof(BrokerMcpSession));
+    parr_set_cleanup(b->sessions, sessions_cleanup, NULL);
 
     const char *path = sock_path ? sock_path : SOCK_PATH;
     b->sock_path = dup_or_null(path);
@@ -203,14 +161,8 @@ Broker *broker_create(const char *sock_path) {
 void broker_destroy(Broker *b) {
     if (!b) return;
 
-    // cleanup sessions
-    for (size_t i = 0; i < b->nsessions; i++) {
-        session_clean(&b->sessions[i]);
-    }
-    free(b->sessions);
+    parr_destroy(b->sessions);
     b->sessions = NULL;
-    b->nsessions = 0;
-    b->cap = 0;
 
     if (b->listen_fd >= 0) {
         safe_close_fd(&b->listen_fd);
@@ -224,55 +176,6 @@ void broker_destroy(Broker *b) {
     free(b);
 }
 
-/* Runs the command inside 'req' and returns a QueryResult (never NULL). The
- * expected command is:
- *
- * \connect dbname=""
- *
- * It's up to the caller to veryfy that after '\' there really is "connect".
- * This never returns NULL. */
-static QueryResult *broker_cmd_connect(Broker *b, BrokerClientSession *sess,
-                                    const char *req, uint32_t req_len,
-                                    uint32_t id) {
-    if (!b || !req) {
-        return qr_create_err(id, "Abnormal situation detected in the broker while executing \\connect. Please retry.");
-    }
-
-    char *dbname = NULL;
-    QueryResult *q_res = NULL;
-    if (json_get_value(req, req_len, "%s", "params.dbname", &dbname) != YES) {
-        goto clean_n_ret;
-    }
-    
-    // if any previous connection, close what 'sess' owned
-    session_clean_db(sess);
-
-    int conn_rc = security_ctx_connect(b->security, dbname, &sess->db);
-    if (conn_rc == ERR) {
-        session_clean_db(sess);
-        char buf[128];
-        snprintf(buf, sizeof(buf), "Unknown dbname: %s", dbname);
-        q_res = qr_create_err(id, buf);
-        goto clean_n_ret;
-    }
-    if (conn_rc == NO || !sess->db) {
-        session_clean_db(sess);
-        char buf[128];
-        snprintf(buf, sizeof(buf), "Unable to connect to: %s", dbname);
-        q_res = qr_create_err(id, buf);
-        goto clean_n_ret;
-    }
-
-    char buf[128];
-    snprintf(buf, sizeof(buf), "Successfully connected to: %s", dbname);
-    q_res = qr_create_msg(id, buf);
-
-clean_n_ret:
-    if (!q_res) q_res = qr_create_err(id, "Bad input in \\connect. Usage \\connect dbname=\"db_to_connect\"");
-    free(dbname);
-    return q_res;
-}
-
 /* Core request handler:
  * - 'req' points to the incoming 'req_len' bytes.
  * - 'out_res' will be filled and may represent an error or a result of a query.
@@ -281,9 +184,10 @@ clean_n_ret:
  *  OK on success (broker will populate 'out_res'),
  *  ERR on error (broker can't even populate 'out_res').
  */
-static int broker_handle_request(Broker *b, BrokerClientSession *sess,
+static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
                                     const char *req, uint32_t req_len,
                                     QueryResult **out_res) {
+    (void)b;
     if (!sess || !req) return ERR;
 
     char *method = NULL;
@@ -304,7 +208,8 @@ static int broker_handle_request(Broker *b, BrokerClientSession *sess,
     // run query
     } else if (strcmp(method, BROK_EXEC_CMD) == 0) {
         // client is not connected to a database yet
-        if (!sess->db) {
+        //if (!sess->db) {
+        if (1) {
             q_res = qr_create_err(id, "Not connected to a database. Run \\connect dbname=\"your dbname\" .");
             goto return_res;
         }
@@ -316,8 +221,8 @@ static int broker_handle_request(Broker *b, BrokerClientSession *sess,
             goto return_res;
         }
 
-        DbBackend *db = sess->db;
-        if (db->vt->exec(db, id, query, &q_res) != OK) {
+        DbBackend *db;
+        if (db_exec(db, id, query, &q_res) != OK) {
             free(query);
             q_res = qr_create_err(id, "Something went wrong while communicating with the database.");
             goto return_res;
@@ -325,12 +230,8 @@ static int broker_handle_request(Broker *b, BrokerClientSession *sess,
         free(query);
 
     // commands
-    } else if (strcmp(method, "connect") == 0) {
-        q_res = broker_cmd_connect(b, sess, req, req_len, id);
-
     // unknown commands
     } else {
-        // TODO: implement \help
         q_res = qr_create_err(id, "Unknown command. Run \\help for the available commands.");
         goto return_res;
     }
@@ -348,7 +249,7 @@ return_res:
 }
 
 /* Frames 'q_res' and writers it to the Client at 'sess'. Returns OK/ERR. */
-static int broker_write_q_res(BrokerClientSession *sess, const QueryResult *q_res) {
+static int broker_write_q_res(BrokerMcpSession *sess, const QueryResult *q_res) {
     if (!q_res || !sess) return ERR;
 
     size_t response_len;
@@ -373,20 +274,24 @@ clean_n_ret:
 int broker_run(Broker *b) {
     if (!b) return ERR;
 
+    struct pollfd *pfds = (struct pollfd *)xmalloc((MAX_CLIENTS + 1) * sizeof(*pfds));
+
     for (;;) {
         // pollfd array: 1 for listen + up to max_clients client fds
-        size_t nfds = 1 + b->nsessions;
+        size_t nsessions = parr_len(b->sessions);
+        size_t nfds = 1 + nsessions;
         
         // TODO: makes no sense to allocate/free each loop. Solve it.
-        struct pollfd *pfds = (struct pollfd *)xmalloc(nfds * sizeof(*pfds));
         memset(pfds, 0, nfds * sizeof(*pfds));
 
         // poll slot 0th = server socket
         pfds[0].fd = b->listen_fd;
         pfds[0].events = POLLIN;
 
-        for (size_t i = 0; i < b->nsessions; i++) {
-            pfds[1 + i].fd = b->sessions[i].fd;
+        for (size_t i = 0; i < nsessions; i++) {
+            BrokerMcpSession *sess = parr_at(b->sessions, i);
+            if (!sess) continue;
+            pfds[1 + i].fd = sess->fd;
             pfds[1 + i].events = POLLIN;
             // revents is already 0 since memset above
         }
@@ -414,8 +319,14 @@ int broker_run(Broker *b) {
                     // accept error; keep running
                     break;
                 }
-                if (broker_add_client(b, cfd) != 0) {
-                    // fatal-ish; we keep going for robustness
+                if (MAX_CLIENTS > 0 &&
+                    parr_len(b->sessions) >= MAX_CLIENTS) {
+                    safe_close_fd(&cfd);
+                    break;
+                }
+                if (sessions_add(b->sessions, cfd, NULL) != OK) {
+                    safe_close_fd(&cfd);
+                    break;
                 }
                 break;
                 // TODO: For now we accept one at a time; loop accepts multiple
@@ -424,19 +335,19 @@ int broker_run(Broker *b) {
         }
 
         // Handle client I/O
-        for (size_t i = 0; i < b->nsessions; /* increment inside */) {
+        for (size_t i = 0; i < parr_len(b->sessions); /* increment inside */) {
             // we don't increament when removing a session because the array
             // squash the next structures and fills the empty slot of the
             // removed session
             struct pollfd *pfd = &pfds[1 + i];
 
             if (pfd->revents & (POLLHUP | POLLERR | POLLNVAL)) {
-                broker_remove_session_at(b, i);
+                parr_drop_swap(b->sessions, i);
                 continue;
             }
 
             if (pfd->revents & POLLIN) {
-                BrokerClientSession *sess = &b->sessions[i];
+                BrokerMcpSession *sess = parr_at(b->sessions, i);
 
                 StrBuf req = {0};
                 QueryResult *q_res = NULL;
@@ -448,7 +359,7 @@ int broker_run(Broker *b) {
                 if (rr != OK || req.len > MAX_REQ_LEN) {
                     // framing error -> drop client
                     sb_clean(&req);
-                    broker_remove_session_at(b, i);
+                    parr_drop_swap(b->sessions, i);
                     continue;
                 }
                 
@@ -464,7 +375,7 @@ int broker_run(Broker *b) {
                 if (hr != OK) {
                     // Something bad happend, drop client
                     sb_clean(&req);
-                    broker_remove_session_at(b, i);
+                    parr_drop_swap(b->sessions, i);
                     continue;
                 }
 
@@ -477,7 +388,7 @@ send_q_res:
                 if (broker_write_q_res(sess, q_res) != OK) {
                     sb_clean(&req);
                     qr_destroy(q_res);
-                    broker_remove_session_at(b, i);
+                    parr_drop_swap(b->sessions, i);
                     continue;
                 }
 

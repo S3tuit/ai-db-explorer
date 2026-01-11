@@ -17,14 +17,10 @@
 typedef struct Broker Broker;
 
 /* This entity stores the usefull data to communicate with each Client. */
-typedef struct BrokerClientSession {
+typedef struct BrokerMcpSession {
     BufChannel bc;
-    int fd;              // connection identity (owned by bc/ch)
-
-    /* Session state */
-    char *current_dbname;   // owned string, may be NULL
-    DbBackend *db;          // owned, may be NULL
-} BrokerClientSession;
+    int fd;              // connection identity (owned by bc)
+} BrokerMcpSession;
 
 /* Run broker event loop (blocking).
  * Returns OK on clean stop, ERR on fatal error.

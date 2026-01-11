@@ -10,6 +10,7 @@
 #include "query_result.h"
 #include "safety_policy.h"
 #include "utils.h"
+#include "conn_catalog.h"
 
 enum {
     PG_QUERY_MAX_BYTES = 8192
@@ -170,9 +171,9 @@ static int pg_exec_single_result(PgImpl *p, const char *sql, PGresult **out_res)
 
 /* --------------------------- DbBackend vtable --------------------------- */
 
-static int pg_connect(DbBackend *db, const char *conninfo,
-                        const SafetyPolicy *policy) {
-    if (!db || !db->impl || !conninfo || !policy) return ERR;
+static int pg_connect(DbBackend *db, const ConnProfile *profile,
+                        const SafetyPolicy *policy, const char *pwd) {
+    if (!db || !db->impl || !profile || !policy) return ERR;
     PgImpl *p = (PgImpl *)db->impl;
 
     // when created, NULL is assigned to p->conn. If it's not NULL, there's
@@ -182,7 +183,27 @@ static int pg_connect(DbBackend *db, const char *conninfo,
         p->conn = NULL;
     }
 
-    p->conn = PQconnectdb(conninfo);
+    const char *port_str = NULL;
+    char portbuf[16];
+    if (profile->port > 0) {
+        snprintf(portbuf, sizeof(portbuf), "%u", (unsigned)profile->port);
+        port_str = portbuf;
+    }
+
+    const char *keys[] = {
+        "host", "port", "dbname", "user", "password", "options", NULL
+    };
+    const char *vals[] = {
+        profile->host,
+        port_str,
+        profile->db_name,
+        profile->user,
+        pwd,
+        profile->options,
+        NULL
+    };
+
+    p->conn = PQconnectdbParams(keys, vals, 0);
     if (!p->conn) {
         pg_set_err(p, "PQconnectdb returned NULL");
         return ERR;
@@ -200,15 +221,27 @@ static int pg_connect(DbBackend *db, const char *conninfo,
     return OK;
 }
 
-static void pg_destroy(DbBackend *db) {
+static int pg_is_connected(DbBackend *db) {
+    if (!db || !db->impl) return ERR;
+    PgImpl *p = (PgImpl *)db->impl;
+    if (!p->conn) return NO;
+    return (PQstatus(p->conn) == CONNECTION_OK) ? YES : NO;
+}
+
+static void pg_disconnect(DbBackend *db) {
     if (!db || !db->impl) return;
     PgImpl *p = (PgImpl *)db->impl;
-
     if (p->conn) {
         PQfinish(p->conn);
         p->conn = NULL;
     }
+    p->policy_applied = 0;
+}
 
+static void pg_destroy(DbBackend *db) {
+    if (!db || !db->impl) return;
+    pg_disconnect(db);
+    PgImpl *p = (PgImpl *)db->impl;
     free(p);
     free(db);
 }
@@ -234,7 +267,7 @@ static int pg_exec(DbBackend *db, uint32_t request_id, const char *sql,
         pg_set_err(p, "not connected");
         goto fail;
     }
-    
+
     // even if this limit is version-dependent, it's a defensive check
     if (strlen(sql) > PG_QUERY_MAX_BYTES) {
         pg_set_err(p, "SQL exceeds 8192 bytes (libpq query buffer limit)");
@@ -380,6 +413,8 @@ fail_bad_input:
 
 static const DbBackendVTable PG_VT = {
     .connect = pg_connect,
+    .is_connected = pg_is_connected,
+    .disconnect = pg_disconnect,
     .destroy = pg_destroy,
     .exec = pg_exec
 };

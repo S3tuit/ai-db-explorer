@@ -5,6 +5,7 @@
 #include "utils.h"
 #include "safety_policy.h"
 #include "query_result.h"
+#include "conn_catalog.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -21,25 +22,50 @@ static SafetyPolicy policy_default(void) {
     return p;
 }
 
-/* libpq can read env vars, but specifying dbname keeps it explicit */
-static const char *conninfo_env(void) {
-    return "dbname=postgres";
+static const char *env_or_null(const char *name) {
+    const char *val = getenv(name);
+    return (val && val[0] != '\0') ? val : NULL;
+}
+
+static uint16_t env_u16_or_zero(const char *name) {
+    const char *val = getenv(name);
+    if (!val || val[0] == '\0') return 0;
+    unsigned long v = strtoul(val, NULL, 10);
+    if (v > UINT16_MAX) return 0;
+    return (uint16_t)v;
+}
+
+static ConnProfile profile_default(void) {
+    ConnProfile p = {0};
+    p.connection_name = "pg_test";
+    p.kind = DB_KIND_POSTGRES;
+    p.host = env_or_null("PGHOST");
+    p.port = env_u16_or_zero("PGPORT");
+    p.db_name = env_or_null("PGDATABASE");
+    p.user = env_or_null("PGUSER");
+    p.password_ref = NULL;
+    p.options = NULL;
+    return p;
 }
 
 static DbBackend *pg_connect_impl(const SafetyPolicy *policy, const char *file, int line) {
     DbBackend *pg = postgres_backend_create();
     ASSERT_TRUE_AT(pg != NULL, file, line);
 
-    int rc = pg->vt->connect(pg, conninfo_env(), policy);
+    ConnProfile profile = profile_default();
+    if (!profile.db_name) profile.db_name = "postgres";
+    const char *pwd = env_or_null("PGPASSWORD");
+    int rc = db_connect(pg, &profile, policy, pwd);
     ASSERT_TRUE_AT(rc == OK, file, line);
 
     return pg;
 }
 #define PG_CONNECT(policy) pg_connect_impl((policy), __FILE__, __LINE__)
 
-static QueryResult *pg_exec_impl(DbBackend *pg, uint32_t id, const char *sql, const char *file, int line) {
+static QueryResult *pg_exec_impl(DbBackend *pg, uint32_t id, const char *sql,
+                                 const char *file, int line) {
     QueryResult *qr = NULL;
-    int rc = pg->vt->exec(pg, id, sql, &qr);
+    int rc = db_exec(pg, id, sql, &qr);
 
     /* Contract: backend returns OK and always produces a QueryResult (OK or ERROR) */
     ASSERT_TRUE_AT(rc == OK, file, line);
@@ -98,7 +124,7 @@ static void test_base_select_join(void) {
     ASSERT_TRUE(found_goku);
 
     qr_destroy(qr);
-    pg->vt->destroy(pg);
+    db_destroy(pg);
 }
 
 static void test_select_null_cell(void) {
@@ -117,7 +143,7 @@ static void test_select_null_cell(void) {
     ASSERT_STREQ(qr_get_cell(qr, 0, 1), "ok");
 
     qr_destroy(qr);
-    pg->vt->destroy(pg);
+    db_destroy(pg);
 }
 
 static void test_max_rows_truncates(void) {
@@ -134,7 +160,7 @@ static void test_max_rows_truncates(void) {
     ASSERT_TRUE(qr->truncated == 1);
 
     qr_destroy(qr);
-    pg->vt->destroy(pg);
+    db_destroy(pg);
 }
 
 static void test_max_cell_bytes_caps_cell(void) {
@@ -156,7 +182,7 @@ static void test_max_cell_bytes_caps_cell(void) {
     ASSERT_TRUE(strlen(cell) <= (size_t)(p.max_cell_bytes - 1));
 
     qr_destroy(qr);
-    pg->vt->destroy(pg);
+    db_destroy(pg);
 }
 
 static void test_delete_fails_read_only(void) {
@@ -169,7 +195,7 @@ static void test_delete_fails_read_only(void) {
     ASSERT_ERR_QR(qr);
 
     qr_destroy(qr);
-    pg->vt->destroy(pg);
+    db_destroy(pg);
 }
 
 static void test_attempt_disable_readonly_still_cannot_write(void) {
@@ -185,7 +211,7 @@ static void test_attempt_disable_readonly_still_cannot_write(void) {
     ASSERT_ERR_QR(qr2);
 
     qr_destroy(qr2);
-    pg->vt->destroy(pg);
+    db_destroy(pg);
 }
 
 static void test_long_running_query(void) {
@@ -197,7 +223,7 @@ static void test_long_running_query(void) {
     ASSERT_ERR_QR(qr);
 
     qr_destroy(qr);
-    pg->vt->destroy(pg);
+    db_destroy(pg);
 }
 
 void test_postgres_backend(void) {
