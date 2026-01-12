@@ -7,7 +7,7 @@
 #include "byte_channel.h"
 #include "bufio.h"
 #include "db_backend.h"
-#include "security_context.h"
+#include "conn_manager.h"
 
 
 #define SOCK_PATH "./build/aidbexplorer.sock"
@@ -30,11 +30,11 @@ typedef struct BrokerMcpSession {
  */
 int broker_run(Broker *b);
 
-// Valid commands for the Broker
-#define BROK_EXEC_CMD "exec"
+/* Creates a Broker. If sock_path is NULL, it uses the default. The Broker
+ * takes ownership of 'cm'. */
+Broker *broker_create(const char *sock_path, ConnManager *cm);
 
-/* Create/destroy broker. If sock_path is NULL, it uses the default. */
-Broker *broker_create(const char *sock_path);
+/* Frees 'b' and its owned entities. */
 void broker_destroy(Broker *b);
 
 #endif

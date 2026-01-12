@@ -14,7 +14,7 @@
 #include <errno.h>
 #include <unistd.h>
 
-#define MCP_PROTOCOL_VERSION "2025-06-18"
+#define MCP_PROTOCOL_VERSION "2025-11-25"
 
 static void mcpser_set_err(McpServer *s, const char *msg) {
     if (!s) return;
@@ -47,13 +47,17 @@ static int connect_unix_socket(const char *path) {
 
 /* Writes a JSON-RPC error response. If 'requested' is non-NULL, include data
  * with supported/requested protocol versions. */
-static int mcpser_send_error(McpServer *s, uint32_t id, long code,
+static int mcpser_send_error(McpServer *s, const uint32_t *id, long code,
                              const char *msg, const char *requested) {
     if (!s || !s->out_bc || !msg) return ERR;
 
     StrBuf sb = {0};
     if (json_rpc_begin(&sb) != OK) goto err;
-    if (json_kv_u64(&sb, "id", id) != OK) goto err;
+    if (id) {
+        if (json_kv_u64(&sb, "id", *id) != OK) goto err;
+    } else {
+        if (json_kv_null(&sb, "id") != OK) goto err;
+    }
     if (json_kv_obj_begin(&sb, "error") != OK) goto err;
     if (json_kv_l(&sb, "code", code) != OK) goto err;
     if (json_kv_str(&sb, "message", msg) != OK) goto err;
@@ -143,48 +147,39 @@ static int mcpser_handshake(McpServer *s) {
         return rc;
     }
 
-    char *json = xmalloc(req.len + 1);
-    memcpy(json, req.data, req.len);
-    json[req.len] = '\0';
+    const char *json = req.data;
+
+    JsonGetter jg;
+    int irc = jsget_init(&jg, json, req.len);
+    // if it's not a valid JSON-RPC, we still try to find a top-leve "id" key
+    // before returning the error
+    int vrc = (irc == OK) ? jsget_simple_rpc_validation(&jg) : ERR;
 
     uint32_t id = 0;
-    (void)json_get_value(json, req.len, "%u", "id", &id);
+    const uint32_t *idp = NULL;
+    if (irc == OK && jsget_u32(&jg, "id", &id) == YES) idp = &id;
 
-    int vrc = json_simple_rpc_validation(json);
     if (vrc != YES) {
-        free(json);
         sb_clean(&req);
-        (void)mcpser_send_error(s, id, -32600, "Invalid Request.", NULL);
+        (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
         return ERR;
     }
 
-    char *method = NULL;
-    char *proto = NULL;
-    int mrc = json_get_value(json, req.len, "%s%s",
-            "method", &method, "params.protocolVersion", &proto);
-    if (mrc != YES || !method || strcmp(method, "initialize") != 0) {
-        free(method);
-        free(proto);
-        free(json);
+    JsonStrSpan method = {0};
+    JsonStrSpan proto = {0};
+    int mrc = jsget_string_span(&jg, "method", &method);
+    // If the server supports the requested protocol version, it MUST respond
+    // with the same version. Otherwise, the server MUST respond with another
+    // protocol version it supports.
+    int prc = jsget_string_span(&jg, "params.protocolVersion", &proto);
+    if (mrc != YES || prc != YES || method.len == 0 ||
+            method.len != strlen("initialize") ||
+            memcmp(method.ptr, "initialize", method.len) != 0) {
         sb_clean(&req);
-        (void)mcpser_send_error(s, id, -32600, "Invalid Request.", NULL);
+        (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
         return ERR;
     }
 
-    if (!proto || strcmp(proto, MCP_PROTOCOL_VERSION) != 0) {
-        const char *req_proto = proto ? proto : "";
-        (void)mcpser_send_error(s, id, -32602,
-                "Unsupported protocol version", req_proto);
-        free(method);
-        free(proto);
-        free(json);
-        sb_clean(&req);
-        return ERR;
-    }
-
-    free(method);
-    free(proto);
-    free(json);
     sb_clean(&req);
 
     StrBuf sb = {0};
@@ -236,22 +231,27 @@ int mcpser_run(McpServer *s) {
             return ERR;
         }
 
-        char *json = xmalloc(req.len + 1);
-        memcpy(json, req.data, req.len);
-        json[req.len] = '\0';
-
-        uint32_t id = 0;
-        (void)json_get_value(json, req.len, "%u", "id", &id);
-
-        int vrc = json_simple_rpc_validation(json);
-        if (vrc != YES) {
-            const char *msg = (vrc == ERR)
-                ? "Malformed JSON-RPC request."
-                : "Invalid JSON-RPC request.";
-            fprintf(stderr, "McpServer: invalid input\n");
-            free(json);
+        JsonGetter jg;
+        int irc = jsget_init(&jg, req.data, req.len);
+        if (irc != OK) {
+            fprintf(stderr, "McpServer: malformed input\n");
             sb_clean(&req);
-            if (mcpser_send_error(s, id, -32600, msg, NULL) != OK) {
+            if (mcpser_send_error(s, NULL, -32600, "Malformed JSON-RPC request", NULL) != OK) {
+                mcpser_set_err(s, "failed to write error response");
+                return ERR;
+            }
+            continue;
+        }
+
+        int vrc = jsget_simple_rpc_validation(&jg);
+        uint32_t id = 0;
+        const uint32_t *idp = NULL;
+        if (jsget_u32(&jg, "id", &id) == YES) idp = &id;
+
+        if (vrc != YES) {
+            fprintf(stderr, "McpServer: invalid input\n");
+            sb_clean(&req);
+            if (mcpser_send_error(s, idp, -32600, "Invalid JSON-RPC request.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
             }
@@ -261,9 +261,8 @@ int mcpser_run(McpServer *s) {
         // overflow
         if (req.len > UINT32_MAX) {
             fprintf(stderr, "McpServer: request too large\n");
-            free(json);
             sb_clean(&req);
-            if (mcpser_send_error(s, id, -32600, "Request too large.", NULL) != OK) {
+            if (mcpser_send_error(s, idp, -32600, "Request too large.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
             }
@@ -274,16 +273,14 @@ int mcpser_run(McpServer *s) {
         //
         if (frame_write_len(s->brok_bc, req.data, (uint32_t)req.len) != OK) {
             fprintf(stderr, "McpServer: broker write failed\n");
-            free(json);
             sb_clean(&req);
-            if (mcpser_send_error(s, id, -32600, "Unable to reach broker.", NULL) != OK) {
+            if (mcpser_send_error(s, idp, -32600, "Unable to reach broker.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
             }
             mcpser_set_err(s, "failed to write to broker");
             return ERR;
         }
-        free(json);
         sb_clean(&req);
 
         // McpServer reads broker response
@@ -292,7 +289,7 @@ int mcpser_run(McpServer *s) {
         if (frame_read_len(s->brok_bc, &resp) != OK) {
             fprintf(stderr, "McpServer: broker read failed\n");
             sb_clean(&resp);
-            if (mcpser_send_error(s, id, -32600, "Unable to read broker response.", NULL) != OK) {
+            if (mcpser_send_error(s, idp, -32600, "Unable to read broker response.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
             }

@@ -15,8 +15,8 @@ typedef struct ConnManager ConnManager;
  * Creates and returns a ConnManager.
  *
  * Ownership:
- * - `cat` is borrowed and must outlive ConnManager.
- * - `secrets` is borrowed and must outlive ConnManager.
+ * - `cat` is owned by ConnManager after creation.
+ * - `secrets` is owned by ConnManager after creation.
  * - the policy is borrowed from the catalog and must outlive ConnManager (v1).
  */
 ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets);

@@ -1,6 +1,8 @@
 #include "mcp_server.h"
 #include "broker.h"
 #include "utils.h"
+#include "connection_catalog.h"
+#include "secret_store.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -45,8 +47,31 @@ int main(int argc, char **argv) {
         return (rc == OK) ? 0 : 1;
     }
 
-    Broker *b = broker_create(sock_path);
+    ConnectionCatalog *cat = NULL;
+    SecretStore *secrets = NULL;
+    ConnManager *cm = NULL;
+
+    if (catalog_load_from_file("dummy", &cat) != OK) {
+        fprintf(stderr, "ERROR: catalog init failed\n");
+        return 1;
+    }
+    secrets = secret_store_create();
+    if (!secrets) {
+        catalog_destroy(cat);
+        fprintf(stderr, "ERROR: secret store init failed\n");
+        return 1;
+    }
+    cm = connm_create(cat, secrets);
+    if (!cm) {
+        catalog_destroy(cat);
+        secret_store_destroy(secrets);
+        fprintf(stderr, "ERROR: conn manager init failed\n");
+        return 1;
+    }
+
+    Broker *b = broker_create(sock_path, cm);
     if (!b) {
+        connm_destroy(cm);
         fprintf(stderr, "ERROR: broker init failed\n");
         return 1;
     }

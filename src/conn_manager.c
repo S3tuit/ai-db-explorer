@@ -15,8 +15,8 @@ typedef struct {
 } ConnEntry;
 
 struct ConnManager {
-    ConnCatalog *cat;         // borrowed
-    SecretStore *secrets;     // borrowed
+    ConnCatalog *cat;         // owned
+    SecretStore *secrets;     // owned
     SafetyPolicy *policy;     // cached, not owned
     uint64_t ttl_ms;                // the time after which a backend that has
                                   // not been used ( and has no running queries)
@@ -93,6 +93,8 @@ ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets) {
 
     m->policy = catalog_get_policy(m->cat);
     if (!m->policy) {
+        catalog_destroy(m->cat);
+        secret_store_destroy(m->secrets);
         free(m);
         return NULL;
     }
@@ -157,6 +159,14 @@ void connm_destroy(ConnManager *m) {
         m->entries = NULL;
     }
 
+    if (m->cat) {
+        catalog_destroy(m->cat);
+        m->cat = NULL;
+    }
+    if (m->secrets) {
+        secret_store_destroy(m->secrets);
+        m->secrets = NULL;
+    }
     free(m);
 }
 

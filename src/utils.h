@@ -15,6 +15,13 @@
 #define NO 0
 #define ERR -1
 
+#define ARRLEN(x) (sizeof(x) / sizeof((x)[0]))
+
+/* True if (str1,len1) equals NUL-terminated literal/cstring str2 */
+#define STREQ(str1, len1, str2) \
+  ( ((len1) == strlen(str2)) && (memcmp((str1), (str2), (len1)) == 0) )
+
+
 void *xmalloc(size_t size);
 void *xcalloc(size_t n, size_t size);
 void *xrealloc(void *ptr, size_t size);

@@ -284,7 +284,7 @@ static void test_json_builder_nested(void) {
     sb_clean(&sb);
 }
 
-static void test_json_simple_rpc_validation(void) {
+static void test_jsget_simple_rpc_validation(void) {
     const char *ok =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{}}";
     const char *no_id =
@@ -294,37 +294,96 @@ static void test_json_simple_rpc_validation(void) {
     const char *bad_json =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\"";
 
-    ASSERT_TRUE(json_simple_rpc_validation(ok) == YES);
-    ASSERT_TRUE(json_simple_rpc_validation(no_id) == NO);
-    ASSERT_TRUE(json_simple_rpc_validation(bad_ver) == NO);
-    ASSERT_TRUE(json_simple_rpc_validation(bad_json) == ERR);
+    JsonGetter jg;
+    ASSERT_TRUE(jsget_init(&jg, ok, strlen(ok)) == OK);
+    ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == YES);
+
+    ASSERT_TRUE(jsget_init(&jg, no_id, strlen(no_id)) == OK);
+    ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == NO);
+
+    ASSERT_TRUE(jsget_init(&jg, bad_ver, strlen(bad_ver)) == OK);
+    ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == NO);
+
+    ASSERT_TRUE(jsget_init(&jg, bad_json, strlen(bad_json)) == ERR);
 }
 
-static void test_json_get_value_strings(void) {
-    const char *json = "{\"a\":\"x\",\"b\":\"hello\"}";
-    char c = '\0';
-    char *s = NULL;
+static void test_jsget_paths(void) {
+    const char *json = "{\"a\":\"x\",\"b\":{\"c\":\"hello\",\"d\":{\"e\":\"z\"}}}";
+    JsonGetter jg;
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
 
-    int rc = json_get_value(json, strlen(json), "%c%s", "a", &c, "b", &s);
-    ASSERT_TRUE(rc == YES);
-    ASSERT_TRUE(c == 'x');
-    ASSERT_STREQ(s, "hello");
+    char *s1 = NULL;
+    char *s2 = NULL;
+    JsonStrSpan sp = {0};
 
-    free(s);
+    ASSERT_TRUE(jsget_string_span(&jg, "a", &sp) == YES);
+    ASSERT_TRUE(sp.len == 1);
+    ASSERT_TRUE(sp.ptr[0] == 'x');
+
+    ASSERT_TRUE(jsget_string_decode_alloc(&jg, "b.c", &s1) == YES);
+    ASSERT_TRUE(jsget_string_decode_alloc(&jg, "b.d.e", &s2) == YES);
+    ASSERT_STREQ(s1, "hello");
+    ASSERT_STREQ(s2, "z");
+
+    free(s1);
+    free(s2);
 }
 
-static void test_json_get_value_null(void) {
-    const char *json = "{\"a\":null}";
+static void test_jsget_null_and_overflow(void) {
+    const char *json = "{\"a\":null,\"b\":4294967296}";
+    JsonGetter jg;
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+
     uint32_t v = 0;
-    int rc = json_get_value(json, strlen(json), "%u", "a", &v);
-    ASSERT_TRUE(rc == NO);
+    ASSERT_TRUE(jsget_u32(&jg, "a", &v) == NO);
+    ASSERT_TRUE(jsget_u32(&jg, "b", &v) == ERR);
 }
 
-static void test_json_get_value_u32_overflow(void) {
-    const char *json = "{\"a\":4294967296}";
-    uint32_t v = 0;
-    int rc = json_get_value(json, strlen(json), "%u", "a", &v);
-    ASSERT_TRUE(rc == ERR);
+static void test_jsget_u32_and_bool(void) {
+    const char *json = "{\"id\":7,\"ok\":true}";
+    JsonGetter jg;
+    uint32_t id = 0;
+    int ok = 0;
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_u32(&jg, "id", &id) == YES);
+    ASSERT_TRUE(id == 7);
+    ASSERT_TRUE(jsget_bool01(&jg, "ok", &ok) == YES);
+    ASSERT_TRUE(ok == 1);
+}
+
+static void test_jsget_string_span_and_decode(void) {
+    const char *json = "{\"raw\":\"a\\\\n\\\"b\\\"\"}";
+    JsonGetter jg;
+    JsonStrSpan sp = {0};
+    char *decoded = NULL;
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_string_span(&jg, "raw", &sp) == YES);
+    ASSERT_TRUE(sp.len == strlen("a\\\\n\\\"b\\\""));
+    ASSERT_TRUE(jsget_string_decode_alloc(&jg, "raw", &decoded) == YES);
+    ASSERT_STREQ(decoded, "a\\n\"b\"");
+    free(decoded);
+}
+
+static void test_jsget_array_strings(void) {
+    const char *json = "{\"arr\":[\"x\",\"y\"]}";
+    JsonGetter jg;
+    JsonArrIter it;
+    JsonStrSpan sp = {0};
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_array_strings_begin(&jg, "arr", &it) == YES);
+
+    ASSERT_TRUE(jsget_array_strings_next(&jg, &it, &sp) == YES);
+    ASSERT_TRUE(sp.len == 1);
+    ASSERT_TRUE(sp.ptr[0] == 'x');
+
+    ASSERT_TRUE(jsget_array_strings_next(&jg, &it, &sp) == YES);
+    ASSERT_TRUE(sp.len == 1);
+    ASSERT_TRUE(sp.ptr[0] == 'y');
+
+    ASSERT_TRUE(jsget_array_strings_next(&jg, &it, &sp) == NO);
 }
 
 int main (void) {
@@ -336,10 +395,12 @@ int main (void) {
     test_json_builder_object();
     test_json_builder_array();
     test_json_builder_nested();
-    test_json_simple_rpc_validation();
-    test_json_get_value_strings();
-    test_json_get_value_null();
-    test_json_get_value_u32_overflow();
+    test_jsget_simple_rpc_validation();
+    test_jsget_paths();
+    test_jsget_null_and_overflow();
+    test_jsget_u32_and_bool();
+    test_jsget_string_span_and_decode();
+    test_jsget_array_strings();
 
     fprintf(stderr, "OK: test_json\n");
     return(0);

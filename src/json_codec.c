@@ -256,6 +256,12 @@ int json_kv_bool(StrBuf *sb, const char *key, int val) {
     return json_append(sb, "\"%s\":%b", key, val);
 }
 
+int json_kv_null(StrBuf *sb, const char *key) {
+    if (!sb || !key) return ERR;
+    if (json_maybe_comma(sb) != OK) return ERR;
+    return json_append(sb, "\"%s\":null", key);
+}
+
 int json_arr_elem_str(StrBuf *sb, const char *val) {
     if (!sb || !val) return ERR;
     if (json_maybe_comma(sb) != OK) return ERR;
@@ -402,451 +408,499 @@ err:
     return ERR;
 }
 
+/* --------------------------------- decode new ------------------------------- */
 
-/* --------------------------------- decode ------------------------------- */
+/*
+ * Decodes JSON string content (WITHOUT surrounding quotes) into a newly
+ * allocated NUL-terminated C string.
+ *
+ * Unescape:
+ *  - \" \\ \/ \b \f \n \r \t
+ *  - \uXXXX (UTF-16 code units), including surrogate pairs, converted to UTF-8
+ *
+ * Notes:
+ *  - 's' is NOT required to be NUL-terminated; use 'len'.
+ *  - Output is allocated and must be freed by caller.
+ *  - This does not validate UTF-8 for non-escaped bytes; it passes bytes >= 0x20 through.
+ *
+ * Return OK on success, ERR on error/bad input.
+ */
+static int json_string_unescape_alloc(const char *s, size_t len, char **out) {
+    if (!s || !out) return ERR;
 
-static const char *json_skip_ws(const char *p) {
-    if (!p) return NULL;
-    while (*p && isspace((unsigned char)*p)) p++;
-    return p;
-}
+    // Worst-case decoded output is <= input len (escape sequences shrink).
+    // Surrogate pairs (\uXXXX\uYYYY = 12 bytes) decode to <= 4 UTF-8 bytes.
+    // So len + 1 is safe for NUL.
+    char *dst = (char *)xmalloc(len + 1);
+    if (!dst) return ERR;
 
-/* Parses a JSON string. If 'out' is non-NULL, appends decoded bytes to it.
- * Returns pointer to the first byte after the closing quote, or NULL on error. */
-static const char *json_parse_string(const char *p, StrBuf *out) {
-    if (!p || *p != '"') return NULL;
-    p++;
-    while (*p) {
-        unsigned char c = (unsigned char)*p;
-        if (c == '"') return p + 1;
-        if (c == '\\') {
-            p++;
-            if (!*p) return NULL;
-            switch (*p) {
-                case '"':  c = '"';  break;
-                case '\\': c = '\\'; break;
-                case '/':  c = '/';  break;
-                case 'b':  c = '\b'; break;
-                case 'f':  c = '\f'; break;
-                case 'n':  c = '\n'; break;
-                case 'r':  c = '\r'; break;
-                case 't':  c = '\t'; break;
-                default:
-                    return NULL;
+    size_t j = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c != '\\') {
+            // JSON does not allow unescaped control chars, but if present we treat as error.
+            if (c < 0x20) { free(dst); return ERR; }
+            dst[j++] = (char)c;
+            continue;
+        }
+
+        // We saw '\', must have at least one more char
+        if (i + 1 >= len) { free(dst); return ERR; }
+        char e = s[++i];
+
+        switch (e) {
+            case '\"': dst[j++] = '\"'; break;
+            case '\\': dst[j++] = '\\'; break;
+            case '/':  dst[j++] = '/';  break;
+            case 'b':  dst[j++] = '\b'; break;
+            case 'f':  dst[j++] = '\f'; break;
+            case 'n':  dst[j++] = '\n'; break;
+            case 'r':  dst[j++] = '\r'; break;
+            case 't':  dst[j++] = '\t'; break;
+
+            case 'u': {
+                // Expect 4 hex digits after \u
+                if (i + 4 >= len) { free(dst); return ERR; }
+
+                // decode first code unit
+                uint16_t cu1 = 0;
+                {
+                    uint16_t v = 0;
+                    for (int k = 0; k < 4; k++) {
+                        char h = s[i + 1 + (size_t)k];
+                        uint16_t d;
+                        if (h >= '0' && h <= '9') d = (uint16_t)(h - '0');
+                        else if (h >= 'a' && h <= 'f') d = (uint16_t)(10 + (h - 'a'));
+                        else if (h >= 'A' && h <= 'F') d = (uint16_t)(10 + (h - 'A'));
+                        else { free(dst); return ERR; }
+                        v = (uint16_t)((v << 4) | d);
+                    }
+                    cu1 = v;
+                }
+
+                // advance i over the 4 hex digits we just consumed
+                i += 4;
+
+                uint32_t codepoint = cu1;
+
+                // Handle UTF-16 surrogate pairs:
+                // High surrogate: 0xD800..0xDBFF
+                // Low surrogate : 0xDC00..0xDFFF
+                if (cu1 >= 0xD800 && cu1 <= 0xDBFF) {
+                    // must be followed by \uXXXX for low surrogate
+                    if (i + 6 >= len) { free(dst); return ERR; }
+                    if (s[i + 1] != '\\' || s[i + 2] != 'u') { free(dst); return ERR; }
+
+                    uint16_t cu2 = 0;
+                    {
+                        uint16_t v = 0;
+                        for (int k = 0; k < 4; k++) {
+                            char h = s[i + 3 + (size_t)k];
+                            uint16_t d;
+                            if (h >= '0' && h <= '9') d = (uint16_t)(h - '0');
+                            else if (h >= 'a' && h <= 'f') d = (uint16_t)(10 + (h - 'a'));
+                            else if (h >= 'A' && h <= 'F') d = (uint16_t)(10 + (h - 'A'));
+                            else { free(dst); return ERR; }
+                            v = (uint16_t)((v << 4) | d);
+                        }
+                        cu2 = v;
+                    }
+
+                    if (cu2 < 0xDC00 || cu2 > 0xDFFF) { free(dst); return ERR; }
+
+                    // Combine surrogate pair into code point
+                    // codepoint = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                    codepoint = 0x10000u
+                              + (((uint32_t)cu1 - 0xD800u) << 10)
+                              + ((uint32_t)cu2 - 0xDC00u);
+
+                    // advance i over "\uXXXX" (6 chars: backslash, u, 4 hex)
+                    i += 6;
+                } else if (cu1 >= 0xDC00 && cu1 <= 0xDFFF) {
+                    // Low surrogate without preceding high surrogate is invalid
+                    free(dst);
+                    return ERR;
+                }
+
+                // Encode codepoint as UTF-8
+                if (codepoint <= 0x7F) {
+                    dst[j++] = (char)codepoint;
+                } else if (codepoint <= 0x7FF) {
+                    dst[j++] = (char)(0xC0 | (codepoint >> 6));
+                    dst[j++] = (char)(0x80 | (codepoint & 0x3F));
+                } else if (codepoint <= 0xFFFF) {
+                    dst[j++] = (char)(0xE0 | (codepoint >> 12));
+                    dst[j++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                    dst[j++] = (char)(0x80 | (codepoint & 0x3F));
+                } else if (codepoint <= 0x10FFFF) {
+                    dst[j++] = (char)(0xF0 | (codepoint >> 18));
+                    dst[j++] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+                    dst[j++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                    dst[j++] = (char)(0x80 | (codepoint & 0x3F));
+                } else {
+                    // Unicode max is 0x10FFFF
+                    free(dst);
+                    return ERR;
+                }
+                break;
             }
-            if (out && sb_append_bytes(out, &c, 1) != OK) return NULL;
-            p++;
-            continue;
-        }
-        if (out && sb_append_bytes(out, &c, 1) != OK) return NULL;
-        p++;
-    }
-    return NULL;
-}
 
-static const char *json_skip_value(const char *p);
-
-static const char *json_skip_object(const char *p) {
-    if (!p || *p != '{') return NULL;
-    p = json_skip_ws(p + 1);
-    if (!p) return NULL;
-    if (*p == '}') return p + 1;
-
-    for (;;) {
-        p = json_skip_ws(p);
-        p = json_parse_string(p, NULL);
-        if (!p) return NULL;
-        p = json_skip_ws(p);
-        if (!p || *p != ':') return NULL;
-        p = json_skip_ws(p + 1);
-        p = json_skip_value(p);
-        if (!p) return NULL;
-        p = json_skip_ws(p);
-        if (*p == ',') {
-            p++;
-            continue;
-        }
-        if (*p == '}') return p + 1;
-        return NULL;
-    }
-}
-
-static const char *json_skip_array(const char *p) {
-    if (!p || *p != '[') return NULL;
-    p = json_skip_ws(p + 1);
-    if (!p) return NULL;
-    if (*p == ']') return p + 1;
-
-    for (;;) {
-        p = json_skip_value(p);
-        if (!p) return NULL;
-        p = json_skip_ws(p);
-        if (*p == ',') {
-            p++;
-            continue;
-        }
-        if (*p == ']') return p + 1;
-        return NULL;
-    }
-}
-
-static const char *json_skip_number(const char *p) {
-    if (!p) return NULL;
-    if (*p == '-') p++;
-    if (!isdigit((unsigned char)*p)) return NULL;
-    while (isdigit((unsigned char)*p)) p++;
-    if (*p == '.' || *p == 'e' || *p == 'E') {
-        p++;
-        if (*p == '-' || *p == '+') p++;
-        if (!isdigit((unsigned char)*p)) return NULL;
-        while (isdigit((unsigned char)*p)) p++;
-    }
-    return p;
-}
-
-static const char *json_skip_value(const char *p) {
-    p = json_skip_ws(p);
-    if (!p || !*p) return NULL;
-    if (*p == '"') return json_parse_string(p, NULL);
-    if (*p == '{') return json_skip_object(p);
-    if (*p == '[') return json_skip_array(p);
-    if (*p == 't') return (strncmp(p, "true", 4) == 0) ? p + 4 : NULL;
-    if (*p == 'f') return (strncmp(p, "false", 5) == 0) ? p + 5 : NULL;
-    if (*p == 'n') return (strncmp(p, "null", 4) == 0) ? p + 4 : NULL;
-    if (*p == '-' || isdigit((unsigned char)*p)) return json_skip_number(p);
-    return NULL;
-}
-
-static int json_key_matches(const char *p, const char *key, const char **out_next) {
-    StrBuf sb = {0};
-    const char *next = json_parse_string(p, &sb);
-    if (!next) {
-        sb_clean(&sb);
-        return ERR;
-    }
-    if (sb_append_bytes(&sb, "\0", 1) != OK) {
-        sb_clean(&sb);
-        return ERR;
-    }
-    int match = (strcmp(sb.data ? sb.data : "", key) == 0);
-    sb_clean(&sb);
-    if (out_next) *out_next = next;
-    return match ? YES : NO;
-}
-
-static int json_find_in_object(const char *p, const char **parts, size_t depth,
-                               const char **out_val) {
-    if (!p || !parts || depth == 0) return ERR;
-    p = json_skip_ws(p);
-    if (!p || *p != '{') return ERR;
-    p = json_skip_ws(p + 1);
-    if (!p) return ERR;
-    if (*p == '}') return NO;
-
-    for (;;) {
-        p = json_skip_ws(p);
-        if (!p || *p != '"') return ERR;
-        int match = json_key_matches(p, parts[0], &p);
-        if (match == ERR) return ERR;
-        p = json_skip_ws(p);
-        if (!p || *p != ':') return ERR;
-        p = json_skip_ws(p + 1);
-        if (match == YES) {
-            if (depth == 1) {
-                if (out_val) *out_val = p;
-                return YES;
-            }
-            if (*p != '{') return ERR;
-            return json_find_in_object(p, parts + 1, depth - 1, out_val);
-        }
-        p = json_skip_value(p);
-        if (!p) return ERR;
-        p = json_skip_ws(p);
-        if (*p == ',') {
-            p++;
-            continue;
-        }
-        if (*p == '}') return NO;
-        return ERR;
-    }
-}
-
-static int json_find_path_value(const char *json, char **parts, size_t depth,
-                                const char **out_val) {
-    if (!json || !parts || depth == 0) return ERR;
-    const char *p = json;
-    const char *val = NULL;
-
-    for (size_t i = 0; i < depth; i++) {
-        const char *single[1] = { parts[i] };
-        int rc = json_find_in_object(p, single, 1, &val);
-        if (rc != YES) return rc;
-        if (i + 1 == depth) {
-            if (out_val) *out_val = val;
-            return YES;
-        }
-        val = json_skip_ws(val);
-        if (!val || *val != '{') return ERR;
-        p = val;
-    }
-    return ERR;
-}
-static int json_split_path(const char *path, char **parts, size_t *out_n) {
-    if (!path || !parts || !out_n) return ERR;
-    size_t n = 0;
-    const char *start = path;
-    for (const char *p = path; ; p++) {
-        if (*p == '.' || *p == '\0') {
-            if (n >= 3 || p == start) {
-                for (size_t i = 0; i < n; i++) free(parts[i]);
+            default:
+                // Invalid escape sequence
+                free(dst);
                 return ERR;
-            }
-            size_t len = (size_t)(p - start);
-            char *s = xmalloc(len + 1);
-            memcpy(s, start, len);
-            s[len] = '\0';
-            parts[n++] = s;
-            if (*p == '\0') break;
-            start = p + 1;
         }
     }
-    *out_n = n;
+
+    dst[j] = '\0';
+    *out = dst;
     return OK;
 }
 
-static int json_parse_uint(const char *p, uint64_t *out, const char **out_end) {
-    if (!p || !out) return ERR;
-    p = json_skip_ws(p);
-    if (!p) return ERR;
-    if (strncmp(p, "null", 4) == 0) return NO;
-    if (*p == '-') return ERR;
-    if (!isdigit((unsigned char)*p)) return ERR;
+/*
+ * Returns 1 if token 't' is a JSON primitive representing null, 0 otherwise.
+ * Only valid for JSMN_PRIMITIVE tokens.
+ */
+static int tok_is_null(const char *json, const jsmntok_t *t) {
+    if (!json || !t) return 0;
+    size_t n = (size_t)(t->end - t->start);
+    return (t->type == JSMN_PRIMITIVE && n == 4 && memcmp(json + t->start, "null", 4) == 0);
+}
 
+/*
+ * Compares JSON token string content (WITHOUT quotes) with a string segment.
+ * Return 1 if equal, 0 otherwise.
+ */
+static int tok_streq_n(const char *json, const jsmntok_t *t,
+                       const char *key, size_t key_len) {
+    if (!json || !t || !key) return 0;
+    if (t->type != JSMN_STRING) return 0;
+
+    size_t n = (size_t)(t->end - t->start);
+    return (n == key_len && memcmp(json + t->start, key, n) == 0);
+}
+
+/*
+ * Skips token at index 'i' and returns the index of the next token after it.
+ * This walks the token tree based on sizes and types and does not allocate.
+ *
+ * Return next index on success, -1 on error.
+ */
+static int skip_token(const jsmntok_t *toks, int ntok, int i) {
+    if (!toks || ntok <= 0 || i < 0 || i >= ntok) return -1;
+
+    int j = i + 1;
+    const jsmntok_t *t = &toks[i];
+
+    if (t->type == JSMN_PRIMITIVE || t->type == JSMN_STRING) {
+        return j;
+    }
+
+    if (t->type == JSMN_ARRAY) {
+        // For arrays, size is number of elements
+        for (int k = 0; k < t->size; k++) {
+            j = skip_token(toks, ntok, j);
+            if (j < 0) return -1;
+        }
+        return j;
+    }
+
+    if (t->type == JSMN_OBJECT) {
+        // For objects, size is number of key/value pairs
+        for (int k = 0; k < t->size; k++) {
+            // key
+            j = skip_token(toks, ntok, j);
+            if (j < 0) return -1;
+            // value
+            j = skip_token(toks, ntok, j);
+            if (j < 0) return -1;
+        }
+        return j;
+    }
+
+    return -1;
+}
+
+/*
+ * Finds the token index of a top-level object value by key.
+ * Root token must be an object at index 0.
+ *
+ * Return:
+ *  >=0 token index of the VALUE token on success
+ *  -1 on not found
+ *  -2 on error (invalid token stream)
+ */
+/*
+ * Finds the token index of an object value by key, starting from obj_idx.
+ *
+ * Return:
+ *  >=0 token index of the VALUE token on success
+ *  -1 on not found
+ *  -2 on error (invalid token stream)
+ */
+static int find_object_value_tok(const JsonGetter *jg, int obj_idx,
+                                 const char *key, size_t key_len) {
+    if (!jg || !jg->json || !key) return -2;
+    if (obj_idx < 0 || obj_idx >= jg->ntok) return -2;
+    if (jg->toks[obj_idx].type != JSMN_OBJECT) return -2;
+
+    int i = obj_idx + 1;
+    for (int pair = 0; pair < jg->toks[obj_idx].size; pair++) {
+        if (i < 0 || i >= jg->ntok) return -2;
+
+        const jsmntok_t *tkey = &jg->toks[i];
+        if (tkey->type != JSMN_STRING) return -2;
+
+        int val_i = i + 1;
+        if (val_i < 0 || val_i >= jg->ntok) return -2;
+
+        if (tok_streq_n(jg->json, tkey, key, key_len)) {
+            return val_i;
+        }
+
+        int next = skip_token(jg->toks, jg->ntok, val_i);
+        if (next < 0) return -2;
+        i = next;
+    }
+
+    return -1;
+}
+
+/*
+ * Finds a value token by a dot-delimited path (e.g., "params.raw.sql").
+ *
+ * Return:
+ *  >=0 token index of the VALUE token on success
+ *  -1 on not found
+ *  -2 on error (invalid token stream or mismatched types)
+ */
+static int find_value_tok_path(const JsonGetter *jg, const char *path) {
+    if (!jg || !path) return -2;
+
+    int obj_idx = 0; // root object
+    const char *seg = path;
+
+    while (*seg) {
+        const char *dot = strchr(seg, '.');
+        size_t len = dot ? (size_t)(dot - seg) : strlen(seg);
+        if (len == 0) return -2;
+
+        int val_i = find_object_value_tok(jg, obj_idx, seg, len);
+        if (val_i < 0) return val_i;
+
+        if (!dot) return val_i;
+
+        if (jg->toks[val_i].type != JSMN_OBJECT) return -2;
+        obj_idx = val_i;
+        seg = dot + 1;
+    }
+
+    return -2;
+}
+
+/*
+ * Parses an unsigned 32-bit integer from a JSMN_PRIMITIVE token.
+ * Return OK on success, ERR on error/bad input.
+ */
+static int tok_parse_u32(const char *json, const jsmntok_t *t, uint32_t *out_u32) {
+    if (!json || !t || !out_u32) return ERR;
+    if (t->type != JSMN_PRIMITIVE) return ERR;
+
+    const char *p = json + t->start;
+    size_t n = (size_t)(t->end - t->start);
+    if (n == 0) return ERR;
+
+    // reject leading '-' for unsigned
+    if (p[0] == '-') return ERR;
+
+    // parse digit-by-digit to avoid needing NUL-termination
     uint64_t v = 0;
-    while (isdigit((unsigned char)*p)) {
-        uint64_t d = (uint64_t)(*p - '0');
-        if (v > (UINT64_MAX - d) / 10) return ERR;
-        v = v * 10 + d;
-        p++;
+    for (size_t i = 0; i < n; i++) {
+        char c = p[i];
+        if (c < '0' || c > '9') return ERR;
+        v = v * 10u + (uint64_t)(c - '0');
+        if (v > 0xFFFFFFFFu) return ERR;
     }
-    *out = v;
-    if (out_end) *out_end = p;
+
+    *out_u32 = (uint32_t)v;
+    return OK;
+}
+
+/*
+ * Parses an unsigned 64-bit integer from a JSMN_PRIMITIVE token.
+ * Return OK on success, ERR on error/bad input.
+ */
+/*
+ * Parses a boolean from a JSMN_PRIMITIVE token ("true" or "false").
+ * Return OK on success, ERR on error/bad input.
+ */
+static int tok_parse_bool01(const char *json, const jsmntok_t *t, int *out01) {
+    if (!json || !t || !out01) return ERR;
+    if (t->type != JSMN_PRIMITIVE) return ERR;
+
+    const char *p = json + t->start;
+    size_t n = (size_t)(t->end - t->start);
+
+    if (n == 4 && memcmp(p, "true", 4) == 0) { *out01 = 1; return OK; }
+    if (n == 5 && memcmp(p, "false", 5) == 0) { *out01 = 0; return OK; }
+
+    return ERR;
+}
+
+#define MAX_ACCEPTED_TOKES 128
+int jsget_init(JsonGetter *jg, const char *json, size_t json_len) {
+    if (!jg || !json || json_len == 0) return ERR;
+
+    memset(jg, 0, sizeof(*jg));
+    jg->json = json;
+    jg->json_len = json_len;
+
+    jsmn_parser p;
+    jsmn_init(&p);
+
+    // Tokenize the entire JSON text. Token count is capped to 128.
+    int ntok = jsmn_parse(&p, json, (int)json_len, jg->toks, (unsigned)ARRLEN(jg->toks));
+    if (ntok <= 0 || ntok > MAX_ACCEPTED_TOKES) return ERR;
+
+    // Root must be a JSON object for our broker protocol.
+    if (jg->toks[0].type != JSMN_OBJECT) return ERR;
+
+    jg->ntok = ntok;
+    return OK;
+}
+
+int jsget_u32(const JsonGetter *jg, const char *key, uint32_t *out_u32) {
+    if (!jg || !key || !out_u32) return ERR;
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+
+    // treat explicit null as "missing"
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+
+    if (tok_parse_u32(jg->json, tv, out_u32) != OK) return ERR;
     return YES;
 }
 
-static int json_decode_string_value(const char *p, char **out, size_t *out_len,
-                                    const char **out_end) {
-    if (!p || !out) return ERR;
-    p = json_skip_ws(p);
-    if (!p) return ERR;
-    if (strncmp(p, "null", 4) == 0) return NO;
-    StrBuf sb = {0};
-    const char *next = json_parse_string(p, &sb);
-    if (!next) {
-        sb_clean(&sb);
-        return ERR;
-    }
-    size_t len = sb.len;
-    char *s = xmalloc(len + 1);
-    if (len > 0) memcpy(s, sb.data, len);
-    s[len] = '\0';
-    sb_clean(&sb);
-    *out = s;
-    if (out_len) *out_len = len;
-    if (out_end) *out_end = next;
+int jsget_bool01(const JsonGetter *jg, const char *key, int *out01) {
+    if (!jg || !key || !out01) return ERR;
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+
+    // treat explicit null as "missing"
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+
+    if (tok_parse_bool01(jg->json, tv, out01) != OK) return ERR;
     return YES;
 }
 
-int json_get_value(const char *json, size_t json_len, const char *fmt, ...) {
-    if (!json || !fmt) return ERR;
-    if (json_len == SIZE_MAX) return ERR;
+int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out) {
+    if (!jg || !key || !out) return ERR;
 
-    char *json_buf = (char *)xmalloc(json_len + 1);
-    if (json_len > 0) memcpy(json_buf, json, json_len);
-    json_buf[json_len] = '\0';
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
 
-    va_list ap;
-    va_start(ap, fmt);
+    const jsmntok_t *tv = &jg->toks[val_i];
 
-    for (size_t i = 0; fmt[i] != '\0'; i++) {
-        if (fmt[i] != '%') continue;
-        char spec = fmt[++i];
-        if (spec == '\0') {
-            va_end(ap);
-            return ERR;
-        }
+    // treat explicit null as "missing"
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
 
-        const char *key = va_arg(ap, const char *);
-        if (!key) {
-            va_end(ap);
-            return ERR;
-        }
+    if (tv->type != JSMN_STRING) return ERR;
 
-        char *parts[3] = {0};
-        size_t depth = 0;
-        if (json_split_path(key, parts, &depth) != OK) {
-            va_end(ap);
-            return ERR;
-        }
-
-        const char *val = NULL;
-        int rc = json_find_path_value(json_buf, parts, depth, &val);
-        if (rc == NO) {
-            for (size_t j = 0; j < depth; j++) free(parts[j]);
-            va_end(ap);
-            free(json_buf);
-            return NO;
-        }
-        if (rc != YES || !val) {
-            for (size_t j = 0; j < depth; j++) free(parts[j]);
-            va_end(ap);
-            free(json_buf);
-            return ERR;
-        }
-
-        if (spec == 's') {
-            char **out = va_arg(ap, char **);
-            if (!out) {
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return ERR;
-            }
-            rc = json_decode_string_value(val, out, NULL, NULL);
-            if (rc == NO) {
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return NO;
-            }
-            if (rc != YES) {
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return ERR;
-            }
-            for (size_t j = 0; j < depth; j++) free(parts[j]);
-            continue;
-        }
-
-        if (spec == 'c') {
-            char *out = va_arg(ap, char *);
-            if (!out) {
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return ERR;
-            }
-            char *s = NULL;
-            size_t len = 0;
-            rc = json_decode_string_value(val, &s, &len, NULL);
-            if (rc == NO) {
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return NO;
-            }
-            if (rc != YES || !s || len != 1) {
-                free(s);
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return ERR;
-            }
-            *out = s[0];
-            free(s);
-            for (size_t j = 0; j < depth; j++) free(parts[j]);
-            continue;
-        }
-
-        if (spec == 'u' || spec == 'U') {
-            uint64_t v = 0;
-            rc = json_parse_uint(val, &v, NULL);
-            if (rc == NO) {
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return NO;
-            }
-            if (rc != YES) {
-                for (size_t j = 0; j < depth; j++) free(parts[j]);
-                va_end(ap);
-                free(json_buf);
-                return ERR;
-            }
-            if (spec == 'u') {
-                uint32_t *out = va_arg(ap, uint32_t *);
-                if (!out) {
-                    for (size_t j = 0; j < depth; j++) free(parts[j]);
-                    va_end(ap);
-                    free(json_buf);
-                    return ERR;
-                }
-                if (v > UINT32_MAX) {
-                    for (size_t j = 0; j < depth; j++) free(parts[j]);
-                    va_end(ap);
-                    free(json_buf);
-                    return ERR;
-                }
-                *out = (uint32_t)v;
-            } else {
-                uint64_t *out = va_arg(ap, uint64_t *);
-                if (!out) {
-                    for (size_t j = 0; j < depth; j++) free(parts[j]);
-                    va_end(ap);
-                    free(json_buf);
-                    return ERR;
-                }
-                *out = v;
-            }
-            for (size_t j = 0; j < depth; j++) free(parts[j]);
-            continue;
-        }
-
-        for (size_t j = 0; j < depth; j++) free(parts[j]);
-        va_end(ap);
-        free(json_buf);
-        return ERR;
-    }
-
-    va_end(ap);
-    free(json_buf);
+    out->ptr = jg->json + tv->start;
+    out->len = (size_t)(tv->end - tv->start);
     return YES;
 }
 
-/* Minimal validation for JSON-RPC inputs (NUL-terminated). */
-int json_simple_rpc_validation(const char *json) {
-    if (!json) return ERR;
+int jsget_string_decode_alloc(const JsonGetter *jg, const char *key, char **out_nul) {
+    if (!jg || !key || !out_nul) return ERR;
 
-    const char *p = json_skip_ws(json);
-    if (!p || *p == '\0') return ERR;
-    if (*p != '{') return NO;
-    const char *end = json_skip_value(p);
-    if (!end) return ERR;
-    end = json_skip_ws(end);
-    if (*end != '\0') return ERR;
+    JsonStrSpan sp = {0};
+    int rc = jsget_string_span(jg, key, &sp);
+    if (rc != YES) return rc;
 
-    size_t len = strlen(json);
-    char *jsonrpc = NULL;
-    char *method = NULL;
-    uint64_t id = 0;
+    if (json_string_unescape_alloc(sp.ptr, sp.len, out_nul) != OK) return ERR;
+    return YES;
+}
 
-    int rc = json_get_value(json, len, "%s%U%s",
-            "jsonrpc", &jsonrpc,
-            "id", &id,
-            "method", &method);
-    if (rc != YES) {
-        free(jsonrpc);
-        free(method);
-        return rc;
+int jsget_array_strings_begin(const JsonGetter *jg, const char *key, JsonArrIter *it) {
+    if (!jg || !key || !it) return ERR;
+
+    memset(it, 0, sizeof(*it));
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+
+    // treat explicit null as "missing"
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+
+    if (tv->type != JSMN_ARRAY) return ERR;
+
+    it->arr_tok  = val_i;
+    it->idx      = 0;
+    it->count    = tv->size;
+    it->next_tok = val_i + 1; // first element token
+    return YES;
+}
+
+int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan *out_elem) {
+    if (!jg || !it || !out_elem) return ERR;
+
+    if (it->idx >= it->count) return NO;
+
+    int i = it->next_tok;
+    if (i < 0 || i >= jg->ntok) return ERR;
+
+    const jsmntok_t *te = &jg->toks[i];
+    if (te->type != JSMN_STRING) return ERR;
+
+    out_elem->ptr = jg->json + te->start;
+    out_elem->len = (size_t)(te->end - te->start);
+
+    // Move cursor to next element token by skipping this element.
+    int next = skip_token(jg->toks, jg->ntok, i);
+    if (next < 0) return ERR;
+
+    it->next_tok = next;
+    it->idx++;
+    return YES;
+}
+
+int jsget_simple_rpc_validation(JsonGetter *jg) {
+    if (!jg || !jg->json) return ERR;
+
+    const jsmntok_t *root = &jg->toks[0];
+    if (root->type != JSMN_OBJECT) return NO;
+    if ((size_t)root->end > jg->json_len) return ERR;
+    
+    // root object should end with } and whitespaces is any
+    for (size_t i = (size_t)root->end; i < jg->json_len; i++) {
+        if (!isspace((unsigned char)jg->json[i])) return ERR;
     }
 
-    int ok = YES;
-    if (strcmp(jsonrpc, "2.0") != 0) ok = NO;
-    if (!method || method[0] == '\0') ok = NO;
-    if (id > UINT32_MAX) ok = NO;
+    JsonStrSpan jsonrpc = {0};
+    JsonStrSpan method = {0};
+    uint32_t id = 0;
 
-    free(jsonrpc);
-    free(method);
-    return ok;
+    if (jsget_string_span(jg, "jsonrpc", &jsonrpc) != YES) return NO;
+    if (jsget_u32(jg, "id", &id) != YES) return NO;
+    if (jsget_string_span(jg, "method", &method) != YES) return NO;
+
+    if (jsonrpc.len != 3 || memcmp(jsonrpc.ptr, "2.0", 3) != 0) return NO;
+    if (method.len == 0) return NO;
+
+    return YES;
 }

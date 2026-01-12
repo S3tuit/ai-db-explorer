@@ -8,7 +8,6 @@
 #include "stdio_byte_channel.h"
 #include "string_op.h"
 #include "packed_array.h"
-#include "safety_policy.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -32,7 +31,7 @@ struct Broker {
     // using a socket/windows pipe
     int listen_fd;                  // file descriptor of the socket used to
                                     // accept incoming connection requets
-    SecurityContext *security;      // owned
+    ConnManager *cm;                // owned
     char *sock_path;                // owned, socket path for the broker
     
     PackedArray *sessions;
@@ -130,11 +129,12 @@ static int make_listen_socket(const char *path) {
     return fd;
 }
 
-Broker *broker_create(const char *sock_path) {
+Broker *broker_create(const char *sock_path, ConnManager *cm) {
+    if (!cm) return NULL;
     Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
     b->listen_fd = -1;
-    b->security = security_ctx_create();
+    b->cm = cm;
 
     // The PackedArray is responsible for cleaning up the resources of the
     // sessions
@@ -172,7 +172,7 @@ void broker_destroy(Broker *b) {
     free(b->sock_path);
     b->sock_path = NULL;
     
-    security_ctx_destroy(b->security);
+    connm_destroy(b->cm);
     free(b);
 }
 
@@ -187,57 +187,70 @@ void broker_destroy(Broker *b) {
 static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
                                     const char *req, uint32_t req_len,
                                     QueryResult **out_res) {
-    (void)b;
-    if (!sess || !req) return ERR;
+    if (!b || !sess || !req) return ERR;
 
-    char *method = NULL;
-    uint32_t id;
-    int rc = json_get_value(req, req_len, "%u%s", "id", &id, "method", &method);
+    uint32_t id = 0;
+    JsonGetter jg;
+    if (jsget_init(&jg, req, req_len) != OK) return ERR;
+    (void)jsget_u32(&jg, "id", &id);
     
     QueryResult *q_res = NULL;
-    // generic errors
-    if (rc != YES) {
-        // fallback to 0 if id not present
-        if (json_get_value(req, req_len, "%u", "id", &id) != YES) {
-            id = 0;
-            q_res = qr_create_err(id, "Something went wrong internally. Please retry.");
-        } else {
-            q_res = qr_create_err(id, "Something went wrong internally. Make sure the input was valid.");
-        }
+    int vrc = jsget_simple_rpc_validation(&jg);
+    if (vrc != YES) {
+        q_res = qr_create_err(id, "Invalid JSON-RPC request.");
     
     // run query
-    } else if (strcmp(method, BROK_EXEC_CMD) == 0) {
-        // client is not connected to a database yet
-        //if (!sess->db) {
-        if (1) {
-            q_res = qr_create_err(id, "Not connected to a database. Run \\connect dbname=\"your dbname\" .");
+    } else {
+        JsonStrSpan method_sp = {0};
+        if (jsget_string_span(&jg, "method", &method_sp) != YES ||
+                !STREQ(method_sp.ptr, method_sp.len, "tools/call")) {
+            q_res = qr_create_err(id, "Unsupported method.");
             goto return_res;
         }
 
+        JsonStrSpan name_sp = {0};
+        if (jsget_string_span(&jg, "params.name", &name_sp) != YES ||
+                name_sp.len != strlen("run_sql_query") ||
+                memcmp(name_sp.ptr, "run_sql_query", name_sp.len) != 0) {
+            q_res = qr_create_err(id, "Unknown tool.");
+            goto return_res;
+        }
+
+        char *conn_name = NULL;
         char *query = NULL;
-        if (json_get_value(req, req_len, "%s", "params.sql", &query) != YES) {
+        if (jsget_string_decode_alloc(&jg, "params.arguments.connectionName",
+                    &conn_name) != YES ||
+                jsget_string_decode_alloc(&jg, "params.arguments.query",
+                    &query) != YES) {
+            free(conn_name);
             free(query);
-            q_res = qr_create_err(id, "Unable to understand the input command. Make sure it was valid.");
+            q_res = qr_create_err(id, "Invalid tool arguments.");
             goto return_res;
         }
 
-        DbBackend *db;
+        DbBackend *db = connm_get_backend(b->cm, conn_name);
+        if (!db) {
+            free(conn_name);
+            free(query);
+            q_res = qr_create_err(id, "Unable to connect to the requested database.");
+            goto return_res;
+        }
+
         if (db_exec(db, id, query, &q_res) != OK) {
+            free(conn_name);
             free(query);
             q_res = qr_create_err(id, "Something went wrong while communicating with the database.");
             goto return_res;
         }
+        connm_mark_used(b->cm, conn_name);
+        free(conn_name);
         free(query);
 
     // commands
     // unknown commands
-    } else {
-        q_res = qr_create_err(id, "Unknown command. Run \\help for the available commands.");
-        goto return_res;
     }
 
 return_res:
-    free(method);
     // catastrophic
     if (!q_res) {
         *out_res = NULL;

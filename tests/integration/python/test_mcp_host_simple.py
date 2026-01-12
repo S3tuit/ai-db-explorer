@@ -90,7 +90,7 @@ def test_handshake_ok():
             "id": 1,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": "2025-11-25",
                 "capabilities": {"elicitation": {}},
                 "clientInfo": {"name": "example-client", "version": "1.0.0"},
             },
@@ -99,7 +99,7 @@ def test_handshake_ok():
         resp = json.loads(read_frame(server).decode("utf-8"))
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 1
-        assert resp["result"]["protocolVersion"] == "2025-06-18"
+        assert resp["result"]["protocolVersion"] == "2025-11-25"
         assert "tools" in resp["result"]["capabilities"]
         assert "resources" in resp["result"]["capabilities"]
         assert resp["result"]["serverInfo"]["name"] == "ai-db-explorer"
@@ -123,10 +123,7 @@ def test_handshake_bad_version():
         resp = json.loads(read_frame(server).decode("utf-8"))
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 2
-        assert resp["error"]["code"] == -32602
-        assert resp["error"]["message"] == "Unsupported protocol version"
-        assert resp["error"]["data"]["requested"] == "2020-01-01"
-        assert "2025-06-18" in resp["error"]["data"]["supported"]
+        assert resp["result"]["protocolVersion"] == "2025-06-18"
     finally:
         stop_proc(server)
         stop_proc(broker)
@@ -140,7 +137,7 @@ def test_handshake_invalid_json():
         write_frame(server, bad)
         resp = json.loads(read_frame(server).decode("utf-8"))
         assert resp["jsonrpc"] == "2.0"
-        assert resp["id"] == 3
+        assert resp["id"] is None
         assert resp["error"]["code"] == -32600
     finally:
         stop_proc(server)
