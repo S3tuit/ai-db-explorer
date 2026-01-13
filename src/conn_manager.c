@@ -66,16 +66,14 @@ static int ensure_connected(ConnManager *m, ConnEntry *e) {
     }
 
     // Fetch password if needed
-    char *pw = NULL;
-    if (e->profile->password_ref && e->profile->password_ref[0]) {
-        if (secret_store_get(m->secrets, e->profile->password_ref, &pw) != OK) {
-            return ERR;
-        }
+    StrBuf pw = {0};
+    if (secret_store_get(m->secrets, e->profile->connection_name, &pw) != OK) {
+        return ERR;
     }
 
     // Connect
-    int rc = db_connect(e->backend, e->profile, m->policy, pw);
-    free(pw);
+    int rc = db_connect(e->backend, e->profile, m->policy, pw.data);
+    sb_zero_clean(&pw);
 
     if (rc != OK) return ERR;
     

@@ -51,6 +51,12 @@ void sb_clean(StrBuf *sb) {
     sb->cap = 0;
 }
 
+void sb_zero_clean(StrBuf *sb) {
+    if (!sb || !sb->data || sb->cap == 0) return;
+    memset(sb->data, 0, sb->cap);
+    sb_clean(sb);
+}
+
 // TODO: think about the max size of the output of a QueryResult. Right now it 
 // may have 1k columns all of 10k char.
 

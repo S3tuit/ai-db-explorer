@@ -1,0 +1,27 @@
+{
+  "safetyPolicy": {
+    "readOnly": "yes",
+    "statementTimeoutMs": 5000,
+    "maxRowReturned": 200
+  },
+
+  "databases": [
+    {
+      "type": "postgres",
+      "connectionName": "MyPostgres",
+      "host": "localhost",
+      "port": 5432,
+      "username": "my_user",
+      "database": "my_db"
+    },
+    {
+      "type": "postgres",
+      "connectionName": "AnotherPostgres",
+      "host": "localhost",
+      "port": 5432,
+      "username": "another_user",
+      "database": "another_db"
+    }
+  ]
+}
+

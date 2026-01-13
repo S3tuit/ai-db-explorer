@@ -34,6 +34,10 @@ int sb_append_bytes(StrBuf *sb, const void *src, size_t n);
  * points to the new region at the end of sb and sb->len is advanced. */
 int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst);
 
+/* Zeroes any allocated bytes of 'sb' and frees them.
+ * Side effects: overwrites memory to clear sensitive data. */
+void sb_zero_clean(StrBuf *sb);
+
 /* Clean the internal allocation of 'sb'. */
 void sb_clean(StrBuf *sb);
 

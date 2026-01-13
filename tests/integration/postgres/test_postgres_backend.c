@@ -43,7 +43,6 @@ static ConnProfile profile_default(void) {
     p.port = env_u16_or_zero("PGPORT");
     p.db_name = env_or_null("PGDATABASE");
     p.user = env_or_null("PGUSER");
-    p.password_ref = NULL;
     p.options = NULL;
     return p;
 }

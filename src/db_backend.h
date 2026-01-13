@@ -4,6 +4,7 @@
 #include "safety_policy.h"
 #include "query_result.h"
 #include "conn_catalog.h"
+#include "utils.h"
 
 /* DB-agnostic interface that defines all the functions a db backend must have
  * in order to be used. */

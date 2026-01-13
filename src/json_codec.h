@@ -80,6 +80,10 @@ int jsget_init(JsonGetter *jg, const char *json, size_t json_len);
  * doesn't match the schema, ERR on parse errors. */
 int jsget_simple_rpc_validation(JsonGetter *jg);
 
+// TODO: all these functions that returns a value give a key may take the idx
+// of an object so we scan starting from that object not from root. This
+// improves performace.
+
 /*
  * Gets a key path as a uint32_t (supports dot-delimited paths).
  *
@@ -124,5 +128,27 @@ int jsget_array_strings_begin(const JsonGetter *jg, const char *key, JsonArrIter
  *  ERR -> element type error / token stream error.
  */
 int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan *out_elem);
+
+/*
+ * Initializes an iterator over an array of JSON objects at key path `key`.
+ * Returns yes/no/err.
+ */
+int jsget_array_objects_begin(const JsonGetter *jg, const char *key, JsonArrIter *it);
+
+/*
+ * Gets next element of the object array iterator as a raw JSON span.
+ *
+ * Return:
+ *  YES -> produced next element (span contains full object text).
+ *  NO  -> no more elements.
+ *  ERR -> element type error / token stream error.
+ */
+int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan *out_obj);
+
+/* Makes sure the json object identified by 'obj_key' only contains the
+ * 'allowed' top-level keys. If obj_key is NULL, the root object is used.
+ * Returns YES/NO/ERR. */
+int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
+                                const char *const *allowed, size_t n_allowed);
 
 #endif

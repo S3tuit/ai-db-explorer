@@ -1,18 +1,19 @@
 #include "mcp_server.h"
 #include "broker.h"
 #include "utils.h"
-#include "connection_catalog.h"
+#include "conn_catalog.h"
 #include "secret_store.h"
 
 #include <stdio.h>
 #include <string.h>
 
 static void print_usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [-client|-broker] [-sock <path>]\n", prog);
+    fprintf(stderr, "Usage: %s [-client|-broker] [-sock <path>] [-config <path>]\n", prog);
 }
 
 int main(int argc, char **argv) {
     const char *sock_path = SOCK_PATH;
+    const char *config_path = "template-config.json";
     int run_client = 1;
 
     for (int i = 1; i < argc; i++) {
@@ -26,6 +27,12 @@ int main(int argc, char **argv) {
                 return 1;
             }
             sock_path = argv[++i];
+        } else if (strcmp(argv[i], "-config") == 0) {
+            if (i + 1 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            config_path = argv[++i];
         } else {
             print_usage(argv[0]);
             return 1;
@@ -47,20 +54,23 @@ int main(int argc, char **argv) {
         return (rc == OK) ? 0 : 1;
     }
 
-    ConnectionCatalog *cat = NULL;
-    SecretStore *secrets = NULL;
-    ConnManager *cm = NULL;
-
-    if (catalog_load_from_file("dummy", &cat) != OK) {
-        fprintf(stderr, "ERROR: catalog init failed\n");
+    char *cat_err = NULL;
+    ConnCatalog *cat = catalog_load_from_file(config_path, &cat_err);
+    if (!cat) {
+        fprintf(stderr, "ERROR: catalog init failed: %s\n",
+                cat_err ? cat_err : "unknown error");
         return 1;
     }
+
+    SecretStore *secrets = NULL;
     secrets = secret_store_create();
     if (!secrets) {
         catalog_destroy(cat);
         fprintf(stderr, "ERROR: secret store init failed\n");
         return 1;
     }
+
+    ConnManager *cm = NULL;
     cm = connm_create(cat, secrets);
     if (!cm) {
         catalog_destroy(cat);

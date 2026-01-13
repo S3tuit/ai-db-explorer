@@ -5,10 +5,11 @@ import subprocess
 import sys
 import time
 
-
+# root is not '/', but is the root of our repo copied inside the docker
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 BIN = os.path.join(ROOT, "build", "ai-db-explorer")
 SOCK = os.path.join(ROOT, "build", "aidbexplorer.sock")
+CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
 
 
 def write_frame(proc, payload_bytes):
@@ -50,10 +51,11 @@ def start_broker():
     if os.path.exists(SOCK):
         os.unlink(SOCK)
     proc = subprocess.Popen(
-        [BIN, "-broker", "-sock", SOCK],
+        [BIN, "-broker", "-sock", SOCK, "-config", CONFIG],
         cwd=ROOT,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        # Forward broker logs to the test runner so failures aren't silent.
+        stderr=None,
     )
     for _ in range(50):
         if os.path.exists(SOCK):
@@ -123,7 +125,7 @@ def test_handshake_bad_version():
         resp = json.loads(read_frame(server).decode("utf-8"))
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 2
-        assert resp["result"]["protocolVersion"] == "2025-06-18"
+        assert resp["result"]["protocolVersion"] == "2025-11-25"
     finally:
         stop_proc(server)
         stop_proc(broker)

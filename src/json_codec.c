@@ -559,6 +559,10 @@ static int json_string_unescape_alloc(const char *s, size_t len, char **out) {
     return OK;
 }
 
+int json_decode_string_alloc(const char *s, size_t len, char **out) {
+    return json_string_unescape_alloc(s, len, out);
+}
+
 /*
  * Returns 1 if token 't' is a JSON primitive representing null, 0 otherwise.
  * Only valid for JSMN_PRIMITIVE tokens.
@@ -876,6 +880,86 @@ int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan 
 
     it->next_tok = next;
     it->idx++;
+    return YES;
+}
+
+int jsget_array_objects_begin(const JsonGetter *jg, const char *key, JsonArrIter *it) {
+    if (!jg || !key || !it) return ERR;
+
+    memset(it, 0, sizeof(*it));
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+    if (tv->type != JSMN_ARRAY) return ERR;
+
+    it->arr_tok  = val_i;
+    it->idx      = 0;
+    it->count    = tv->size;
+    it->next_tok = val_i + 1;
+    return YES;
+}
+
+int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan *out_obj) {
+    if (!jg || !it || !out_obj) return ERR;
+    if (it->idx >= it->count) return NO;
+
+    int i = it->next_tok;
+    if (i < 0 || i >= jg->ntok) return ERR;
+
+    const jsmntok_t *te = &jg->toks[i];
+    if (te->type != JSMN_OBJECT) return ERR;
+
+    out_obj->ptr = jg->json + te->start;
+    out_obj->len = (size_t)(te->end - te->start);
+
+    int next = skip_token(jg->toks, jg->ntok, i);
+    if (next < 0) return ERR;
+
+    it->next_tok = next;
+    it->idx++;
+    return YES;
+}
+
+int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
+                                const char *const *allowed, size_t n_allowed) {
+    if (!jg || !allowed) return ERR;
+
+    int obj_idx = 0;
+    if (obj_key) {
+        obj_idx = find_value_tok_path(jg, obj_key);
+        if (obj_idx == -1) return NO;
+        if (obj_idx == -2) return ERR;
+    }
+
+    if (obj_idx < 0 || obj_idx >= jg->ntok) return ERR;
+    if (jg->toks[obj_idx].type != JSMN_OBJECT) return ERR;
+
+    int i = obj_idx + 1;
+    for (int pair = 0; pair < jg->toks[obj_idx].size; pair++) {
+        if (i < 0 || i >= jg->ntok) return ERR;
+        const jsmntok_t *tkey = &jg->toks[i];
+        if (tkey->type != JSMN_STRING) return ERR;
+
+        (void)(tkey->end - tkey->start);
+        int ok = 0;
+        for (size_t k = 0; k < n_allowed; k++) {
+            size_t alen = strlen(allowed[k]);
+            if (tok_streq_n(jg->json, tkey, allowed[k], alen)) {
+                ok = 1;
+                break;
+            }
+        }
+        if (!ok) return NO;
+
+        int val_i = i + 1;
+        int next = skip_token(jg->toks, jg->ntok, val_i);
+        if (next < 0) return ERR;
+        i = next;
+    }
     return YES;
 }
 

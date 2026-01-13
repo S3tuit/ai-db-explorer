@@ -8,6 +8,7 @@ RUN apt-get update \
         libpq-dev \
         pkg-config \
         ca-certificates \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

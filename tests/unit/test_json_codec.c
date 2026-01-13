@@ -386,6 +386,42 @@ static void test_jsget_array_strings(void) {
     ASSERT_TRUE(jsget_array_strings_next(&jg, &it, &sp) == NO);
 }
 
+static void test_jsget_array_objects(void) {
+    const char *json = "{\"arr\":[{\"a\":1},{\"b\":2}]}";
+    JsonGetter jg;
+    JsonArrIter it;
+    JsonStrSpan sp = {0};
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_array_objects_begin(&jg, "arr", &it) == YES);
+
+    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &sp) == YES);
+    ASSERT_TRUE(sp.len == strlen("{\"a\":1}"));
+    ASSERT_TRUE(strncmp(sp.ptr, "{\"a\":1}", sp.len) == 0);
+
+    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &sp) == YES);
+    ASSERT_TRUE(sp.len == strlen("{\"b\":2}"));
+    ASSERT_TRUE(strncmp(sp.ptr, "{\"b\":2}", sp.len) == 0);
+
+    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &sp) == NO);
+}
+
+static void test_jsget_top_level_validation(void) {
+    const char *json = "{\"a\":1,\"b\":2}";
+    const char *json_extra = "{\"a\":1,\"b\":2,\"c\":3}";
+    JsonGetter jg;
+    const char *allowed[] = {"a", "b"};
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2) == YES);
+
+    ASSERT_TRUE(jsget_init(&jg, json_extra, strlen(json_extra)) == OK);
+    ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2) == NO);
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_top_level_validation(&jg, "missing", allowed, 2) == NO);
+}
+
 int main (void) {
     test_json_basic_rows_and_nulls();
     test_json_null_qrcolumn_safe_defaults();
@@ -401,6 +437,8 @@ int main (void) {
     test_jsget_u32_and_bool();
     test_jsget_string_span_and_decode();
     test_jsget_array_strings();
+    test_jsget_array_objects();
+    test_jsget_top_level_validation();
 
     fprintf(stderr, "OK: test_json\n");
     return(0);

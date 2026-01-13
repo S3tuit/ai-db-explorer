@@ -3,14 +3,19 @@ services:
     image: postgres:17
     volumes:
       - ../../data/zfighters.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+      - ../../data/gym.sql:/docker-entrypoint-initdb.d/gym.sql:ro
+      - ./init/01-create-another-db.sh:/docker-entrypoint-initdb.d/01-create-another-db.sh:ro
     environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: my_secret
+      POSTGRES_USER: my_user
+      POSTGRES_DB: my_db
+      ANOTHER_USER: another_user
+      ANOTHER_PASSWORD: another_secret
+      ANOTHER_DB: another_db
     ports:
       - "5442:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 1s
       timeout: 3s
       retries: 30
@@ -25,7 +30,7 @@ services:
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGDATABASE: postgres
-      PGUSER: postgres
-      PGPASSWORD: postgres
+      PGDATABASE: my_db
+      PGUSER: my_user
+      PGPASSWORD: my_secret
     command: ["sh", "-lc", "make clean && make test-postgres"]
