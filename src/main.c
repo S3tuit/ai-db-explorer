@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "conn_catalog.h"
 #include "secret_store.h"
+#include "log.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -12,6 +13,8 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
+    // Test-only marker to confirm the ADBX_TESTLOG build is running.
+    TLOG("startup with ADBX_TESTLOG enabled");
     const char *sock_path = SOCK_PATH;
     const char *config_path = "template-config.json";
     int run_client = 1;

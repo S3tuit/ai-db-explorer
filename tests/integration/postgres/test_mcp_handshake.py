@@ -7,7 +7,7 @@ import time
 
 # root is not '/', but is the root of our repo copied inside the docker
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BIN = os.path.join(ROOT, "build", "ai-db-explorer")
+BIN = os.path.join(ROOT, "build", "ai-db-explorer-asan")
 SOCK = os.path.join(ROOT, "build", "aidbexplorer.sock")
 CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
 
@@ -71,7 +71,8 @@ def start_server():
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        # Forward MCP server logs to the test runner for easier debugging.
+        stderr=None,
     )
 
 
@@ -83,22 +84,25 @@ def stop_proc(proc):
         proc.kill()
 
 
-def test_handshake_ok():
-    broker = start_broker()
+def do_handshake(server, req_id, protocol_version):
+    req = {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": protocol_version,
+            "capabilities": {"elicitation": {}},
+            "clientInfo": {"name": "example-client", "version": "1.0.0"},
+        },
+    }
+    write_frame(server, json.dumps(req).encode("utf-8"))
+    return json.loads(read_frame(server).decode("utf-8"))
+
+
+def test_handshake_ok(broker):
     server = start_server()
     try:
-        req = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {"elicitation": {}},
-                "clientInfo": {"name": "example-client", "version": "1.0.0"},
-            },
-        }
-        write_frame(server, json.dumps(req).encode("utf-8"))
-        resp = json.loads(read_frame(server).decode("utf-8"))
+        resp = do_handshake(server, 1, "2025-11-25")
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 1
         assert resp["result"]["protocolVersion"] == "2025-11-25"
@@ -108,31 +112,20 @@ def test_handshake_ok():
         assert resp["result"]["serverInfo"]["version"] == "0.0.1"
     finally:
         stop_proc(server)
-        stop_proc(broker)
 
 
-def test_handshake_bad_version():
-    broker = start_broker()
+def test_handshake_bad_version(broker):
     server = start_server()
     try:
-        req = {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "initialize",
-            "params": {"protocolVersion": "2020-01-01"},
-        }
-        write_frame(server, json.dumps(req).encode("utf-8"))
-        resp = json.loads(read_frame(server).decode("utf-8"))
+        resp = do_handshake(server, 2, "2020-01-01")
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 2
         assert resp["result"]["protocolVersion"] == "2025-11-25"
     finally:
         stop_proc(server)
-        stop_proc(broker)
 
 
-def test_handshake_invalid_json():
-    broker = start_broker()
+def test_handshake_invalid_json(broker):
     server = start_server()
     try:
         bad = b'{"jsonrpc":"2.0","id":3,"method":"initialize"'
@@ -143,14 +136,17 @@ def test_handshake_invalid_json():
         assert resp["error"]["code"] == -32600
     finally:
         stop_proc(server)
-        stop_proc(broker)
 
 
 def main():
-    test_handshake_ok()
-    test_handshake_bad_version()
-    test_handshake_invalid_json()
-    print("OK: test_mcp_host_simple")
+    broker = start_broker()
+    try:
+        test_handshake_ok(broker)
+        test_handshake_bad_version(broker)
+        test_handshake_invalid_json(broker)
+        print("OK: test_mcp_handshake")
+    finally:
+        stop_proc(broker)
 
 
 if __name__ == "__main__":

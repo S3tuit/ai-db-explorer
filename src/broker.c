@@ -294,7 +294,7 @@ int broker_run(Broker *b) {
         size_t nsessions = parr_len(b->sessions);
         size_t nfds = 1 + nsessions;
         
-        // TODO: makes no sense to allocate/free each loop. Solve it.
+        // we reset the memory of pfds to be defensive
         memset(pfds, 0, nfds * sizeof(*pfds));
 
         // poll slot 0th = server socket
@@ -312,7 +312,6 @@ int broker_run(Broker *b) {
         int rc = poll(pfds, nfds, -1);
         if (rc < 0) {
             if (errno == EINTR) {
-                free(pfds);
                 continue;
             }
             free(pfds);
@@ -347,15 +346,16 @@ int broker_run(Broker *b) {
             }
         }
 
-        // Handle client I/O
-        for (size_t i = 0; i < parr_len(b->sessions); /* increment inside */) {
-            // we don't increament when removing a session because the array
+        // Handle client I/O for the sessions we polled this iteration.
+        for (size_t i = 0; i < nsessions; /* increment inside */) {
+            // we don't increament 'i' when removing a session because the array
             // squash the next structures and fills the empty slot of the
             // removed session
             struct pollfd *pfd = &pfds[1 + i];
 
             if (pfd->revents & (POLLHUP | POLLERR | POLLNVAL)) {
                 parr_drop_swap(b->sessions, i);
+                nsessions--;
                 continue;
             }
 
@@ -365,14 +365,14 @@ int broker_run(Broker *b) {
                 StrBuf req = {0};
                 QueryResult *q_res = NULL;
                 uint64_t t0 = now_ms_monotonic();
-                // TODO: frame_codec and json_codec return different outputs,
-                // one char **out, uint32_t *len... the other StrBuf **out.
-                // Make them consistent.
                 int rr = frame_read_len(&sess->bc, &req);
                 if (rr != OK || req.len > MAX_REQ_LEN) {
                     // framing error -> drop client
+                    fprintf(stderr, "Broker: frame_read_len failed (rc=%d, len=%zu)\n",
+                            rr, req.len);
                     sb_clean(&req);
                     parr_drop_swap(b->sessions, i);
+                    nsessions--;
                     continue;
                 }
                 
@@ -387,8 +387,10 @@ int broker_run(Broker *b) {
 
                 if (hr != OK) {
                     // Something bad happend, drop client
+                    fprintf(stderr, "Broker: request handling failed\n");
                     sb_clean(&req);
                     parr_drop_swap(b->sessions, i);
+                    nsessions--;
                     continue;
                 }
 
@@ -399,9 +401,11 @@ send_q_res:
                     q_res->exec_ms = (t1 >= t0) ? (t1 - t0) : 0;
                 }
                 if (broker_write_q_res(sess, q_res) != OK) {
+                    fprintf(stderr, "Broker: failed to write response\n");
                     sb_clean(&req);
                     qr_destroy(q_res);
                     parr_drop_swap(b->sessions, i);
+                    nsessions--;
                     continue;
                 }
 
@@ -412,8 +416,8 @@ send_q_res:
             i++;
         }
 
-        free(pfds);
     }
+    free(pfds);
 
     // TODO: create a signal to let Broker gracefully exit
     /* unreachable for now. */
