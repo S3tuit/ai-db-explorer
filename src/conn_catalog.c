@@ -119,10 +119,10 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out) {
   uint32_t max_rows = 0;
   if (jsget_u32(jg, "safetyPolicy.maxRowReturned", &max_rows) != YES) return ERR;
 
-  out->read_only = read_only_flag;
-  out->statement_timeout_ms = timeout_ms;
-  out->max_rows = max_rows;
-  out->max_cell_bytes = 0;
+  // Use the standard defaults for unset knobs (e.g., max_cell_bytes).
+  if (safety_policy_init(out, &read_only_flag, &max_rows, NULL, &timeout_ms) != OK) {
+    return ERR;
+  }
   return OK;
 }
 

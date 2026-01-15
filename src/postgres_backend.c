@@ -11,6 +11,7 @@
 #include "safety_policy.h"
 #include "utils.h"
 #include "conn_catalog.h"
+#include "log.h"
 
 enum {
     PG_QUERY_MAX_BYTES = 8192
@@ -399,6 +400,7 @@ fail:
     if (!out_qr) return ERR; // catastrophic
 
     err_msg = p->last_err;
+    TLOG("ERROR - pg_exec failed: %s", err_msg ? err_msg : "unknown");
     // rollback is safe even if we haven't executed anything
     pg_rollback(p);
     if (res) PQclear(res);

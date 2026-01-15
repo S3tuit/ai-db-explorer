@@ -88,12 +88,17 @@ static int parse_content_length(const char *hdr, size_t len, size_t *out_len) {
 int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
     if (!bc || !out_payload) return ERR;
     out_payload->len = 0;
+    // Ensure no previous allocation leaks when reusing the StrBuf.
+    sb_clean(out_payload);
 
     // Header is short: "Content-Length: " + up to 20 digits + "\r\n\r\n".
     // 52 bytes is a strict cap to avoid unbounded scanning.
     const size_t max_hdr_scan = 52;
     ssize_t idx = bufch_findn(bc, "\r\n\r\n", 4, max_hdr_scan);
-    if (idx < 0) return NO;
+    if (idx < 0) {
+        // bufch_findn doesn't expose EOF vs "not found"; consult bc->eof.
+        return bc->eof ? NO : ERR;
+    }
     size_t hdr_len = (size_t)idx + 4;
 
     char *hdr = xmalloc(hdr_len + 1);
@@ -108,7 +113,7 @@ int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
     free(hdr);
     if (prc != OK) return ERR;
 
-    if (payload_len == 0) return OK;
+    if (payload_len == 0) return YES;
 
     char *dst = NULL;
     if (sb_prepare_for_write(out_payload, payload_len, &dst) != OK) {
@@ -118,5 +123,5 @@ int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
         sb_clean(out_payload);
         return ERR;
     }
-    return OK;
+    return YES;
 }

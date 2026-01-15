@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "broker.h"
+#include "log.h"
 #include "utils.h"
 #include "frame_codec.h"
 #include "json_codec.h"
@@ -188,6 +189,7 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
                                     const char *req, uint32_t req_len,
                                     QueryResult **out_res) {
     if (!b || !sess || !req) return ERR;
+    TLOG("INFO - handling a request of %u bytes", req_len);
 
     uint32_t id = 0;
     JsonGetter jg;
@@ -227,9 +229,11 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
             q_res = qr_create_err(id, "Invalid tool arguments.");
             goto return_res;
         }
-
+        
+        TLOG("INFO - preparing for running %s", query);
         DbBackend *db = connm_get_backend(b->cm, conn_name);
         if (!db) {
+            TLOG("ERROR - unable to connect to %s", conn_name);
             free(conn_name);
             free(query);
             q_res = qr_create_err(id, "Unable to connect to the requested database.");
@@ -237,6 +241,7 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
         }
 
         if (db_exec(db, id, query, &q_res) != OK) {
+            TLOG("ERROR - error while communicating with %s", conn_name);
             free(conn_name);
             free(query);
             q_res = qr_create_err(id, "Something went wrong while communicating with the database.");
@@ -340,6 +345,7 @@ int broker_run(Broker *b) {
                     safe_close_fd(&cfd);
                     break;
                 }
+                TLOG("INFO - accepted MCP client fd=%d", cfd);
                 break;
                 // TODO: For now we accept one at a time; loop accepts multiple
                 // if queued
@@ -370,15 +376,18 @@ int broker_run(Broker *b) {
                     // framing error -> drop client
                     fprintf(stderr, "Broker: frame_read_len failed (rc=%d, len=%zu)\n",
                             rr, req.len);
+                    TLOG("ERROR - drop client: frame_read_len rc=%d len=%zu", rr, req.len);
                     sb_clean(&req);
                     parr_drop_swap(b->sessions, i);
                     nsessions--;
                     continue;
                 }
+                TLOG("INFO - received request len=%zu", req.len);
                 
                 if (req.len > MAX_REQ_LEN) {
                     char buf[128];
                     snprintf(buf, sizeof(buf), "Error. Broker ignores message longer than %d bytes. Please, respect the limit", MAX_REQ_LEN);
+                    TLOG("ERROR - reject request: len=%zu exceeds MAX_REQ_LEN", req.len);
                     q_res = qr_create_err(0, buf);
                     goto send_q_res;
                 }
@@ -388,6 +397,7 @@ int broker_run(Broker *b) {
                 if (hr != OK) {
                     // Something bad happend, drop client
                     fprintf(stderr, "Broker: request handling failed\n");
+                    TLOG("ERROR - drop client: broker_handle_request failed");
                     sb_clean(&req);
                     parr_drop_swap(b->sessions, i);
                     nsessions--;
@@ -402,6 +412,7 @@ send_q_res:
                 }
                 if (broker_write_q_res(sess, q_res) != OK) {
                     fprintf(stderr, "Broker: failed to write response\n");
+                    TLOG("ERROR - drop client: failed to write response");
                     sb_clean(&req);
                     qr_destroy(q_res);
                     parr_drop_swap(b->sessions, i);

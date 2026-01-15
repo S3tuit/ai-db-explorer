@@ -113,7 +113,8 @@ def test_handshake_ok(broker):
     finally:
         stop_proc(server)
 
-
+# this should not give error, the broker should respond with the laster version
+# available to it
 def test_handshake_bad_version(broker):
     server = start_server()
     try:
@@ -124,7 +125,7 @@ def test_handshake_bad_version(broker):
     finally:
         stop_proc(server)
 
-
+# this should error
 def test_handshake_invalid_json(broker):
     server = start_server()
     try:

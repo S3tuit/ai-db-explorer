@@ -1,5 +1,6 @@
 #include "stdio_byte_channel.h"
 #include "utils.h"
+#include "log.h"
 
 #include <stdlib.h>
 #include <errno.h>
@@ -28,7 +29,12 @@ static ssize_t stdio_read_some(ByteChannel *ch, void *buf, size_t cap) {
     // read everything the user wrote when this functio is called
     for (;;) {
         ssize_t n = read(impl->in_fd, buf, cap);
-        if (n >= 0) return n;
+        if (n >= 0) {
+            if (n == 0) {
+                TLOG("INFO - read EOF on fd=%d", impl->in_fd);
+            }
+            return n;
+        }
         // PTY slave returns EIO on hangup; treat it as EOF to match file/pipe
         if (errno == EIO) return 0;
         if (errno == EINTR) continue;

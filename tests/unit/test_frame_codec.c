@@ -108,7 +108,7 @@ static void test_frame_read_cl(void) {
   ASSERT_TRUE(bc != NULL);
 
   StrBuf payload = {0};
-  ASSERT_TRUE(frame_read_cl(bc, &payload) == OK);
+  ASSERT_TRUE(frame_read_cl(bc, &payload) == YES);
   ASSERT_TRUE(payload.len == 5);
   ASSERT_TRUE(memcmp(payload.data, "hello", 5) == 0);
 

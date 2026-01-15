@@ -35,6 +35,8 @@ def test_run_sql_my_db():
     try:
         resp = do_handshake(server, 1, "2025-11-25")
         assert resp["jsonrpc"] == "2.0"
+        print("DEBUG: stdin_closed=", server.stdin.closed)
+        print("DEBUG: server_poll=", server.poll())
 
         resp = send_tools_call(
             server,

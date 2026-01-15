@@ -3,7 +3,7 @@ services:
     image: postgres:17
     volumes:
       - ../../data/zfighters.sql:/docker-entrypoint-initdb.d/seed.sql:ro
-      - ../../data/gym.sql:/docker-entrypoint-initdb.d/gym.sql:ro
+      - ../../data/gym.sql:/another-db-seeds/gym.sql:ro
       - ./init/01-create-another-db.sh:/docker-entrypoint-initdb.d/01-create-another-db.sh:ro
     environment:
       POSTGRES_PASSWORD: my_secret

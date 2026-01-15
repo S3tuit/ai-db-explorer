@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
 
 static void print_usage(const char *prog) {
     fprintf(stderr, "Usage: %s [-client|-broker] [-sock <path>] [-config <path>]\n", prog);
@@ -14,7 +15,10 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char **argv) {
     // Test-only marker to confirm the ADBX_TESTLOG build is running.
-    TLOG("startup with ADBX_TESTLOG enabled");
+    TLOG("INFO - tartup with ADBX_TESTLOG enabled");
+    // Ignore SIGPIPE so write failures return -1 instead of terminating the process.
+    // This makes test failures observable via error handling/logging.
+    (void)signal(SIGPIPE, SIG_IGN);
     const char *sock_path = SOCK_PATH;
     const char *config_path = "template-config.json";
     int run_client = 1;

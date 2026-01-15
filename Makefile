@@ -34,7 +34,7 @@ UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
 INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(INTEGRATION_TEST_SRC))
 
-.PHONY: all clean run test test-unit test-integration test-postgres test-build asan
+.PHONY: all clean run test test-unit test-integration test-postgres test-build asan clean-testobj
 
 all: $(BIN)
 
@@ -103,8 +103,8 @@ test: test-unit test-integration
 
 # Run postgres integration tests (used by docker) and run the .py tests.
 # We always use the ASAN binary for tests.
-test-postgres: EXTRA_TCFLAGS=-DADBX_TESTLOG
-test-postgres: $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
+test-postgres: EXTRA_TCFLAGS=-DADBX_TESTLOG -DDUMMY_SECRET_STORE_WARNING
+test-postgres: clean-testobj $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
 	@set -e; \
 	# we use a symlink so inside the integration test we can't get it wrong and
 	# run the non ASAN version of the binary.
@@ -117,11 +117,16 @@ test-postgres: $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
 	  echo "==> $$t"; \
 	  python3 $$t; \
 	done; \
-	echo "ALL TESTS PASSED"
+	echo "TESTS FINISHED (read the result of the tests above)"
 
 # Only builds tests, usefull for making the LSP recognize the header files
 # inside tests/
 test-build: $(UNIT_TEST_BINS) $(INTEGRATION_TEST_BINS)
+
+clean-testobj:
+	# Force rebuild of secret_store objects when switching test-only flags.
+	rm -f build/testobj/secret_store.o build/testobj/dummy_secret_store.o
+	rm -f build/asan/secret_store.o build/asan/dummy_secret_store.o
 
 clean:
 	rm -rf build

@@ -9,7 +9,7 @@
     {
       "type": "postgres",
       "connectionName": "MyPostgres",
-      "host": "localhost",
+      "host": "db",
       "port": 5432,
       "username": "my_user",
       "database": "my_db"
@@ -17,7 +17,7 @@
     {
       "type": "postgres",
       "connectionName": "AnotherPostgres",
-      "host": "localhost",
+      "host": "db",
       "port": 5432,
       "username": "another_user",
       "database": "another_db"

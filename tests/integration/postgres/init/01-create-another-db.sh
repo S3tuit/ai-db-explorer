@@ -7,5 +7,6 @@ CREATE USER "${ANOTHER_USER}" WITH PASSWORD '${ANOTHER_PASSWORD}';
 CREATE DATABASE "${ANOTHER_DB}" OWNER "${ANOTHER_USER}";
 SQL
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$ANOTHER_DB" \
-  -f /docker-entrypoint-initdb.d/gym.sql
+# Seed as ANOTHER_USER so it owns the objects and can read them in tests.
+psql -v ON_ERROR_STOP=1 --username "$ANOTHER_USER" --dbname "$ANOTHER_DB" \
+  -f /another-db-seeds/gym.sql

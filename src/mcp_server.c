@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "mcp_server.h"
+#include "log.h"
 #include "frame_codec.h"
 #include "json_codec.h"
 #include "stdio_byte_channel.h"
@@ -142,9 +143,9 @@ static int mcpser_handshake(McpServer *s) {
 
     StrBuf req = {0};
     int rc = frame_read_cl(s->in_bc, &req);
-    if (rc != OK) {
+    if (rc != YES) {
         sb_clean(&req);
-        return rc;
+        return ERR;
     }
 
     const char *json = req.data;
@@ -162,6 +163,8 @@ static int mcpser_handshake(McpServer *s) {
     if (vrc != YES) {
         sb_clean(&req);
         (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
+        TLOG("ERROR - handshake: invalid JSON-RPC");
+        mcpser_set_err(s, "handshake rejected invalid request");
         return ERR;
     }
 
@@ -177,6 +180,8 @@ static int mcpser_handshake(McpServer *s) {
             memcmp(method.ptr, "initialize", method.len) != 0) {
         sb_clean(&req);
         (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
+        TLOG("ERROR - handshake: invalid initialize request");
+        mcpser_set_err(s, "handshake rejected invalid initialize");
         return ERR;
     }
 
@@ -217,16 +222,22 @@ int mcpser_run(McpServer *s) {
 
     int hrc = mcpser_handshake(s);
     if (hrc != OK) return ERR;
+    TLOG("INFO - handshake complete, entering main loop");
 
     for (;;) {
         // McpServer reads JSON-RPC request
         StrBuf req = {0};
         int rc = frame_read_cl(s->in_bc, &req);
+        TLOG("INFO - frame_read_cl rc=%d len=%zu", rc, req.len);
         if (rc == NO) {
             // EOF
+            sb_clean(&req);
+            TLOG("INFO - EOF on MCP stdin.");
             return OK;
         }
         if (rc == ERR) {
+            sb_clean(&req);
+            TLOG("ERROR - frame_read_cl failed while reading MCP input");
             mcpser_set_err(s, "failed to read input");
             return ERR;
         }
@@ -236,6 +247,7 @@ int mcpser_run(McpServer *s) {
         if (irc != OK) {
             fprintf(stderr, "McpServer: malformed input\n");
             sb_clean(&req);
+            TLOG("ERROR - invalid JSON in MCP input");
             if (mcpser_send_error(s, NULL, -32600, "Malformed JSON-RPC request", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
@@ -251,6 +263,7 @@ int mcpser_run(McpServer *s) {
         if (vrc != YES) {
             fprintf(stderr, "McpServer: invalid input\n");
             sb_clean(&req);
+            TLOG("ERROR - invalid JSON-RPC envelope");
             if (mcpser_send_error(s, idp, -32600, "Invalid JSON-RPC request.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
@@ -262,6 +275,7 @@ int mcpser_run(McpServer *s) {
         if (req.len > UINT32_MAX) {
             fprintf(stderr, "McpServer: request too large\n");
             sb_clean(&req);
+            TLOG("ERROR - request too large: len=%zu", req.len);
             if (mcpser_send_error(s, idp, -32600, "Request too large.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
@@ -274,6 +288,7 @@ int mcpser_run(McpServer *s) {
         if (frame_write_len(s->brok_bc, req.data, (uint32_t)req.len) != OK) {
             fprintf(stderr, "McpServer: broker write failed\n");
             sb_clean(&req);
+            TLOG("ERROR - failed to write request to broker");
             if (mcpser_send_error(s, idp, -32600, "Unable to reach broker.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
@@ -289,6 +304,7 @@ int mcpser_run(McpServer *s) {
         if (frame_read_len(s->brok_bc, &resp) != OK) {
             fprintf(stderr, "McpServer: broker read failed\n");
             sb_clean(&resp);
+            TLOG("ERROR - failed to read response from broker");
             if (mcpser_send_error(s, idp, -32600, "Unable to read broker response.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
                 return ERR;
@@ -301,6 +317,7 @@ int mcpser_run(McpServer *s) {
         if (frame_write_cl(s->out_bc, resp.data, resp.len) != OK) {
             fprintf(stderr, "McpServer: stdout write failed\n");
             sb_clean(&resp);
+            TLOG("ERROR - failed to write response to stdout");
             mcpser_set_err(s, "failed to write to stdout");
             return ERR;
         }

@@ -6,6 +6,7 @@
 
 #include "secret_store.h"
 #include "utils.h"
+#include "log.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -31,7 +32,7 @@ static int secret_store_dummy_get(SecretStore *store, const char *secret_ref,
     (void)store;
     if (!secret_ref || !out) return ERR;
 
-    sb_zero_mem(out);
+    sb_zero_clean(out);
     out->len = 0;
 
     const char *secret = NULL;
@@ -71,6 +72,7 @@ static const SecretStoreVTable SECRET_STORE_DUMMY_VT = {
 SecretStore *secret_store_create(void) {
     SecretStore *store = xmalloc(sizeof(*store));
     store->vt = &SECRET_STORE_DUMMY_VT;
+    TLOG("INFO - using dummy secret store");
     fprintf(stderr, "WARNING: using dummy secret store (DUMMY_SECRET_STORE_WARNING).\n");
     return store;
 }

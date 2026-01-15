@@ -1,6 +1,7 @@
 #include "conn_manager.h"
 #include "utils.h"
 #include "postgres_backend.h"
+#include "log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -68,11 +69,15 @@ static int ensure_connected(ConnManager *m, ConnEntry *e) {
     // Fetch password if needed
     StrBuf pw = {0};
     if (secret_store_get(m->secrets, e->profile->connection_name, &pw) != OK) {
+        TLOG("ERROR - secret_store_get failed for %s", e->profile->connection_name);
         return ERR;
     }
 
     // Connect
     int rc = db_connect(e->backend, e->profile, m->policy, pw.data);
+    if (rc != OK) {
+        TLOG("ERROR - db_connect failed for %s", e->profile->connection_name);
+    }
     sb_zero_clean(&pw);
 
     if (rc != OK) return ERR;
@@ -175,6 +180,7 @@ DbBackend *connm_get_backend(ConnManager *m, const char *connection_name) {
   connm_disconnect_idle(m);
 
   ConnEntry *e = find_entry(m, connection_name);
+  TLOG("INFO - requested use of connection %s", connection_name);
   if (!e) return NULL;
 
   if (ensure_connected(m, e) != OK) return NULL;
