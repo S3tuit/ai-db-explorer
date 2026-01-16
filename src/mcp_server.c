@@ -4,6 +4,7 @@
 #include "log.h"
 #include "frame_codec.h"
 #include "json_codec.h"
+#include "mcp_id.h"
 #include "stdio_byte_channel.h"
 #include "utils.h"
 
@@ -48,14 +49,18 @@ static int connect_unix_socket(const char *path) {
 
 /* Writes a JSON-RPC error response. If 'requested' is non-NULL, include data
  * with supported/requested protocol versions. */
-static int mcpser_send_error(McpServer *s, const uint32_t *id, long code,
+static int mcpser_send_error(McpServer *s, const McpId *id, long code,
                              const char *msg, const char *requested) {
     if (!s || !s->out_bc || !msg) return ERR;
 
     StrBuf sb = {0};
     if (json_rpc_begin(&sb) != OK) goto err;
     if (id) {
-        if (json_kv_u64(&sb, "id", *id) != OK) goto err;
+        if (id->kind == MCP_ID_STR) {
+            if (json_kv_str(&sb, "id", id->str ? id->str : "") != OK) goto err;
+        } else {
+            if (json_kv_u64(&sb, "id", id->u32) != OK) goto err;
+        }
     } else {
         if (json_kv_null(&sb, "id") != OK) goto err;
     }
@@ -156,15 +161,29 @@ static int mcpser_handshake(McpServer *s) {
     // before returning the error
     int vrc = (irc == OK) ? jsget_simple_rpc_validation(&jg) : ERR;
 
-    uint32_t id = 0;
-    const uint32_t *idp = NULL;
-    if (irc == OK && jsget_u32(&jg, "id", &id) == YES) idp = &id;
+    McpId id = {0};
+    const McpId *idp = NULL;
+    if (irc == OK) {
+        if (jsget_u32(&jg, "id", &id.u32) == YES) {
+            id.kind = MCP_ID_INT;
+            idp = &id;
+        } else {
+            char *id_str = NULL;
+            int src = jsget_string_decode_alloc(&jg, "id", &id_str);
+            if (src == YES) {
+                id.kind = MCP_ID_STR;
+                id.str = id_str;
+                idp = &id;
+            }
+        }
+    }
 
     if (vrc != YES) {
         sb_clean(&req);
         (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
         TLOG("ERROR - handshake: invalid JSON-RPC");
         mcpser_set_err(s, "handshake rejected invalid request");
+        if (idp) mcp_id_clean(&id);
         return ERR;
     }
 
@@ -182,6 +201,7 @@ static int mcpser_handshake(McpServer *s) {
         (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
         TLOG("ERROR - handshake: invalid initialize request");
         mcpser_set_err(s, "handshake rejected invalid initialize");
+        if (idp) mcp_id_clean(&id);
         return ERR;
     }
 
@@ -189,7 +209,11 @@ static int mcpser_handshake(McpServer *s) {
 
     StrBuf sb = {0};
     if (json_rpc_begin(&sb) != OK) goto fail;
-    if (json_kv_u64(&sb, "id", id) != OK) goto fail;
+    if (id.kind == MCP_ID_STR) {
+        if (json_kv_str(&sb, "id", id.str ? id.str : "") != OK) goto fail;
+    } else {
+        if (json_kv_u64(&sb, "id", id.u32) != OK) goto fail;
+    }
     if (json_kv_obj_begin(&sb, "result") != OK) goto fail;
     if (json_kv_str(&sb, "protocolVersion", MCP_PROTOCOL_VERSION) != OK) goto fail;
     if (json_kv_obj_begin(&sb, "capabilities") != OK) goto fail;
@@ -207,10 +231,12 @@ static int mcpser_handshake(McpServer *s) {
 
     int wrc = frame_write_cl(s->out_bc, sb.data, sb.len);
     sb_clean(&sb);
+    if (id.kind == MCP_ID_STR) mcp_id_clean(&id);
     return wrc;
 
 fail:
     sb_clean(&sb);
+    if (id.kind == MCP_ID_STR) mcp_id_clean(&id);
     return ERR;
 }
 
@@ -255,10 +281,35 @@ int mcpser_run(McpServer *s) {
             continue;
         }
 
+        McpId id = {0};
+        const McpId *idp = NULL;
+        if (jsget_u32(&jg, "id", &id.u32) == YES) {
+            id.kind = MCP_ID_INT;
+            idp = &id;
+        } else {
+            char *id_str = NULL;
+            int src = jsget_string_decode_alloc(&jg, "id", &id_str);
+            if (src == YES) {
+                id.kind = MCP_ID_STR;
+                id.str = id_str;
+                idp = &id;
+            } else if (src == NO) {
+                // Notifications have no id; ignore them for now.
+                sb_clean(&req);
+                continue;
+            } else {
+                sb_clean(&req);
+                TLOG("ERROR - invalid id in JSON-RPC request");
+                if (mcpser_send_error(s, NULL, -32600,
+                        "Invalid JSON-RPC request.", NULL) != OK) {
+                    mcpser_set_err(s, "failed to write error response");
+                    return ERR;
+                }
+                continue;
+            }
+        }
+
         int vrc = jsget_simple_rpc_validation(&jg);
-        uint32_t id = 0;
-        const uint32_t *idp = NULL;
-        if (jsget_u32(&jg, "id", &id) == YES) idp = &id;
 
         if (vrc != YES) {
             fprintf(stderr, "McpServer: invalid input\n");
@@ -266,8 +317,10 @@ int mcpser_run(McpServer *s) {
             TLOG("ERROR - invalid JSON-RPC envelope");
             if (mcpser_send_error(s, idp, -32600, "Invalid JSON-RPC request.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
+                if (idp) mcp_id_clean(&id);
                 return ERR;
             }
+            if (idp) mcp_id_clean(&id);
             continue;
         }
 
@@ -278,8 +331,10 @@ int mcpser_run(McpServer *s) {
             TLOG("ERROR - request too large: len=%zu", req.len);
             if (mcpser_send_error(s, idp, -32600, "Request too large.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
+                if (idp) mcp_id_clean(&id);
                 return ERR;
             }
+            if (idp) mcp_id_clean(&id);
             continue;
         }
 
@@ -291,9 +346,11 @@ int mcpser_run(McpServer *s) {
             TLOG("ERROR - failed to write request to broker");
             if (mcpser_send_error(s, idp, -32600, "Unable to reach broker.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
+                if (idp) mcp_id_clean(&id);
                 return ERR;
             }
             mcpser_set_err(s, "failed to write to broker");
+            if (idp) mcp_id_clean(&id);
             return ERR;
         }
         sb_clean(&req);
@@ -307,9 +364,11 @@ int mcpser_run(McpServer *s) {
             TLOG("ERROR - failed to read response from broker");
             if (mcpser_send_error(s, idp, -32600, "Unable to read broker response.", NULL) != OK) {
                 mcpser_set_err(s, "failed to write error response");
+                if (idp) mcp_id_clean(&id);
                 return ERR;
             }
             mcpser_set_err(s, "failed to read from broker");
+            if (idp) mcp_id_clean(&id);
             return ERR;
         }
 
@@ -319,10 +378,12 @@ int mcpser_run(McpServer *s) {
             sb_clean(&resp);
             TLOG("ERROR - failed to write response to stdout");
             mcpser_set_err(s, "failed to write to stdout");
+            if (idp) mcp_id_clean(&id);
             return ERR;
         }
 
         sb_clean(&resp);
+        if (idp) mcp_id_clean(&id);
     }
 }
 

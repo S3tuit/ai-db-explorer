@@ -19,20 +19,28 @@ static void assert_bytes_eq(const char *got, size_t got_len,
     ASSERT_TRUE_AT(memcmp(got, expected, exp_len) == 0, file, line);
 }
 
+static McpId id_u32(uint32_t v) {
+    McpId id = {0};
+    mcp_id_init_u32(&id, v);
+    return id;
+}
+
 /* builds a QueryResult, fills cols/cells, encode into JSON, compares payload. */
 static void encode_jsonrpc_impl(
-        uint32_t id,
+        const McpId *id,
         uint32_t ncols,
         uint32_t nrows,
         uint64_t exec_ms,
-        uint8_t truncated,
+        uint8_t result_truncated,
+        uint64_t max_query_bytes,
         const char *const *col_names,
         const char *const *col_types,   
         const char *const *cells,
         const char *expected_json,
         const char *file, int line) {
 
-    QueryResult *qr = qr_create_ok(id, ncols, nrows, truncated);
+    QueryResult *qr = qr_create_ok(id, ncols, nrows, result_truncated,
+                                   max_query_bytes);
     ASSERT_TRUE_AT(qr != NULL, file, line);
 
     qr->exec_ms = exec_ms;
@@ -56,7 +64,7 @@ static void encode_jsonrpc_impl(
             size_t idx = (size_t)r * (size_t)ncols + (size_t)c;
             const char *val = cells ? cells[idx] : NULL;
             int rc = qr_set_cell(qr, r, c, val);
-            ASSERT_TRUE_AT(rc == OK, file, line);
+            ASSERT_TRUE_AT(rc == YES, file, line);
         }
     }
 
@@ -99,15 +107,17 @@ static void test_json_basic_rows_and_nulls(void) {
             "[\"2\",null,\"99\"]"
           "],"
           "\"rowcount\":2,"
-          "\"truncated\":true"
+          "\"resultTruncated\":true"
         "}}";
 
+    McpId id = id_u32(7);
     ENCODE_JSONRPC(
-        /* id */ 7,
+        /* id */ &id,
         /* ncols */ 3,
         /* nrows */ 2,
         /* exec_ms */ 12,
-        /* truncated */ 1,
+        /* result_truncated */ 1,
+        /* max_query_bytes */ 0,
         col_names,
         col_types,
         cells,
@@ -117,7 +127,8 @@ static void test_json_basic_rows_and_nulls(void) {
 
 static void test_json_null_qrcolumn_safe_defaults(void) {
     /* 2 columns, but we only set column 0 */
-    QueryResult *qr = qr_create_ok(100, 2, 1, 0);
+    McpId id = id_u32(100);
+    QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
     ASSERT_TRUE(qr != NULL);
 
     qr->exec_ms = 42;
@@ -129,8 +140,8 @@ static void test_json_null_qrcolumn_safe_defaults(void) {
     ASSERT_TRUE(qr_get_col(qr, 1) == NULL);
 
     /* Set cells anyway (json must not rely on column metadata existing) */
-    ASSERT_TRUE(qr_set_cell(qr, 0, 0, "5") == OK);
-    ASSERT_TRUE(qr_set_cell(qr, 0, 1, "abc") == OK);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 0, "5") == YES);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 1, "abc") == YES);
 
     /* If qr_get_col returns NULL, json uses empty strings "" in output */
     const char *expected =
@@ -142,7 +153,7 @@ static void test_json_null_qrcolumn_safe_defaults(void) {
           "],"
           "\"rows\":[[\"5\",\"abc\"]],"
           "\"rowcount\":1,"
-          "\"truncated\":false"
+          "\"resultTruncated\":false"
         "}}";
 
     char *json = NULL;
@@ -182,11 +193,12 @@ static void test_json_escapes_strings(void) {
           "\"columns\":[{\"name\":\"txt\",\"type\":\"text\"}],"
           "\"rows\":[[\"a\\\"b\\\\c\\n\\td\\r\\u0001Z\"]],"
           "\"rowcount\":1,"
-          "\"truncated\":false"
+          "\"resultTruncated\":false"
         "}}";
 
+    McpId id = id_u32(9);
     ENCODE_JSONRPC(
-        9, 1, 1, 5, 0,
+        &id, 1, 1, 5, 0, 0,
         col_names, col_types, cells,
         expected
     );
@@ -200,18 +212,20 @@ static void test_json_empty_result(void) {
           "\"columns\":[],"
           "\"rows\":[],"
           "\"rowcount\":0,"
-          "\"truncated\":false"
+          "\"resultTruncated\":false"
         "}}";
 
+    McpId id = id_u32(42);
     ENCODE_JSONRPC(
-        42, 0, 0, 1, 0,
+        &id, 0, 0, 1, 0, 0,
         NULL, NULL, NULL,
         expected
     );
 }
 
 static void test_json_error_result(void) {
-    QueryResult *qr = qr_create_err(7, "bad \"x\"");
+    McpId id = id_u32(7);
+    QueryResult *qr = qr_create_err(&id, "bad \"x\"");
     ASSERT_TRUE(qr != NULL);
 
     const char *expected =
@@ -229,6 +243,33 @@ static void test_json_error_result(void) {
 
     free(json);
     qr_destroy(qr);
+}
+
+static void test_json_string_id(void) {
+    McpId id = {0};
+    ASSERT_TRUE(mcp_id_init_str_copy(&id, "req-xyz") == OK);
+
+    QueryResult *qr = qr_create_msg(&id, "ok");
+    ASSERT_TRUE(qr != NULL);
+
+    const char *expected =
+        "{\"jsonrpc\":\"2.0\",\"id\":\"req-xyz\",\"result\":{"
+          "\"exec_ms\":0,"
+          "\"columns\":[{\"name\":\"message\",\"type\":\"text\"}],"
+          "\"rows\":[[\"ok\"]],"
+          "\"rowcount\":1,"
+          "\"resultTruncated\":false"
+        "}}";
+
+    char *json = NULL;
+    size_t json_len = 0;
+    int rc = qr_to_jsonrpc(qr, &json, &json_len);
+    ASSERT_TRUE(rc == OK);
+    assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+    free(json);
+    qr_destroy(qr);
+    mcp_id_clean(&id);
 }
 
 static void test_json_builder_object(void) {
@@ -287,6 +328,8 @@ static void test_json_builder_nested(void) {
 static void test_jsget_simple_rpc_validation(void) {
     const char *ok =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\",\"params\":{}}";
+    const char *ok_str =
+        "{\"jsonrpc\":\"2.0\",\"id\":\"req-1\",\"method\":\"exec\"}";
     const char *no_id =
         "{\"jsonrpc\":\"2.0\",\"method\":\"exec\"}";
     const char *bad_ver =
@@ -296,6 +339,9 @@ static void test_jsget_simple_rpc_validation(void) {
 
     JsonGetter jg;
     ASSERT_TRUE(jsget_init(&jg, ok, strlen(ok)) == OK);
+    ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == YES);
+
+    ASSERT_TRUE(jsget_init(&jg, ok_str, strlen(ok_str)) == OK);
     ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == YES);
 
     ASSERT_TRUE(jsget_init(&jg, no_id, strlen(no_id)) == OK);
@@ -428,6 +474,7 @@ int main (void) {
     test_json_escapes_strings();
     test_json_empty_result();
     test_json_error_result();
+    test_json_string_id();
     test_json_builder_object();
     test_json_builder_array();
     test_json_builder_nested();

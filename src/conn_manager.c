@@ -22,6 +22,7 @@ struct ConnManager {
     uint64_t ttl_ms;                // the time after which a backend that has
                                   // not been used ( and has no running queries)
                                   // may be disconnected.
+    DbBackend *(*factory)(DbKind kind); // backend factory (borrowed - used for tests)
 
     ConnEntry *entries; // owned
     size_t n_entries;
@@ -58,7 +59,8 @@ static int ensure_connected(ConnManager *m, ConnEntry *e) {
 
     // Lazy-create backend object
     if (!e->backend) {
-        e->backend = db_backend_create(e->profile->kind);
+        if (!m->factory) return ERR;
+        e->backend = m->factory(e->profile->kind);
     }
 
     // If backend is connected, keep it
@@ -86,7 +88,8 @@ static int ensure_connected(ConnManager *m, ConnEntry *e) {
 }
 
 #define TTL_CONNECTIONS_MS (10L * 60L * 1000L) // 10 minutes
-ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets) {
+ConnManager *connm_create_with_factory(ConnCatalog *cat, SecretStore *secrets,
+                                       DbBackend *(*factory)(DbKind kind)) {
     if (!cat || !secrets) return NULL;
 
     ConnManager *m = (ConnManager *)xmalloc(sizeof(*m));
@@ -102,6 +105,7 @@ ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets) {
         return NULL;
     }
     m->ttl_ms = TTL_CONNECTIONS_MS;
+    m->factory = factory ? factory : db_backend_create;
 
     // Build entries from catalog list (borrowed pointers)
     size_t total = catalog_count(cat);
@@ -126,6 +130,10 @@ ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets) {
 
     free(tmp);
     return m;
+}
+
+ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets) {
+    return connm_create_with_factory(cat, secrets, NULL);
 }
 
 /* Finds connections that have been unused for more than 'm->ttl_ms' ms and
@@ -194,4 +202,9 @@ void connm_mark_used(ConnManager *m, const char *connection_name) {
   if (!e) return;
 
   e->last_used_ms = now_ms_monotonic();
+}
+
+void connm_set_ttl_ms(ConnManager *m, uint64_t ttl_ms) {
+  if (!m) return;
+  m->ttl_ms = ttl_ms;
 }

@@ -17,9 +17,22 @@ typedef struct ConnManager ConnManager;
  * Ownership:
  * - `cat` is owned by ConnManager after creation.
  * - `secrets` is owned by ConnManager after creation.
- * - the policy is borrowed from the catalog and must outlive ConnManager (v1).
+ * - the policy is borrowed from the catalog and must outlive ConnManager.
  */
 ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets);
+
+/**
+ * Creates a ConnManager using a custom backend factory (useful for tests).
+ *
+ * Ownership:
+ * - `cat` is owned by ConnManager after creation.
+ * - `secrets` is owned by ConnManager after creation.
+ * - `factory` is borrowed and must remain valid for the lifetime of ConnManager.
+ *
+ * Error semantics: returns NULL on invalid input or allocation failure.
+ */
+ConnManager *connm_create_with_factory(ConnCatalog *cat, SecretStore *secrets,
+                                       DbBackend *(*factory)(DbKind kind));
 
 /**
  * Destroy ConnManager and all allocated backends. Closes connections before
@@ -44,5 +57,14 @@ DbBackend *connm_get_backend(ConnManager *m, const char *connection_name);
  * regardless of success/failure).
  */
 void connm_mark_used(ConnManager *m, const char *connection_name);
+
+/**
+ * Overrides the idle TTL (milliseconds) for reaping connections.
+ *
+ * Ownership: borrows 'm'.
+ * Side effects: affects when connm_get_backend will disconnect idle sessions.
+ * Error semantics: no return value.
+ */
+void connm_set_ttl_ms(ConnManager *m, uint64_t ttl_ms);
 
 #endif

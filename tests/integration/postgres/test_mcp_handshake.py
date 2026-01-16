@@ -138,6 +138,28 @@ def test_handshake_invalid_json(broker):
     finally:
         stop_proc(server)
 
+def test_notification_invalid_request(broker):
+    server = start_server()
+    try:
+        resp = do_handshake(server, 4, "2025-11-25")
+        assert resp["jsonrpc"] == "2.0"
+
+        # Notifications must not include an id; server should ignore them.
+        note = {
+            "jsonrpc": "2.0",
+            "method": "notifications/test",
+            "params": {"x": 1},
+        }
+        write_frame(server, json.dumps(note).encode("utf-8"))
+
+        # A valid server should not respond to notifications; verify
+        # the connection is still alive by sending another handshake.
+        resp = do_handshake(server, 5, "2025-11-25")
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == 5
+    finally:
+        stop_proc(server)
+
 
 def main():
     broker = start_broker()
@@ -145,6 +167,7 @@ def main():
         test_handshake_ok(broker)
         test_handshake_bad_version(broker)
         test_handshake_invalid_json(broker)
+        test_notification_invalid_request(broker)
         print("OK: test_mcp_handshake")
     finally:
         stop_proc(broker)

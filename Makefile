@@ -105,9 +105,9 @@ test: test-unit test-integration
 # We always use the ASAN binary for tests.
 test-postgres: EXTRA_TCFLAGS=-DADBX_TESTLOG -DDUMMY_SECRET_STORE_WARNING
 test-postgres: clean-testobj $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
+# We use a symlink so the integration tests always run the ASAN binary.
+# We use set -e so failures in .py tests stop the target.
 	@set -e; \
-	# we use a symlink so inside the integration test we can't get it wrong and
-	# run the non ASAN version of the binary.
 	ln -sf ai-db-explorer-asan build/ai-db-explorer; \
 	for t in $(INTEGRATION_TEST_BINS); do \
 	  echo "==> $$t"; \
@@ -117,7 +117,7 @@ test-postgres: clean-testobj $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
 	  echo "==> $$t"; \
 	  python3 $$t; \
 	done; \
-	echo "TESTS FINISHED (read the result of the tests above)"
+	echo "ALL INTEGRATION TESTS PASSED"
 
 # Only builds tests, usefull for making the LSP recognize the header files
 # inside tests/

@@ -6,33 +6,51 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Returns YES if 'row' and 'col' form a valid index to access cells of 'qr'. */
-static inline int idx_ok(const QueryResult *qr, uint32_t row, uint32_t col) {
+/* Returns YES if 'row' and 'col' form a valid index to write into cells. */
+static inline int idx_ok_set(const QueryResult *qr, uint32_t row, uint32_t col) {
+    return (qr && qr->cols && qr->cells && row < qr->nrows_alloc && col < qr->ncols)
+        ? YES : NO;
+}
+
+/* Returns YES if 'row' and 'col' form a valid index to read from cells. */
+static inline int idx_ok_get(const QueryResult *qr, uint32_t row, uint32_t col) {
     return (qr && qr->cols && qr->cells && row < qr->nrows && col < qr->ncols)
         ? YES : NO;
 }
 
-QueryResult *qr_create_ok(uint32_t id, uint32_t ncols, uint32_t nrows, uint8_t truncated) {
+QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
+                          uint8_t result_truncated, uint64_t max_query_bytes) {
     QueryResult *qr = xmalloc(sizeof(*qr));
     size_t ncells = (size_t)ncols * (size_t)nrows;
 
     qr->cols = (QRColumn *)xcalloc(ncols, sizeof(QRColumn));
     qr->cells = (char **)xcalloc(ncells, sizeof(char *));
 
-    qr->id = id;
+    if (mcp_id_copy(&qr->id, id) != OK) {
+        free(qr->cells);
+        free(qr->cols);
+        free(qr);
+        return NULL;
+    }
     qr->status = QR_OK;
     qr->ncols = ncols;
     qr->nrows = nrows;
+    qr->nrows_alloc = nrows;
     qr->exec_ms = 0;
-    qr->truncated = truncated;
+    qr->result_truncated = result_truncated;
+    qr->max_query_bytes = max_query_bytes;
+    qr->used_query_bytes = 0;
 
     return qr;
 }
 
-QueryResult *qr_create_err(uint32_t id, const char *err_msg) {
+QueryResult *qr_create_err(const McpId *id, const char *err_msg) {
     QueryResult *qr = xmalloc(sizeof(*qr));
 
-    qr->id = id;
+    if (mcp_id_copy(&qr->id, id) != OK) {
+        free(qr);
+        return NULL;
+    }
     qr->status = QR_ERROR;
     qr->exec_ms = 0;
 
@@ -44,8 +62,8 @@ QueryResult *qr_create_err(uint32_t id, const char *err_msg) {
     return qr;
 }
 
-QueryResult *qr_create_msg(uint32_t id, const char *msg) {
-    QueryResult *qr = qr_create_ok(id, 1, 1, 0);
+QueryResult *qr_create_msg(const McpId *id, const char *msg) {
+    QueryResult *qr = qr_create_ok(id, 1, 1, 0, 0);
     qr_set_col(qr, 0, "message", "text");
     qr_set_cell(qr, 0, 0, msg ? msg : "");
     return qr;
@@ -54,6 +72,8 @@ QueryResult *qr_create_msg(uint32_t id, const char *msg) {
 void qr_destroy(QueryResult *qr) {
     if (!qr) return;
    
+    mcp_id_clean(&qr->id);
+
     // if it represent an error
     if (qr->status == QR_ERROR) {
         free(qr->err_msg);
@@ -62,8 +82,8 @@ void qr_destroy(QueryResult *qr) {
     }
 
     // free all the storage for cells
-    if (qr->cells && qr->ncols > 0 && qr->nrows > 0) {
-        size_t ncells = (size_t)qr->ncols * (size_t)qr->nrows;
+    if (qr->cells && qr->ncols > 0 && qr->nrows_alloc > 0) {
+        size_t ncells = (size_t)qr->ncols * (size_t)qr->nrows_alloc;
         for (size_t i = 0; i < ncells; i++) {
             free(qr->cells[i]); 
         }
@@ -116,27 +136,28 @@ const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col) {
     return &qr->cols[col];
 }
 
-int qr_set_cell_capped(QueryResult *qr, uint32_t row, uint32_t col,
-                        const char *value, uint32_t cap) {
-    if (!qr) return ERR;
-    if (!idx_ok(qr, row, col)) return ERR;
-
-    size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
-
-    // Overwrite existing value
-    free(qr->cells[idx]);
-    
-    // value may be NULL and it's ok to store NULL, it means SQL NULL
-    char *copy = dupn_or_null_pretty(value, (size_t)cap);
-    qr->cells[idx] = copy;
-    return OK;
-}
-
+/* Stores a cell value while enforcing max_query_bytes; on NO the caller must
+ * stop populating rows to keep a fully-formed result set. */
 int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value) {
     if (!qr) return ERR;
-    if (!idx_ok(qr, row, col)) return ERR;
+    if (!idx_ok_set(qr, row, col)) return ERR;
 
     size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
+
+    // account for previous value before overwriting
+    if (qr->cells[idx]) {
+        qr->used_query_bytes -= strlen(qr->cells[idx]);
+    }
+
+    size_t val_len = value ? strlen(value) : 0;
+    if (qr->max_query_bytes > 0 &&
+        qr->used_query_bytes + val_len > qr->max_query_bytes) {
+        // do not overwrite when the cap would be exceeded
+        if (qr->cells[idx]) {
+            qr->used_query_bytes += strlen(qr->cells[idx]);
+        }
+        return NO;
+    }
 
     // Overwrite existing value
     free(qr->cells[idx]);
@@ -144,17 +165,18 @@ int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value) 
     // value may be NULL and it's ok to store NULL, it means SQL NULL
     char *copy = dup_or_null(value);
     qr->cells[idx] = copy;
-    return OK;
+    qr->used_query_bytes += val_len;
+    return YES;
 }
 
 const char *qr_get_cell(const QueryResult *qr, uint32_t row, uint32_t col) {
-    if (!idx_ok(qr, row, col)) return NULL;
+    if (!idx_ok_get(qr, row, col)) return NULL;
     size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
     return qr->cells[idx];
 }
 
 int qr_is_null(const QueryResult *qr, uint32_t row, uint32_t col) {
-    if (!idx_ok(qr, row, col)) return ERR;
+    if (!idx_ok_get(qr, row, col)) return ERR;
     size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
     return (qr->cells[idx] == NULL) ? YES : NO;
 }

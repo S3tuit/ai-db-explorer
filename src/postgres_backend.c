@@ -92,11 +92,6 @@ static int pg_apply_policy(PgImpl *p) {
     if (!p || !p->conn) return ERR;
     // bad things can happen if we let the max bytes to be low like 1/2...
     // this is a safe bound
-    if (p->policy.max_cell_bytes < 256) {
-        pg_set_err(p, "max_cell_bytes too low, it should be at least 256 bytes");
-        return ERR;
-    }
-
     // ignore failure, this is not strictly necessary
     pg_exec_command_ignore(p, "SET application_name to \'db-explorer\'");
 
@@ -247,8 +242,8 @@ static void pg_destroy(DbBackend *db) {
     free(db);
 }
 
-static int pg_exec(DbBackend *db, uint32_t request_id, const char *sql,
-                    QueryResult **out_qr) {
+static int pg_exec(DbBackend *db, const McpId *request_id, const char *sql,
+                        QueryResult **out_qr) {
     
     const char *err_msg;
     QueryResult *qr = NULL;
@@ -326,13 +321,14 @@ static int pg_exec(DbBackend *db, uint32_t request_id, const char *sql,
         uint32_t out_cols = (uint32_t)ncols;
         uint32_t out_rows = (uint32_t)ntuples;
 
-        uint8_t truncated = 0;
+        uint8_t result_truncated = 0;
         if (p->policy.max_rows > 0 && out_rows > p->policy.max_rows) {
             out_rows = p->policy.max_rows;
-            truncated = 1;
+            result_truncated = 1;
         }
 
-        qr = qr_create_ok(request_id, (uint32_t)ncols, out_rows, truncated);
+        qr = qr_create_ok(request_id, (uint32_t)ncols, out_rows,
+                          result_truncated, p->policy.max_query_bytes);
         if (!qr) {
             pg_set_err(p, "qr_create_ok error");
             goto fail;
@@ -355,9 +351,8 @@ static int pg_exec(DbBackend *db, uint32_t request_id, const char *sql,
             }
         }
 
-        // Fill cells (enforces max_cell_bytes by truncating before setting the
-        // cell).
-        uint32_t cap = p->policy.max_cell_bytes;
+        // Fill cells (enforces max_query_bytes by stopping when the cap is hit).
+        int stop = 0;
         for (uint32_t r = 0; r < out_rows; r++) {
             for (uint32_t c = 0; c < (uint32_t)ncols; c++) {
                 
@@ -365,12 +360,19 @@ static int pg_exec(DbBackend *db, uint32_t request_id, const char *sql,
                 if (PQgetisnull(res, r, c)) val = NULL;
                 else val = PQgetvalue(res, (int)r, (int)c);
 
-                if (qr_set_cell_capped(qr, r, c, val,
-                            cap > 0 ? cap : UINT32_MAX) != OK) {
+                int src = qr_set_cell(qr, r, c, val);
+                if (src == NO) {
+                    qr->result_truncated = 1;
+                    qr->nrows = r;
+                    stop = 1;
+                    break;
+                }
+                if (src == ERR) {
                     pg_set_err(p, "qr_set_cell failed");
                     goto fail;
                 }
             }
+            if (stop) break;
         }
     } else {
         // Error status

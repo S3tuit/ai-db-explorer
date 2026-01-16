@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -98,29 +99,52 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out) {
 
   // makes sure policy if correctly formatted
   const char *const keys[] = {
-    "readOnly", "statementTimeoutMs", "maxRowReturned"
+    "readOnly", "statementTimeoutMs", "maxRowReturned", "maxQueryKiloBytes"
   };
   int vrc = jsget_top_level_validation(jg, "safetyPolicy", keys, ARRLEN(keys));
   if (vrc != YES) return ERR;
 
-  // readOnly
-  JsonStrSpan span = {0};
-  if (jsget_string_span(jg, "safetyPolicy.readOnly", &span) != YES) return ERR;
   int read_only_flag = 0;
-  if (STREQ(span.ptr, span.len, "yes")) read_only_flag = 1;
-  else if (STREQ(span.ptr, span.len, "no")) read_only_flag = 0;
-  else return ERR;
+  int *read_only_ptr = NULL;
+  JsonStrSpan span = {0};
+  int rrc = jsget_string_span(jg, "safetyPolicy.readOnly", &span);
+  if (rrc == ERR) return ERR;
+  if (rrc == YES) {
+    if (strncasecmp(span.ptr, "yes", span.len) == 0) {
+      read_only_flag = 1;
+    } else if (strncasecmp(span.ptr, "no unsafe", span.len) == 0) {
+      read_only_flag = 0;
+    } else {
+      return ERR;
+    }
+    read_only_ptr = &read_only_flag;
+  }
 
-  // statement_timeout_ms
   uint32_t timeout_ms = 0;
-  if (jsget_u32(jg, "safetyPolicy.statementTimeoutMs", &timeout_ms) != YES) return ERR;
+  uint32_t *timeout_ptr = NULL;
+  int trc = jsget_u32(jg, "safetyPolicy.statementTimeoutMs", &timeout_ms);
+  if (trc == ERR) return ERR;
+  if (trc == YES) timeout_ptr = &timeout_ms;
 
-  // max_row_per_query
   uint32_t max_rows = 0;
-  if (jsget_u32(jg, "safetyPolicy.maxRowReturned", &max_rows) != YES) return ERR;
+  uint32_t *max_rows_ptr = NULL;
+  int mrc = jsget_u32(jg, "safetyPolicy.maxRowReturned", &max_rows);
+  if (mrc == ERR) return ERR;
+  if (mrc == YES) max_rows_ptr = &max_rows;
 
-  // Use the standard defaults for unset knobs (e.g., max_cell_bytes).
-  if (safety_policy_init(out, &read_only_flag, &max_rows, NULL, &timeout_ms) != OK) {
+  uint32_t max_query_kb = 0;
+  uint32_t *max_query_ptr = NULL;
+  int qrc = jsget_u32(jg, "safetyPolicy.maxQueryKiloBytes", &max_query_kb);
+  if (qrc == ERR) return ERR;
+  if (qrc == YES) {
+    if (max_query_kb > (UINT32_MAX / 1024u)) return ERR;
+    max_query_kb *= 1024u;
+    max_query_ptr = &max_query_kb;
+  }
+
+  // Use the standard defaults for any unset knobs.
+  if (safety_policy_init(out, read_only_ptr, max_rows_ptr,
+                         max_query_ptr, timeout_ptr) != OK) {
     return ERR;
   }
   return OK;
@@ -204,7 +228,10 @@ static int parse_databases(const JsonGetter *jg, ConnProfile **out_profiles,
 
   size_t n = (size_t)it.count;
   ConnProfile *profiles = NULL;
-  if (n > 0) profiles = (ConnProfile *)xmalloc(n * sizeof(*profiles));
+  if (n > 0) {
+    // zero-init so cleanup can safely free partially parsed entries
+    profiles = (ConnProfile *)xcalloc(n, sizeof(*profiles));
+  }
 
   size_t idx = 0;
   for (;;) {
@@ -235,7 +262,8 @@ static int parse_databases(const JsonGetter *jg, ConnProfile **out_profiles,
 
 error:
   if (profiles) {
-    for (size_t i = 0; i < n; i++) {
+    // only entries [0..idx) are guaranteed to be initialized
+    for (size_t i = 0; i < idx; i++) {
       profile_free(&profiles[i]);
     }
     free(profiles);
@@ -272,8 +300,32 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
 
   // TODO: make errors of parse_policy and parse_databases more user-friendly
 
-  cat = xmalloc(sizeof(*cat));
-  if (parse_policy(&jg, &cat->policy) != OK) {
+  cat = xcalloc(1, sizeof(*cat));
+  // safetyPolicy is optional; when absent we fall back to defaults.
+  const char *const policy_keys[] = {
+    "readOnly", "statementTimeoutMs", "maxRowReturned", "maxQueryKiloBytes"
+  };
+  int prc = jsget_top_level_validation(&jg, "safetyPolicy",
+                                       policy_keys, ARRLEN(policy_keys));
+  if (prc == YES) {
+    if (parse_policy(&jg, &cat->policy) != OK) {
+      err_msg = "ConnCatalog: invalid safetyPolicy.";
+      goto error;
+    }
+  } else if (prc == NO) {
+    // Distinguish between a missing object (allowed) and a malformed one.
+    JsonStrSpan span = {0};
+    int has = jsget_string_span(&jg, "safetyPolicy", &span);
+    if (has == NO) {
+      if (safety_policy_init(&cat->policy, NULL, NULL, NULL, NULL) != OK) {
+        err_msg = "ConnCatalog: invalid safetyPolicy.";
+        goto error;
+      }
+    } else {
+      err_msg = "ConnCatalog: invalid safetyPolicy.";
+      goto error;
+    }
+  } else {
     err_msg = "ConnCatalog: invalid safetyPolicy.";
     goto error;
   }

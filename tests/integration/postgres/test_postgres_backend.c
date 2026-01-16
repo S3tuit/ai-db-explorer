@@ -18,7 +18,7 @@ static SafetyPolicy policy_default(void) {
     p.read_only = 1;
     p.statement_timeout_ms = 2000;
     p.max_rows = 200;
-    p.max_cell_bytes = 4096;
+    p.max_query_bytes = 4096;
     return p;
 }
 
@@ -61,7 +61,7 @@ static DbBackend *pg_connect_impl(const SafetyPolicy *policy, const char *file, 
 }
 #define PG_CONNECT(policy) pg_connect_impl((policy), __FILE__, __LINE__)
 
-static QueryResult *pg_exec_impl(DbBackend *pg, uint32_t id, const char *sql,
+static QueryResult *pg_exec_impl(DbBackend *pg, const McpId *id, const char *sql,
                                  const char *file, int line) {
     QueryResult *qr = NULL;
     int rc = db_exec(pg, id, sql, &qr);
@@ -69,7 +69,12 @@ static QueryResult *pg_exec_impl(DbBackend *pg, uint32_t id, const char *sql,
     /* Contract: backend returns OK and always produces a QueryResult (OK or ERROR) */
     ASSERT_TRUE_AT(rc == OK, file, line);
     ASSERT_TRUE_AT(qr != NULL, file, line);
-    ASSERT_TRUE_AT(qr->id == id, file, line);
+    ASSERT_TRUE_AT(qr->id.kind == id->kind, file, line);
+    if (qr->id.kind == MCP_ID_INT) {
+        ASSERT_TRUE_AT(qr->id.u32 == id->u32, file, line);
+    } else {
+        ASSERT_STREQ_AT(qr->id.str, id->str, file, line);
+    }
 
     return qr;
 }
@@ -94,7 +99,9 @@ static void test_base_select_join(void) {
     SafetyPolicy p = policy_default();
     DbBackend *pg = PG_CONNECT(&p);
 
-    QueryResult *qr = PG_EXEC(pg, 1,
+    McpId id = {0};
+    mcp_id_init_u32(&id, 1);
+    QueryResult *qr = PG_EXEC(pg, &id,
         "SELECT z.name, r.race_name, z.height_cm "
         "FROM zfighters z "
         "JOIN races r ON r.id = z.race_id "
@@ -130,7 +137,9 @@ static void test_select_null_cell(void) {
     SafetyPolicy p = policy_default();
     DbBackend *pg = PG_CONNECT(&p);
 
-    QueryResult *qr = PG_EXEC(pg, 2, "SELECT NULL::text AS x, 'ok'::text AS y");
+    McpId id = {0};
+    mcp_id_init_u32(&id, 2);
+    QueryResult *qr = PG_EXEC(pg, &id, "SELECT NULL::text AS x, 'ok'::text AS y");
 
     ASSERT_OK_QR(qr);
     ASSERT_TRUE(qr->ncols == 2);
@@ -150,35 +159,37 @@ static void test_max_rows_truncates(void) {
     p.max_rows = 3;
     DbBackend *pg = PG_CONNECT(&p);
 
-    QueryResult *qr = PG_EXEC(pg, 3, "SELECT name FROM zfighters ORDER BY id");
+    McpId id = {0};
+    mcp_id_init_u32(&id, 3);
+    QueryResult *qr = PG_EXEC(pg, &id, "SELECT name FROM zfighters ORDER BY id");
 
     // Rows should be truncated when too many
     ASSERT_OK_QR(qr);
     ASSERT_TRUE(qr->ncols == 1);
     ASSERT_TRUE(qr->nrows == 3);
-    ASSERT_TRUE(qr->truncated == 1);
+    ASSERT_TRUE(qr->result_truncated == 1);
 
     qr_destroy(qr);
     db_destroy(pg);
 }
 
-static void test_max_cell_bytes_caps_cell(void) {
+static void test_max_query_bytes_truncates_result(void) {
     SafetyPolicy p = policy_default();
-    p.max_cell_bytes = 256; // intentionally small
+    p.max_query_bytes = 5; // allow only one 5-byte cell
     DbBackend *pg = PG_CONNECT(&p);
 
-    // A field should be cut when too long.
-    QueryResult *qr = PG_EXEC(pg, 4, "SELECT repeat('a', 1000) AS big");
+    McpId id = {0};
+    mcp_id_init_u32(&id, 4);
+    QueryResult *qr = PG_EXEC(pg, &id,
+        "SELECT '12345' AS v "
+        "UNION ALL "
+        "SELECT '67890' AS v");
 
     ASSERT_OK_QR(qr);
     ASSERT_TRUE(qr->ncols == 1);
     ASSERT_TRUE(qr->nrows == 1);
-
-    const char *cell = qr_get_cell(qr, 0, 0);
-    ASSERT_TRUE(cell != NULL);
-
-    // Must be <= max_cell_bytes-1 since they're C-string
-    ASSERT_TRUE(strlen(cell) <= (size_t)(p.max_cell_bytes - 1));
+    ASSERT_TRUE(qr->result_truncated == 1);
+    ASSERT_STREQ(qr_get_cell(qr, 0, 0), "12345");
 
     qr_destroy(qr);
     db_destroy(pg);
@@ -189,7 +200,9 @@ static void test_delete_fails_read_only(void) {
     p.read_only = 1;
     DbBackend *pg = PG_CONNECT(&p);
 
-    QueryResult *qr = PG_EXEC(pg, 5, "DELETE FROM zfighters WHERE name = 'Goku'");
+    McpId id = {0};
+    mcp_id_init_u32(&id, 5);
+    QueryResult *qr = PG_EXEC(pg, &id, "DELETE FROM zfighters WHERE name = 'Goku'");
 
     ASSERT_ERR_QR(qr);
 
@@ -202,11 +215,15 @@ static void test_attempt_disable_readonly_still_cannot_write(void) {
     p.read_only = 1;
     DbBackend *pg = PG_CONNECT(&p);
 
-    QueryResult *qr1 = PG_EXEC(pg, 6, "SET default_transaction_read_only = off");
+    McpId id1 = {0};
+    mcp_id_init_u32(&id1, 6);
+    QueryResult *qr1 = PG_EXEC(pg, &id1, "SET default_transaction_read_only = off");
     ASSERT_ERR_QR(qr1);
     qr_destroy(qr1);
 
-    QueryResult *qr2 = PG_EXEC(pg, 7, "DELETE FROM zfighters WHERE name = 'Vegeta'");
+    McpId id2 = {0};
+    mcp_id_init_u32(&id2, 7);
+    QueryResult *qr2 = PG_EXEC(pg, &id2, "DELETE FROM zfighters WHERE name = 'Vegeta'");
     ASSERT_ERR_QR(qr2);
 
     qr_destroy(qr2);
@@ -218,8 +235,34 @@ static void test_long_running_query(void) {
     p.statement_timeout_ms = 100;
     DbBackend *pg = PG_CONNECT(&p);
 
-    QueryResult *qr = PG_EXEC(pg, 8, "SELECT pg_sleep(1);");
+    McpId id = {0};
+    mcp_id_init_u32(&id, 8);
+    QueryResult *qr = PG_EXEC(pg, &id, "SELECT pg_sleep(1);");
     ASSERT_ERR_QR(qr);
+
+    qr_destroy(qr);
+    db_destroy(pg);
+}
+
+static void test_conn_options_applied(void) {
+    SafetyPolicy p = policy_default();
+    DbBackend *pg = postgres_backend_create();
+    ASSERT_TRUE(pg != NULL);
+
+    ConnProfile profile = profile_default();
+    if (!profile.db_name) profile.db_name = "postgres";
+    profile.options = "-c search_path=pg_catalog";
+    const char *pwd = env_or_null("PGPASSWORD");
+    int rc = db_connect(pg, &profile, &p, pwd);
+    ASSERT_TRUE(rc == OK);
+
+    McpId id = {0};
+    mcp_id_init_u32(&id, 9);
+    QueryResult *qr = PG_EXEC(pg, &id, "SHOW search_path");
+    ASSERT_OK_QR(qr);
+    ASSERT_TRUE(qr->ncols == 1);
+    ASSERT_TRUE(qr->nrows == 1);
+    ASSERT_STREQ(qr_get_cell(qr, 0, 0), "pg_catalog");
 
     qr_destroy(qr);
     db_destroy(pg);
@@ -229,10 +272,11 @@ void test_postgres_backend(void) {
     test_base_select_join();
     test_select_null_cell();
     test_max_rows_truncates();
-    test_max_cell_bytes_caps_cell();
+    test_max_query_bytes_truncates_result();
     test_delete_fails_read_only();
     test_attempt_disable_readonly_still_cannot_write();
     test_long_running_query();
+    test_conn_options_applied();
 }
 
 int main(void) {

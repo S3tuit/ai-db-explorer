@@ -2,7 +2,8 @@
   "safetyPolicy": {
     "readOnly": "yes",
     "statementTimeoutMs": 5000,
-    "maxRowReturned": 200
+    "maxRowReturned": 200,
+    "maxQueryKiloBytes": 64
   },
 
   "databases": [
@@ -24,4 +25,3 @@
     }
   ]
 }
-

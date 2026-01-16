@@ -40,12 +40,12 @@ def test_run_sql_my_db():
 
         resp = send_tools_call(
             server,
-            3,
+            "req-3",
             "MyPostgres",
             "SELECT height_cm FROM zfighters WHERE name = 'Broly'",
         )
         assert resp["jsonrpc"] == "2.0"
-        assert resp["id"] == 3
+        assert resp["id"] == "req-3"
         assert resp["result"]["columns"][0]["name"] == "height_cm"
         assert resp["result"]["rows"] == [["220"]]
     finally:

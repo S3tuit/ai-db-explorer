@@ -191,22 +191,35 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
     if (!b || !sess || !req) return ERR;
     TLOG("INFO - handling a request of %u bytes", req_len);
 
-    uint32_t id = 0;
+    McpId id = {0};
     JsonGetter jg;
     if (jsget_init(&jg, req, req_len) != OK) return ERR;
-    (void)jsget_u32(&jg, "id", &id);
+    int has_u32 = jsget_u32(&jg, "id", &id.u32);
+    if (has_u32 == YES) {
+        id.kind = MCP_ID_INT;
+    } else {
+        char *id_str = NULL;
+        int s_rc = jsget_string_decode_alloc(&jg, "id", &id_str);
+        if (s_rc == YES) {
+            id.kind = MCP_ID_STR;
+            id.str = id_str;
+        } else {
+            mcp_id_clean(&id);
+            return ERR;
+        }
+    }
     
     QueryResult *q_res = NULL;
     int vrc = jsget_simple_rpc_validation(&jg);
     if (vrc != YES) {
-        q_res = qr_create_err(id, "Invalid JSON-RPC request.");
+        q_res = qr_create_err(&id, "Invalid JSON-RPC request.");
     
     // run query
     } else {
         JsonStrSpan method_sp = {0};
         if (jsget_string_span(&jg, "method", &method_sp) != YES ||
                 !STREQ(method_sp.ptr, method_sp.len, "tools/call")) {
-            q_res = qr_create_err(id, "Unsupported method.");
+            q_res = qr_create_err(&id, "Unsupported method.");
             goto return_res;
         }
 
@@ -214,7 +227,7 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
         if (jsget_string_span(&jg, "params.name", &name_sp) != YES ||
                 name_sp.len != strlen("run_sql_query") ||
                 memcmp(name_sp.ptr, "run_sql_query", name_sp.len) != 0) {
-            q_res = qr_create_err(id, "Unknown tool.");
+            q_res = qr_create_err(&id, "Unknown tool.");
             goto return_res;
         }
 
@@ -226,7 +239,7 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
                     &query) != YES) {
             free(conn_name);
             free(query);
-            q_res = qr_create_err(id, "Invalid tool arguments.");
+            q_res = qr_create_err(&id, "Invalid tool arguments.");
             goto return_res;
         }
         
@@ -236,15 +249,15 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
             TLOG("ERROR - unable to connect to %s", conn_name);
             free(conn_name);
             free(query);
-            q_res = qr_create_err(id, "Unable to connect to the requested database.");
+            q_res = qr_create_err(&id, "Unable to connect to the requested database.");
             goto return_res;
         }
 
-        if (db_exec(db, id, query, &q_res) != OK) {
+        if (db_exec(db, &id, query, &q_res) != OK) {
             TLOG("ERROR - error while communicating with %s", conn_name);
             free(conn_name);
             free(query);
-            q_res = qr_create_err(id, "Something went wrong while communicating with the database.");
+            q_res = qr_create_err(&id, "Something went wrong while communicating with the database.");
             goto return_res;
         }
         connm_mark_used(b->cm, conn_name);
@@ -259,10 +272,12 @@ return_res:
     // catastrophic
     if (!q_res) {
         *out_res = NULL;
+        mcp_id_clean(&id);
         return ERR;
     }
 
     *out_res = q_res;
+    mcp_id_clean(&id);
     return OK;
 }
 
@@ -388,7 +403,9 @@ int broker_run(Broker *b) {
                     char buf[128];
                     snprintf(buf, sizeof(buf), "Error. Broker ignores message longer than %d bytes. Please, respect the limit", MAX_REQ_LEN);
                     TLOG("ERROR - reject request: len=%zu exceeds MAX_REQ_LEN", req.len);
-                    q_res = qr_create_err(0, buf);
+                    McpId id = {0};
+                    mcp_id_init_u32(&id, 0);
+                    q_res = qr_create_err(&id, buf);
                     goto send_q_res;
                 }
                 

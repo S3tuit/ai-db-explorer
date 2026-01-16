@@ -31,7 +31,7 @@ typedef struct DbBackendVTable {
     // as id. The QueryResult may represent an error or a good response. This
     // returns OK if it was able to allocate a QueryResult, ERR if it wasn't
     // able to allocate it.
-    int (*exec) (DbBackend *db, uint32_t request_id, const char *sql,
+    int (*exec) (DbBackend *db, const McpId *request_id, const char *sql,
                     QueryResult **out_qr);
 } DbBackendVTable;
 
@@ -58,7 +58,7 @@ static inline void db_destroy(DbBackend *db) {
     if (!db || !db->vt || !db->vt->destroy) return;
     db->vt->destroy(db);
 }
-static inline int db_exec(DbBackend *db, uint32_t request_id, const char *sql,
+static inline int db_exec(DbBackend *db, const McpId *request_id, const char *sql,
                           QueryResult **out_qr) {
     if (!db || !db->vt || !db->vt->exec) return ERR;
     return db->vt->exec(db, request_id, sql, out_qr);

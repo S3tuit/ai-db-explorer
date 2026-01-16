@@ -6,13 +6,21 @@
 #include "test.h"
 #include "query_result.h"
 
+static McpId id_u32(uint32_t v) {
+    McpId id = {0};
+    mcp_id_init_u32(&id, v);
+    return id;
+}
+
 static void test_create_and_basic_set_get(void) {
-    QueryResult *qr = qr_create_ok(7, 3, 2, 1);
+    McpId id = id_u32(7);
+    QueryResult *qr = qr_create_ok(&id, 3, 2, 1, 0);
     ASSERT_TRUE(qr != NULL);
     ASSERT_TRUE(qr->ncols == 3);
     ASSERT_TRUE(qr->nrows == 2);
-    ASSERT_TRUE(qr->id == 7);
-    ASSERT_TRUE(qr->truncated == 1);
+    ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
+    ASSERT_TRUE(qr->id.u32 == 7);
+    ASSERT_TRUE(qr->result_truncated == 1);
 
     ASSERT_TRUE(qr_set_col(qr, 0, "id", "int4") == OK);
     ASSERT_TRUE(qr_set_col(qr, 1, "name", "text") == OK);
@@ -28,15 +36,15 @@ static void test_create_and_basic_set_get(void) {
     ASSERT_STREQ(c2->type, "unknown");
 
     // set some cells
-    ASSERT_TRUE(qr_set_cell(qr, 0, 0, "1") == OK);
-    ASSERT_TRUE(qr_set_cell(qr, 0, 1, "alice") == OK);
-    ASSERT_TRUE(qr_set_cell(qr, 0, 2, "10.50") == OK);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 0, "1") == YES);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 1, "alice") == YES);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 2, "10.50") == YES);
 
     ASSERT_STREQ(qr_get_cell(qr, 0, 0), "1");
     ASSERT_STREQ(qr_get_cell(qr, 0, 1), "alice");
     
     // overwrite a cell
-    ASSERT_TRUE(qr_set_cell(qr, 0, 2, "99") == OK);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 2, "99") == YES);
     ASSERT_STREQ(qr_get_cell(qr, 0, 2), "99");
 
     // default cells should be NULL (SQL NULL)
@@ -46,26 +54,23 @@ static void test_create_and_basic_set_get(void) {
     qr_destroy(qr);
 }
 
-static void test_set_cell_capped_respects_cap(void) {
-    QueryResult *qr = qr_create_ok(1, 2, 1, 0);
+static void test_max_query_bytes_cap(void) {
+    McpId id = id_u32(1);
+    QueryResult *qr = qr_create_ok(&id, 2, 2, 0, 5);
     ASSERT_TRUE(qr != NULL);
 
-    const char *str = "this should overflow";
-
-    ASSERT_TRUE(qr_set_cell_capped(qr, 0, 0, str, 10) == OK);
-    ASSERT_STREQ(qr_get_cell(qr, 0, 0), "this s...");
-
-    // cap lower than 4 -> no ellipsis, truncated to cap - 1
-    ASSERT_TRUE(qr_set_cell_capped(qr, 0, 0, str, 3) == OK);
-    ASSERT_STREQ(qr_get_cell(qr, 0, 0), "th");
+    ASSERT_TRUE(qr_set_cell(qr, 0, 0, "12345") == YES);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 1, NULL) == YES);
+    ASSERT_TRUE(qr_set_cell(qr, 1, 0, "67890") == NO);
 
     qr_destroy(qr);
 }
 
 static void test_deep_copy_outlives_input_buffers(void) {
-    QueryResult *qr = qr_create_ok(1, 2, 1, 0);
+    McpId id = id_u32(1);
+    QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
     ASSERT_TRUE(qr != NULL);
-    ASSERT_TRUE(qr->truncated == 0);
+    ASSERT_TRUE(qr->result_truncated == 0);
 
     char name_buf[32];
     char type_buf[32];
@@ -77,7 +82,7 @@ static void test_deep_copy_outlives_input_buffers(void) {
 
     ASSERT_TRUE(qr_set_col(qr, 0, name_buf, type_buf) == OK);
     ASSERT_TRUE(qr_set_col(qr, 1, "descrizione", "text") == OK);
-    ASSERT_TRUE(qr_set_cell(qr, 0, 0, cell_buf) == OK);
+    ASSERT_TRUE(qr_set_cell(qr, 0, 0, cell_buf) == YES);
 
     // mutate the original buffers after setting
     strcpy(name_buf, "XXXXXX");
@@ -93,7 +98,8 @@ static void test_deep_copy_outlives_input_buffers(void) {
 }
 
 static void test_bounds_and_bad_inputs(void) {
-    QueryResult *qr = qr_create_ok(1, 2, 2, 0);
+    McpId id = id_u32(1);
+    QueryResult *qr = qr_create_ok(&id, 2, 2, 0, 0);
     ASSERT_TRUE(qr != NULL);
     ASSERT_TRUE(qr->status == QR_OK);
 
@@ -121,10 +127,12 @@ static void test_bounds_and_bad_inputs(void) {
 }
 
 static void test_create_error(void) {
-    QueryResult *qr = qr_create_err(3, "An error.");
+    McpId id = id_u32(3);
+    QueryResult *qr = qr_create_err(&id, "An error.");
 
     ASSERT_TRUE(qr != NULL);
-    ASSERT_TRUE(qr->id == 3);
+    ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
+    ASSERT_TRUE(qr->id.u32 == 3);
     ASSERT_TRUE(qr->status == QR_ERROR);
     ASSERT_STREQ(qr->err_msg, "An error.");
 
@@ -132,9 +140,11 @@ static void test_create_error(void) {
 }
 
 static void test_create_msg(void) {
-    QueryResult *qr = qr_create_msg(9, "Hello");
+    McpId id = id_u32(9);
+    QueryResult *qr = qr_create_msg(&id, "Hello");
     ASSERT_TRUE(qr != NULL);
-    ASSERT_TRUE(qr->id == 9);
+    ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
+    ASSERT_TRUE(qr->id.u32 == 9);
     ASSERT_TRUE(qr->status == QR_OK);
     ASSERT_TRUE(qr->ncols == 1);
     ASSERT_TRUE(qr->nrows == 1);
@@ -143,9 +153,11 @@ static void test_create_msg(void) {
     ASSERT_STREQ(qr_get_cell(qr, 0, 0), "Hello");
     qr_destroy(qr);
 
-    QueryResult *qr_null = qr_create_msg(10, NULL);
+    McpId id2 = id_u32(10);
+    QueryResult *qr_null = qr_create_msg(&id2, NULL);
     ASSERT_TRUE(qr_null != NULL);
-    ASSERT_TRUE(qr_null->id == 10);
+    ASSERT_TRUE(qr_null->id.kind == MCP_ID_INT);
+    ASSERT_TRUE(qr_null->id.u32 == 10);
     ASSERT_TRUE(qr_null->status == QR_OK);
     ASSERT_TRUE(qr_null->ncols == 1);
     ASSERT_TRUE(qr_null->nrows == 1);
@@ -155,7 +167,7 @@ static void test_create_msg(void) {
 
 int main(void) {
     test_create_and_basic_set_get();
-    test_set_cell_capped_respects_cap();
+    test_max_query_bytes_cap();
     test_deep_copy_outlives_input_buffers();
     test_bounds_and_bad_inputs();
     test_create_error();

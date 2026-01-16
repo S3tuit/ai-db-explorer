@@ -350,9 +350,10 @@ static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
     }
     if (json_arr_end(sb) != OK) return ERR;
 
-    // rowcount + truncated
+    // rowcount + resultTruncated
     if (json_kv_u64(sb, "rowcount", qr->nrows) != OK) return ERR;
-    if (json_kv_bool(sb, "truncated", qr->truncated ? 1 : 0) != OK) return ERR;
+    if (json_kv_bool(sb, "resultTruncated",
+                     qr->result_truncated ? 1 : 0) != OK) return ERR;
     if (json_obj_end(sb) != OK) return ERR;
 
     return OK;
@@ -379,7 +380,11 @@ int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len) {
     // begin JSON-RPC envelope
     if (json_obj_begin(&sb) != OK) goto err;
     if (json_kv_str(&sb, "jsonrpc", "2.0") != OK) goto err;
-    if (json_kv_u64(&sb, "id", qr->id) != OK) goto err;
+    if (qr->id.kind == MCP_ID_STR) {
+        if (json_kv_str(&sb, "id", qr->id.str ? qr->id.str : "") != OK) goto err;
+    } else {
+        if (json_kv_u64(&sb, "id", qr->id.u32) != OK) goto err;
+    }
 
     if (qr->status == QR_ERROR) {
         if (json_maybe_comma(&sb) != OK) goto err;
@@ -977,11 +982,22 @@ int jsget_simple_rpc_validation(JsonGetter *jg) {
 
     JsonStrSpan jsonrpc = {0};
     JsonStrSpan method = {0};
-    uint32_t id = 0;
 
     if (jsget_string_span(jg, "jsonrpc", &jsonrpc) != YES) return NO;
-    if (jsget_u32(jg, "id", &id) != YES) return NO;
     if (jsget_string_span(jg, "method", &method) != YES) return NO;
+
+    int id_i = find_value_tok_path(jg, "id");
+    if (id_i < 0) return NO;
+    const jsmntok_t *tid = &jg->toks[id_i];
+    if (tid->type == JSMN_STRING) {
+        /* ok */
+    } else if (tid->type == JSMN_PRIMITIVE) {
+        if (tok_is_null(jg->json, tid)) return NO;
+        uint32_t id = 0;
+        if (tok_parse_u32(jg->json, tid, &id) != OK) return NO;
+    } else {
+        return NO;
+    }
 
     if (jsonrpc.len != 3 || memcmp(jsonrpc.ptr, "2.0", 3) != 0) return NO;
     if (method.len == 0) return NO;
