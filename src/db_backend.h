@@ -5,6 +5,7 @@
 #include "query_result.h"
 #include "conn_catalog.h"
 #include "utils.h"
+#include "query_ir.h"
 
 /* DB-agnostic interface that defines all the functions a db backend must have
  * in order to be used. */
@@ -33,6 +34,14 @@ typedef struct DbBackendVTable {
     // able to allocate it.
     int (*exec) (DbBackend *db, const McpId *request_id, const char *sql,
                     QueryResult **out_qr);
+
+    // TODO: check these two functions
+    // Creates a QirQuery starting from 'sql'
+    QirQuery *(*make_query_ir)(DbBackend *db, const char *sql);
+
+    // Returns the latest error detected by db. The returned string is owned by
+    // 'db'
+    const char *(*last_error)(DbBackend *db);
 } DbBackendVTable;
 
 struct DbBackend {

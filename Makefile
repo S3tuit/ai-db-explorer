@@ -2,12 +2,14 @@ CC      := gcc
 PKG_CONFIG ?= pkg-config
 LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
 LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
+LIBPG_QUERY_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpg_query 2>/dev/null)
+LIBPG_QUERY_LIBS   := $(shell $(PKG_CONFIG) --libs   libpg_query 2>/dev/null)
 
 # Build flags
 CFLAGS  := -Wall -Wextra -Werror -std=c11 -g -O2
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
-INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS)
-LDFLAGS := $(LIBPQ_LIBS)
+INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBPG_QUERY_CFLAGS)
+LDFLAGS := $(LIBPQ_LIBS) $(LIBPG_QUERY_LIBS)
 
 # Test flags
 EXTRA_TCFLAGS ?=

@@ -203,21 +203,27 @@ Implementation rule:
 * Apply `statement_timeout_ms` (and equivalents).
 * Cap result rows to `max_row_per_query` (broker-side hard cap).
 * **Ban `SELECT *` entirely.** Users/agents must use `describe_table` and explicit columns.
+* Every column is qualified (alias.column) everywhere. Every range item must have an alias; references must use that alias.
+* Ban any non-safe function calls. Add a way for the user to define a function as safe.
+* Each select item must be a simple column reference: `alias.col`
+* `AS alias` are mandatory.
+* We treat views as tables, so it's up to the user to restrict a specific column of a view.
+* Sensitive columns can appear only in the SELECT or WHERE.
 
 ### 7.2 Sensitive Mode: strict subset
 
 Sensitive Mode applies only when:
 
 * vault is open AND
-* query references any sensitive column identifier
+* query touches any sensitive column. *A touched column is a column that appears anywhere inside the sql text.*
 
-In Sensitive Mode, query MUST be a single SELECT statement with only:
+In Sensitive Mode, sensitive columns can appear only in this mode:
 
-* `SELECT ... FROM ... WHERE ... LIMIT ...`
+* `SELECT ... FROM ... INNER JOIN ... WHERE ... LIMIT ...`
 
 Disallowed clauses in Sensitive Mode:
 
-* JOIN / ON
+* All JOIN except for INNER / ON can only contain = and AND
 * GROUP BY / HAVING
 * ORDER BY
 * DISTINCT
@@ -225,13 +231,10 @@ Disallowed clauses in Sensitive Mode:
 * UNION/INTERSECT/EXCEPT
 * subqueries (anywhere)
 * OFFSET
-* any function calls anywhere in SELECT list
-* any casts or expressions in SELECT list
+* any casts or expressions in SELECT list that touches a sensitive column
 
 **SELECT list rules (Sensitive Mode):**
 
-* each select item must be a simple column reference: `col`, `table.col`, or `schema.table.col`
-* optional `AS alias` allowed
 * if select item is sensitive → broker pseudonymizes it before returning results
 * if select item is not sensitive → return as-is
 
@@ -252,12 +255,12 @@ Disallowed clauses in Sensitive Mode:
 **LIMIT rules (Sensitive Mode):**
 
 * If missing, broker injects `LIMIT 200`.
-* If present and > 200 → reject (or clamp; v1 recommendation: reject to keep semantics obvious).
+* If present and > 200 → clamp.
 
 **Small result rule (Sensitive Mode):**
 
 * Query may return `< 5` rows **only if** WHERE contains at least one sensitive predicate.
-* Otherwise reject if result size would be `< 5` (implementation: you can enforce by post-checking row count and returning an error instead of rows).
+* Otherwise reject if result size would be `< 5`.
 
 Rationale: prevent “unique row” oracle on non-sensitive filters.
 

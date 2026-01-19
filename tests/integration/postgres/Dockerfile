@@ -6,6 +6,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
+        libpg-query-dev \
         pkg-config \
         ca-certificates \
         python3 \
