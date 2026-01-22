@@ -35,9 +35,10 @@ typedef struct DbBackendVTable {
     int (*exec) (DbBackend *db, const McpId *request_id, const char *sql,
                     QueryResult **out_qr);
 
-    // TODO: check these two functions
-    // Creates a QirQuery starting from 'sql'
-    QirQuery *(*make_query_ir)(DbBackend *db, const char *sql);
+    // Creates a QirQueryHandle starting from 'sql'. The backend owns and
+    // populates the handle, and the caller must destroy it via
+    // qir_handle_destroy().
+    int (*make_query_ir)(DbBackend *db, const char *sql, QirQueryHandle *out);
 
     // Returns the latest error detected by db. The returned string is owned by
     // 'db'

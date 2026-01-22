@@ -4,14 +4,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "pl_arena.h"
 
-// DB-agnostic, policy-oriented IR for a restricted SQL subset.
+// DB-agnostic IR for a restricted SQL subset.
 // Built by backend-specific parsers (e.g., Postgres via libpg_query AST).
 //
 // This represent enough structure to enforce acceptance policy + Sensitive
 //    Mode rules.
 // This design intentionally leavers some constructs as *_UNSUPPORTED to
 //    account for db-specific constructs.
+// This represent the intention of a query.
 
 // ----------------------------
 // Status / diagnostics
@@ -100,7 +102,7 @@ typedef struct QirLiteral {
     bool b;
     int64_t i64;
     double f64;
-    const char *s; // string literal (already unescaped by backend if desired)
+    const char *s; // string literal (already unescaped by backend)
   } v;
 } QirLiteral;
 
@@ -243,6 +245,12 @@ struct QirQuery {
   int32_t limit_value;
 };
 
+// Handle that owns the arena backing a QueryIR.
+typedef struct QirQueryHandle {
+  PlArena arena;   // owns all allocations reachable from q
+  QirQuery *q;     // pointer inside arena
+} QirQueryHandle;
+
 // ----------------------------
 // Touch extraction results
 // ----------------------------
@@ -257,6 +265,8 @@ typedef struct QirTouch {
   QirScope scope;         // where the qualifier.column is being used 
   QirTouchKind kind;      // what the qualifier is
   QirColRef col;          // qualifier.column as written
+
+  struct QirTouch *next;  // linked list while building (not for validators)
 } QirTouch;
 
 // A minimal touch report. Extractor should include touches from:
@@ -265,6 +275,7 @@ typedef struct QirTouch {
 // - join ON expressions (if joins allowed globally)
 // - recursively into nested queries (scope=NESTED)
 typedef struct QirTouchReport {
+  PlArena arena;          // owns touch nodes and arrays
   QirTouch **touches;
   uint32_t ntouches;
 
@@ -277,16 +288,18 @@ typedef struct QirTouchReport {
 // Memory / ownership
 // ----------------------------
 //
-// Backends should allocate QirQuery/QirExpr/etc. Strings referenced by QirIdent
-// are owned by the query and freed by qir_free_query().
-//
-// Validators should treat all pointers as read-only.
+// Backends allocate QirQuery/QirExpr/etc. inside the arena owned by
+// QirQueryHandle. Validators should treat all pointers as read-only.
 
-// Free entire query tree.
-void qir_free_query(QirQuery *q);
+// Initializes a QirQueryHandle and allocates a blank QirQuery inside it.
+// Returns OK on success, ERR on bad input or allocation failure.
+int qir_handle_init(QirQueryHandle *h);
 
-// Free a touch report allocated by qir_extract_touches().
-void qir_free_touch_report(QirTouchReport *tr);
+// Frees the arena owned by the handle and resets it.
+void qir_handle_clean(QirQueryHandle *h);
+
+// Frees a touch report allocated by qir_extract_touches().
+void qir_touch_report_destroy(QirTouchReport *tr);
 
 // Extract touches from a QueryIR.
 // - alias resolution is based on q->from_items aliases + joins rhs aliases.
