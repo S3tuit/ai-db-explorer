@@ -23,6 +23,18 @@ typedef struct {
     uint32_t block_sz;    // size of the next block to allocate
 } PlArena;
 
+/* A small pointer vector used to collect elements before flattening them
+ * into a PlArena-owned array.
+ *
+ * Ownership: PtrVec owns its heap buffer; flattened arrays are arena-owned.
+ * Side effects: ptrvec_push may allocate or reallocate the heap buffer.
+ * Error semantics: functions return OK/ERR, or NULL on allocation failure. */
+typedef struct {
+    void **items;
+    uint32_t len;
+    uint32_t cap;
+} PtrVec;
+
 /* Allocates and returns a PlArena. The first block is 1 KiB when size_p
  * is NULL, otherwise it uses *size_p. Each subsequent block doubles in size.
  * If cap_p is provided, it is used as the total hard cap. Returns NULL if
@@ -52,5 +64,23 @@ void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len);
 
 /* Returns the number of bytes used by the data inside 'ar'. */
 uint32_t pl_arena_get_used(PlArena *ar);
+
+/* Appends a pointer to a temporary vector.
+ * Ownership: vector owns the heap buffer for items.
+ * Side effects: may realloc on heap.
+ * Returns OK/ERR. */
+int ptrvec_push(PtrVec *v, void *ptr);
+
+/* Copies a temporary vector into the arena and returns the new array.
+ * Ownership: returned array is owned by the arena.
+ * Side effects: allocates arena memory.
+ * Returns NULL on error or when v->len == 0. */
+void **ptrvec_flatten(PtrVec *v, PlArena *a);
+
+/* Frees the heap storage owned by the vector but keeps the struct.
+ * Ownership: caller retains the vector struct for reuse.
+ * Side effects: frees heap memory.
+ * Returns void. */
+void ptrvec_clean(PtrVec *v);
 
 #endif

@@ -235,13 +235,10 @@ static int parse_databases(const JsonGetter *jg, ConnProfile **out_profiles,
 
   size_t idx = 0;
   for (;;) {
-    JsonStrSpan obj = {0};
-    rc = jsget_array_objects_next(jg, &it, &obj);
+    JsonGetter entry = {0};
+    rc = jsget_array_objects_next(jg, &it, &entry);
     if (rc == NO) break;
     if (rc != YES) goto error;
-
-    JsonGetter entry = {0};
-    if (jsget_init(&entry, obj.ptr, obj.len) != OK) goto error;
 
     if (parse_db_entry(&entry, &profiles[idx]) != OK) goto error;
 

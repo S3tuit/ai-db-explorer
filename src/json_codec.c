@@ -3,6 +3,7 @@
 #include "string_op.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -414,6 +415,7 @@ err:
 }
 
 /* --------------------------------- decode new ------------------------------- */
+// JsonArrIter and JsonGetter are defined in json_codec.h.
 
 /*
  * Decodes JSON string content (WITHOUT surrounding quotes) into a newly
@@ -688,7 +690,7 @@ static int find_object_value_tok(const JsonGetter *jg, int obj_idx,
 static int find_value_tok_path(const JsonGetter *jg, const char *path) {
     if (!jg || !path) return -2;
 
-    int obj_idx = 0; // root object
+    int obj_idx = jg->root;
     const char *seg = path;
 
     while (*seg) {
@@ -738,10 +740,6 @@ static int tok_parse_u32(const char *json, const jsmntok_t *t, uint32_t *out_u32
 }
 
 /*
- * Parses an unsigned 64-bit integer from a JSMN_PRIMITIVE token.
- * Return OK on success, ERR on error/bad input.
- */
-/*
  * Parses a boolean from a JSMN_PRIMITIVE token ("true" or "false").
  * Return OK on success, ERR on error/bad input.
  */
@@ -758,25 +756,89 @@ static int tok_parse_bool01(const char *json, const jsmntok_t *t, int *out01) {
     return ERR;
 }
 
-#define MAX_ACCEPTED_TOKES 128
+/*
+ * Parses a double from a JSMN_PRIMITIVE token.
+ * Return OK on success, ERR on error/bad input.
+ */
+static int tok_parse_double(const char *json, const jsmntok_t *t, double *out_double) {
+    if (!json || !t || !out_double) return ERR;
+    if (t->type != JSMN_PRIMITIVE) return ERR;
+
+    const char *p = json + t->start;
+    size_t n = (size_t)(t->end - t->start);
+    if (n == 0) return ERR;
+
+    // Copy into a NUL-terminated buffer for strtod.
+    char *tmp = (char *)xmalloc(n + 1);
+    if (!tmp) return ERR;
+    memcpy(tmp, p, n);
+    tmp[n] = '\0';
+
+    errno = 0;
+    char *endp = NULL;
+    double v = strtod(tmp, &endp);
+    if (errno != 0 || endp != tmp + n) {
+        free(tmp);
+        return ERR;
+    }
+
+    *out_double = v;
+    free(tmp);
+    return OK;
+}
+
+/*
+ * Parses a signed 64-bit integer from a JSMN_PRIMITIVE token.
+ * Return OK on success, ERR on error/bad input.
+ */
+static int tok_parse_long(const char *json, const jsmntok_t *t, int64_t *out_long) {
+    if (!json || !t || !out_long) return ERR;
+    if (t->type != JSMN_PRIMITIVE) return ERR;
+
+    const char *p = json + t->start;
+    size_t n = (size_t)(t->end - t->start);
+    if (n == 0) return ERR;
+
+    // Copy into a NUL-terminated buffer for strtoll.
+    char *tmp = (char *)xmalloc(n + 1);
+    if (!tmp) return ERR;
+    memcpy(tmp, p, n);
+    tmp[n] = '\0';
+
+    errno = 0;
+    char *endp = NULL;
+    long long v = strtoll(tmp, &endp, 10);
+    if (errno != 0 || endp != tmp + n) {
+        free(tmp);
+        return ERR;
+    }
+
+    *out_long = (int64_t)v;
+    free(tmp);
+    return OK;
+}
+
 int jsget_init(JsonGetter *jg, const char *json, size_t json_len) {
     if (!jg || !json || json_len == 0) return ERR;
 
     memset(jg, 0, sizeof(*jg));
     jg->json = json;
     jg->json_len = json_len;
+    jg->toks = jg->tok_storage;
 
     jsmn_parser p;
     jsmn_init(&p);
 
-    // Tokenize the entire JSON text. Token count is capped to 128.
-    int ntok = jsmn_parse(&p, json, (int)json_len, jg->toks, (unsigned)ARRLEN(jg->toks));
-    if (ntok <= 0 || ntok > MAX_ACCEPTED_TOKES) return ERR;
+    // Tokenize the entire JSON text. Token count is capped to 1024.
+    int ntok = jsmn_parse(&p, json, (int)json_len,
+            jg->tok_storage, (unsigned)ARRLEN(jg->tok_storage));
+    if (ntok <= 0 || ntok > JSON_GETTER_MAX_TOKENS) return ERR;
 
     // Root must be a JSON object for our broker protocol.
-    if (jg->toks[0].type != JSMN_OBJECT) return ERR;
+    if (jg->tok_storage[0].type != JSMN_OBJECT) return ERR;
 
     jg->ntok = ntok;
+    jg->root = 0;
     return OK;
 }
 
@@ -812,6 +874,54 @@ int jsget_bool01(const JsonGetter *jg, const char *key, int *out01) {
     return YES;
 }
 
+int jsget_f64(const JsonGetter *jg, const char *key, double *out_double) {
+    if (!jg || !key || !out_double) return ERR;
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+
+    // treat explicit null as "missing"
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+
+    if (tok_parse_double(jg->json, tv, out_double) != OK) return ERR;
+    return YES;
+}
+
+int jsget_i64(const JsonGetter *jg, const char *key, int64_t *out_long) {
+    if (!jg || !key || !out_long) return ERR;
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+
+    // treat explicit null as "missing"
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+
+    if (tok_parse_long(jg->json, tv, out_long) != OK) return ERR;
+    return YES;
+}
+
+/*
+ * Checks whether a key path exists and is not JSON null.
+ * Return yes/no/err.
+ */
+int jsget_exists_nonnull(const JsonGetter *jg, const char *key) {
+    if (!jg || !key) return ERR;
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+    return YES;
+}
+
 int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out) {
     if (!jg || !key || !out) return ERR;
 
@@ -839,6 +949,28 @@ int jsget_string_decode_alloc(const JsonGetter *jg, const char *key, char **out_
     if (rc != YES) return rc;
 
     if (json_string_unescape_alloc(sp.ptr, sp.len, out_nul) != OK) return ERR;
+    return YES;
+}
+
+int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out) {
+    if (!jg || !key || !out) return ERR;
+
+    int val_i = find_value_tok_path(jg, key);
+    if (val_i == -1) return NO;
+    if (val_i == -2) return ERR;
+
+    const jsmntok_t *tv = &jg->toks[val_i];
+
+    // treat explicit null as "missing"
+    if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
+    if (tv->type != JSMN_OBJECT) return ERR;
+
+    memset(out, 0, sizeof(*out));
+    out->json = jg->json;
+    out->json_len = jg->json_len;
+    out->toks = jg->toks;
+    out->ntok = jg->ntok;
+    out->root = val_i;
     return YES;
 }
 
@@ -908,7 +1040,7 @@ int jsget_array_objects_begin(const JsonGetter *jg, const char *key, JsonArrIter
     return YES;
 }
 
-int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan *out_obj) {
+int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonGetter *out_obj) {
     if (!jg || !it || !out_obj) return ERR;
     if (it->idx >= it->count) return NO;
 
@@ -918,8 +1050,12 @@ int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan 
     const jsmntok_t *te = &jg->toks[i];
     if (te->type != JSMN_OBJECT) return ERR;
 
-    out_obj->ptr = jg->json + te->start;
-    out_obj->len = (size_t)(te->end - te->start);
+    memset(out_obj, 0, sizeof(*out_obj));
+    out_obj->json = jg->json;
+    out_obj->json_len = jg->json_len;
+    out_obj->toks = jg->toks;
+    out_obj->ntok = jg->ntok;
+    out_obj->root = i;
 
     int next = skip_token(jg->toks, jg->ntok, i);
     if (next < 0) return ERR;
@@ -933,7 +1069,7 @@ int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
                                 const char *const *allowed, size_t n_allowed) {
     if (!jg || !allowed) return ERR;
 
-    int obj_idx = 0;
+    int obj_idx = jg->root;
     if (obj_key) {
         obj_idx = find_value_tok_path(jg, obj_key);
         if (obj_idx == -1) return NO;
@@ -971,7 +1107,7 @@ int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
 int jsget_simple_rpc_validation(JsonGetter *jg) {
     if (!jg || !jg->json) return ERR;
 
-    const jsmntok_t *root = &jg->toks[0];
+    const jsmntok_t *root = &jg->toks[jg->root];
     if (root->type != JSMN_OBJECT) return NO;
     if ((size_t)root->end > jg->json_len) return ERR;
     
