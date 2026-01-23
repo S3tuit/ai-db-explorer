@@ -67,8 +67,8 @@ All assumptions must be validated or enforced by code.
 Every non-trivial function MUST be preceded by a comment that explains:
 
 - **What** the function does (high level)
-- **Ownership rules** (who allocates/frees memory)
-- **Side effects** (I/O, global state, security-relevant behavior)
+- **Ownership rules** (who allocates/frees memory, can be ignored if does not allocate anything)
+- **Side effects** (I/O, global state, security-relevant behavior, can be ignored if no side effects)
 - **Error semantics** (OK / ERR / YES / NO and what they mean)
 
 Inside function bodies:

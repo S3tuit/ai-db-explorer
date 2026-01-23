@@ -57,6 +57,12 @@ typedef struct QirRelRef {
   QirIdent name;   // table/view name
 } QirRelRef;
 
+// schema.type (or just type)
+typedef struct QirTypeRef {
+  QirIdent schema; // optional; name=="" if absent
+  QirIdent name;   // type name (may include dots if backend couldn't split)
+} QirTypeRef;
+
 // ----------------------------
 // Expressions
 // ----------------------------
@@ -69,6 +75,7 @@ typedef enum QirExprKind {
   QIR_EXPR_PARAM,          // $n
   QIR_EXPR_LITERAL,        // backend may produce; validator may reject depending on policy
   QIR_EXPR_FUNCALL,        // f(args...)
+  QIR_EXPR_CAST,           // expr::type
                            
   QIR_EXPR_EQ,             // lhs = rhs
   QIR_EXPR_NE,             // lhs != rhs
@@ -134,6 +141,10 @@ struct QirExpr {
     int param_index;       // QIR_EXPR_PARAM (n in $n), >=1
     QirLiteral lit;        // QIR_EXPR_LITERAL
     QirFuncCall funcall;   // QIR_EXPR_FUNCALL
+    struct {
+      QirExpr *expr;
+      QirTypeRef type;
+    } cast;                // QIR_EXPR_CAST
     QirBinExpr bin;        // EQ, AND
     QirInExpr in_;         // IN
     QirQuery *subquery;    // QIR_EXPR_SUBQUERY
@@ -265,8 +276,6 @@ typedef struct QirTouch {
   QirScope scope;         // where the qualifier.column is being used 
   QirTouchKind kind;      // what the qualifier is
   QirColRef col;          // qualifier.column as written
-
-  struct QirTouch *next;  // linked list while building (not for validators)
 } QirTouch;
 
 // A minimal touch report. Extractor should include touches from:
@@ -296,7 +305,7 @@ typedef struct QirTouchReport {
 int qir_handle_init(QirQueryHandle *h);
 
 // Frees the arena owned by the handle and resets it.
-void qir_handle_clean(QirQueryHandle *h);
+void qir_handle_destroy(QirQueryHandle *h);
 
 // Frees a touch report allocated by qir_extract_touches().
 void qir_touch_report_destroy(QirTouchReport *tr);

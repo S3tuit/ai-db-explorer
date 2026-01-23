@@ -375,6 +375,25 @@ static void test_jsget_paths(void) {
     free(s2);
 }
 
+static void test_jsget_object_view(void) {
+    const char *json = "{\"a\":{\"b\":{\"c\":\"z\",\"num\":77},\"n\":1},\"x\":2}";
+    JsonGetter jg;
+    JsonGetter sub;
+    JsonStrSpan sp = {0};
+    uint32_t num = 0;
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_object(&jg, "a.b", &sub) == YES);
+    ASSERT_TRUE(jsget_string_span(&sub, "c", &sp) == YES);
+    ASSERT_TRUE(sp.len == 1);
+    ASSERT_TRUE(sp.ptr[0] == 'z');
+    ASSERT_TRUE(jsget_u32(&sub, "num", &num) == YES);
+    ASSERT_TRUE(num == 77);
+
+    ASSERT_TRUE(jsget_object(&jg, "a.n", &sub) == ERR);
+    ASSERT_TRUE(jsget_object(&jg, "a.missing", &sub) == NO);
+}
+
 static void test_jsget_null_and_overflow(void) {
     const char *json = "{\"a\":null,\"b\":4294967296}";
     JsonGetter jg;
@@ -396,6 +415,34 @@ static void test_jsget_u32_and_bool(void) {
     ASSERT_TRUE(id == 7);
     ASSERT_TRUE(jsget_bool01(&jg, "ok", &ok) == YES);
     ASSERT_TRUE(ok == 1);
+}
+
+static void test_jsget_f64(void) {
+    const char *json = "{\"pi\":3.1415,\"i\":2,\"bad\":\"x\"}";
+    JsonGetter jg;
+    double v = 0.0;
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_f64(&jg, "pi", &v) == YES);
+    ASSERT_TRUE(v > 3.14 && v < 3.15);
+    ASSERT_TRUE(jsget_f64(&jg, "i", &v) == YES);
+    ASSERT_TRUE(v == 2.0);
+    ASSERT_TRUE(jsget_f64(&jg, "bad", &v) == ERR);
+    ASSERT_TRUE(jsget_f64(&jg, "missing", &v) == NO);
+}
+
+static void test_jsget_i64(void) {
+    const char *json = "{\"n\":-12,\"z\":0,\"bad\":3.1}";
+    JsonGetter jg;
+    int64_t v = 0;
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_i64(&jg, "n", &v) == YES);
+    ASSERT_TRUE(v == -12);
+    ASSERT_TRUE(jsget_i64(&jg, "z", &v) == YES);
+    ASSERT_TRUE(v == 0);
+    ASSERT_TRUE(jsget_i64(&jg, "bad", &v) == ERR);
+    ASSERT_TRUE(jsget_i64(&jg, "missing", &v) == NO);
 }
 
 static void test_jsget_string_span_and_decode(void) {
@@ -436,20 +483,21 @@ static void test_jsget_array_objects(void) {
     const char *json = "{\"arr\":[{\"a\":1},{\"b\":2}]}";
     JsonGetter jg;
     JsonArrIter it;
-    JsonStrSpan sp = {0};
+    JsonGetter obj = {0};
+    uint32_t v = 0;
 
     ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
     ASSERT_TRUE(jsget_array_objects_begin(&jg, "arr", &it) == YES);
 
-    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &sp) == YES);
-    ASSERT_TRUE(sp.len == strlen("{\"a\":1}"));
-    ASSERT_TRUE(strncmp(sp.ptr, "{\"a\":1}", sp.len) == 0);
+    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+    ASSERT_TRUE(jsget_u32(&obj, "a", &v) == YES);
+    ASSERT_TRUE(v == 1);
 
-    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &sp) == YES);
-    ASSERT_TRUE(sp.len == strlen("{\"b\":2}"));
-    ASSERT_TRUE(strncmp(sp.ptr, "{\"b\":2}", sp.len) == 0);
+    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+    ASSERT_TRUE(jsget_u32(&obj, "b", &v) == YES);
+    ASSERT_TRUE(v == 2);
 
-    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &sp) == NO);
+    ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == NO);
 }
 
 static void test_jsget_top_level_validation(void) {
@@ -468,6 +516,21 @@ static void test_jsget_top_level_validation(void) {
     ASSERT_TRUE(jsget_top_level_validation(&jg, "missing", allowed, 2) == NO);
 }
 
+static void test_jsget_exists_nonnull(void) {
+    const char *json = "{\"a\":null,\"b\":1,\"c\":\"x\"}";
+    const char *json_str = "{\"a\":\"null\"}";
+    JsonGetter jg;
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_exists_nonnull(&jg, "a") == NO);
+    ASSERT_TRUE(jsget_exists_nonnull(&jg, "b") == YES);
+    ASSERT_TRUE(jsget_exists_nonnull(&jg, "c") == YES);
+    ASSERT_TRUE(jsget_exists_nonnull(&jg, "missing") == NO);
+
+    ASSERT_TRUE(jsget_init(&jg, json_str, strlen(json_str)) == OK);
+    ASSERT_TRUE(jsget_exists_nonnull(&jg, "a") == YES);
+}
+
 int main (void) {
     test_json_basic_rows_and_nulls();
     test_json_null_qrcolumn_safe_defaults();
@@ -480,12 +543,16 @@ int main (void) {
     test_json_builder_nested();
     test_jsget_simple_rpc_validation();
     test_jsget_paths();
+    test_jsget_object_view();
     test_jsget_null_and_overflow();
     test_jsget_u32_and_bool();
+    test_jsget_f64();
+    test_jsget_i64();
     test_jsget_string_span_and_decode();
     test_jsget_array_strings();
     test_jsget_array_objects();
     test_jsget_top_level_validation();
+    test_jsget_exists_nonnull();
 
     fprintf(stderr, "OK: test_json\n");
     return(0);

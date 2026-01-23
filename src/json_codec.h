@@ -6,9 +6,12 @@
 
 #include "query_result.h"
 #include "string_op.h"
+
+// Avoid compiling jsmn implementation in every TU that includes this header.
+#ifndef JSMN_HEADER
 #define JSMN_HEADER
+#endif
 #include "jsmn.h"
-#undef JSMN_HEADER
 
 /*
  * Format:
@@ -45,6 +48,8 @@ int json_arr_elem_bool(StrBuf *sb, int val);
 // helper to init a json object and add "jsonrpc":"2.0"
 int json_rpc_begin(StrBuf *sb);
 
+#define JSON_GETTER_MAX_TOKENS 1024
+
 typedef struct JsonArrIter {
     int arr_tok;   // token index of the array
     int idx;       // current element index [0..count)
@@ -55,10 +60,10 @@ typedef struct JsonArrIter {
 typedef struct JsonGetter {
     const char *json;
     size_t json_len;
-
-    // token buffer is internal; callers never see jsmntok_t
-    jsmntok_t toks[64];
+    const jsmntok_t *toks;
     int ntok;
+    int root; // token index of the root object for this view
+    jsmntok_t tok_storage[JSON_GETTER_MAX_TOKENS];
 } JsonGetter;
 
 typedef struct { const char *ptr; size_t len; } JsonStrSpan;
@@ -69,7 +74,7 @@ typedef struct { const char *ptr; size_t len; } JsonStrSpan;
  * Requirements:
  *  - json is not required to be NUL-terminated; use json_len.
  *  - root must be a JSON object.
- *  - token buffer is capped to 128 tokens.
+ *  - token buffer is capped to 1024 tokens.
  *
  * Return OK on success, ERR on error/bad input.
  */
@@ -101,6 +106,21 @@ int jsget_u32(const JsonGetter *jg, const char *key, uint32_t *out_u32);
 int jsget_bool01(const JsonGetter *jg, const char *key, int *out01);
 
 /*
+ * Gets a key path as a double. Returns yes/no/err.
+ */
+int jsget_f64(const JsonGetter *jg, const char *key, double *out_double);
+
+/*
+ * Gets a key path as a signed 64-bit integer. Returns yes/no/err.
+ */
+int jsget_i64(const JsonGetter *jg, const char *key, int64_t *out_long);
+
+/*
+ * Checks whether a key path exists and is not JSON null. Returns yes/no/err.
+ */
+int jsget_exists_nonnull(const JsonGetter *jg, const char *key);
+
+/*
  * Gets a key path as a raw JSON string content span (WITHOUT quotes).
  * This does NOT unescape; it returns a view into the JSON buffer. Returns
  * yes/no/err.
@@ -112,6 +132,16 @@ int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out);
  * Caller owns the returned string and must free it. Return yes/no/err.
  */
 int jsget_string_decode_alloc(const JsonGetter *jg, const char *key, char **out_nul);
+
+/*
+ * Gets a key path as a JsonGetter view rooted at the object value.
+ *
+ * The returned JsonGetter shares the token array and JSON buffer with the
+ * input; it stays valid as long as the parent JsonGetter is alive.
+ *
+ * Returns yes/no/err.
+ */
+int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out);
 
 /*
  * Initializes an iterator over an array of JSON strings at key path `key`.
@@ -136,14 +166,17 @@ int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan 
 int jsget_array_objects_begin(const JsonGetter *jg, const char *key, JsonArrIter *it);
 
 /*
- * Gets next element of the object array iterator as a raw JSON span.
+ * Gets next element of the object array iterator as a JsonGetter view.
+ *
+ * The returned JsonGetter shares the token array and JSON buffer with the
+ * input; it stays valid as long as the parent JsonGetter is alive.
  *
  * Return:
- *  YES -> produced next element (span contains full object text).
+ *  YES -> produced next element (view rooted at the object element).
  *  NO  -> no more elements.
  *  ERR -> element type error / token stream error.
  */
-int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan *out_obj);
+int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonGetter *out_obj);
 
 /* Makes sure the json object identified by 'obj_key' only contains the
  * 'allowed' top-level keys. If obj_key is NULL, the root object is used.

@@ -34,6 +34,10 @@ static PlArenaBlock *pl_arena_block_create(uint32_t cap) {
   return b;
 }
 
+/* Initializes an arena in-place.
+ * Ownership: caller retains the arena object and must call pl_arena_clean().
+ * Side effects: allocates the first block.
+ * Returns OK on success, ERR on bad input or allocation failure. */
 int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
   if (!ar) return ERR;
 
@@ -56,6 +60,10 @@ int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
   return OK;
 }
 
+/* Allocates and initializes a heap-owned arena.
+ * Ownership: caller owns the returned arena and must call pl_arena_destroy().
+ * Side effects: allocates heap blocks.
+ * Returns NULL on error. */
 PlArena *pl_arena_create(uint32_t *size_p, uint32_t *cap_p) {
   PlArena *ar = xmalloc(sizeof(*ar));
   if (pl_arena_init(ar, size_p, cap_p) != OK) {
@@ -66,12 +74,20 @@ PlArena *pl_arena_create(uint32_t *size_p, uint32_t *cap_p) {
 }
 
 /* Frees the memory used by 'ar' and its data. */
+/* Frees the arena and all blocks it owns.
+ * Ownership: invalidates 'ar' for further use.
+ * Side effects: frees memory.
+ * Returns void. */
 void pl_arena_destroy(PlArena *ar) {
   if (!ar) return;
   pl_arena_clean(ar);
   free(ar);
 }
 
+/* Frees all blocks owned by the arena but keeps the arena object.
+ * Ownership: caller retains 'ar' for reuse.
+ * Side effects: frees memory.
+ * Returns void. */
 void pl_arena_clean(PlArena *ar) {
   if (!ar) return;
   PlArenaBlock *b = ar->head;
@@ -89,6 +105,10 @@ void pl_arena_clean(PlArena *ar) {
 
 /* Ensure 'extra' bytes available, growing by adding blocks if needed.
  * Returns OK on success, ERR if cap reached or errors occurred. */
+/* Ensures 'extra' bytes are available, growing by adding a block.
+ * Ownership: arena retains ownership of blocks.
+ * Side effects: may allocate a new block.
+ * Returns OK on success, ERR on cap/overflow. */
 int pl_arena_ensure(PlArena *ar, uint32_t extra) {
   if (!ar) return ERR;
 
@@ -125,6 +145,10 @@ int pl_arena_ensure(PlArena *ar, uint32_t extra) {
 
 /* Allocates 'len' bytes inside the arena and returns the payload pointer.
  * The payload is zero-initialized and NUL-terminated. */
+/* Allocates a zero-initialized payload in the arena.
+ * Ownership: returned pointer is owned by the arena.
+ * Side effects: allocates arena memory.
+ * Returns NULL on error. */
 void *pl_arena_alloc(PlArena *ar, uint32_t len) {
   if (!ar) return NULL;
 
@@ -167,6 +191,10 @@ void *pl_arena_alloc(PlArena *ar, uint32_t len) {
 
 /* Adds 'len' bytes starting from 'start_v' to the data of 'ar'.
  * Returns a pointer to the stored payload on success, NULL on error. */
+/* Adds a payload to the arena by copying from start_v.
+ * Ownership: returned pointer is owned by the arena.
+ * Side effects: allocates arena memory.
+ * Returns NULL on error. */
 void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
   if (!ar) return NULL;
   if (!start_v && len != 0) return NULL;
@@ -178,7 +206,52 @@ void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
 }
 
 /* Returns the number of bytes used by the data inside 'ar'. */
+/* Returns the total bytes used by the arena.
+ * Ownership: does not allocate.
+ * Side effects: none.
+ * Returns the byte count. */
 uint32_t pl_arena_get_used(PlArena *ar) {
   if (!ar) return 0u;
   return ar->used;
+}
+
+/* Appends a pointer to a small temporary vector.
+ * Ownership: vector owns the heap buffer for items.
+ * Side effects: may realloc on heap.
+ * Returns OK/ERR. */
+int ptrvec_push(PtrVec *v, void *ptr) {
+  if (!v) return ERR;
+  if (v->len + 1 > v->cap) {
+    uint32_t new_cap = v->cap ? v->cap * 2u : 8u;
+    void **new_items = (void **)xrealloc(v->items, new_cap * sizeof(*new_items));
+    if (!new_items) return ERR;
+    v->items = new_items;
+    v->cap = new_cap;
+  }
+  v->items[v->len++] = ptr;
+  return OK;
+}
+
+/* Copies a temporary vector into the arena and returns the new array.
+ * Ownership: returned array is owned by the arena.
+ * Side effects: allocates arena memory.
+ * Returns NULL on error or when v->len == 0. */
+void **ptrvec_flatten(PtrVec *v, PlArena *a) {
+  if (!v || !a || v->len == 0) return NULL;
+  void **arr = (void **)pl_arena_alloc(a, (uint32_t)(v->len * sizeof(*arr)));
+  if (!arr) return NULL;
+  memcpy(arr, v->items, v->len * sizeof(*arr));
+  return arr;
+}
+
+/* Frees the heap storage owned by the vector but keeps the struct.
+ * Ownership: caller retains the vector struct for reuse.
+ * Side effects: frees heap memory.
+ * Returns void. */
+void ptrvec_clean(PtrVec *v) {
+  if (!v) return;
+  free(v->items);
+  v->items = NULL;
+  v->len = 0;
+  v->cap = 0;
 }

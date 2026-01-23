@@ -2,14 +2,15 @@ CC      := gcc
 PKG_CONFIG ?= pkg-config
 LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
 LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
-LIBPG_QUERY_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpg_query 2>/dev/null)
-LIBPG_QUERY_LIBS   := $(shell $(PKG_CONFIG) --libs   libpg_query 2>/dev/null)
+LIBPG_QUERY_DIR := third_party/libpg_query
+LIBPG_QUERY_LIB := $(LIBPG_QUERY_DIR)/libpg_query.a
+LIBPG_QUERY_INC := -I$(LIBPG_QUERY_DIR)
 
 # Build flags
 CFLAGS  := -Wall -Wextra -Werror -std=c11 -g -O2
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
-INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBPG_QUERY_CFLAGS)
-LDFLAGS := $(LIBPQ_LIBS) $(LIBPG_QUERY_LIBS)
+INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBPG_QUERY_INC)
+LDFLAGS := $(LIBPQ_LIBS) $(LIBPG_QUERY_LIB)
 
 # Test flags
 EXTRA_TCFLAGS ?=
@@ -40,13 +41,17 @@ INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integratio
 
 all: $(BIN)
 
+# Build vendored libpg_query (static).
+$(LIBPG_QUERY_LIB):
+	@$(MAKE) -C $(LIBPG_QUERY_DIR)
+
 # Build app objects
 build/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Link app binary
-$(BIN): $(APP_OBJ)
+$(BIN): $(APP_OBJ) $(LIBPG_QUERY_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(APP_OBJ) -o $@ $(LDFLAGS)
 
@@ -61,7 +66,7 @@ build/asan/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(ASAN_CFLAGS) -c $< -o $@
 
-$(ASAN_BIN): $(ASAN_OBJ)
+$(ASAN_BIN): $(ASAN_OBJ) $(LIBPG_QUERY_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(ASAN_OBJ) -o $@ $(TLDFLAGS)
 
@@ -81,7 +86,7 @@ build/testobj/%.o: src/%.c
 TEST_APP_OBJ := $(APP_SRC:src/%.c=build/testobj/%.o)
 
 # Link each test binary from its test object + sanitized app objects
-build/tests/%: build/tests/%.o $(TEST_APP_OBJ)
+build/tests/%: build/tests/%.o $(TEST_APP_OBJ) $(LIBPG_QUERY_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $^ -o $@ $(TLDFLAGS)
 

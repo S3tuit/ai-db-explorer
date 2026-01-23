@@ -104,12 +104,38 @@ static void test_large_entry_and_cap(void) {
   pl_arena_destroy(ar);
 }
 
+static void test_ptrvec_flatten(void) {
+  /* PtrVec collects pointers on the heap and flattens them into arena memory.
+   * This keeps arena allocations to a single copy at the end. */
+  PlArena *ar = pl_arena_create(NULL, NULL);
+  ASSERT_TRUE(ar != NULL);
+
+  PtrVec v = {0};
+  int a = 1;
+  int b = 2;
+  int c = 3;
+
+  ASSERT_TRUE(ptrvec_push(&v, &a) == OK);
+  ASSERT_TRUE(ptrvec_push(&v, &b) == OK);
+  ASSERT_TRUE(ptrvec_push(&v, &c) == OK);
+
+  void **arr = ptrvec_flatten(&v, ar);
+  ASSERT_TRUE(arr != NULL);
+  ASSERT_TRUE(arr[0] == &a);
+  ASSERT_TRUE(arr[1] == &b);
+  ASSERT_TRUE(arr[2] == &c);
+
+  ptrvec_clean(&v);
+  pl_arena_destroy(ar);
+}
+
 int main(void) {
   test_basic_add_get();
   test_alignment_and_empty();
   test_out_of_bounds();
   test_grow_blocks_and_stability();
   test_large_entry_and_cap();
+  test_ptrvec_flatten();
   fprintf(stderr, "OK: test_pl_arena\n");
   return 0;
 }

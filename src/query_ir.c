@@ -9,6 +9,10 @@
 // Handle helpers
 // ----------------------------
 
+/* Initializes a handle and allocates a blank QirQuery inside its arena.
+ * Ownership: caller owns the handle and must call qir_handle_destroy().
+ * Side effects: allocates arena blocks.
+ * Returns OK on success, ERR on bad input or allocation failure. */
 int qir_handle_init(QirQueryHandle *h) {
   if (!h) return ERR;
 
@@ -29,7 +33,11 @@ int qir_handle_init(QirQueryHandle *h) {
   return OK;
 }
 
-void qir_handle_clean(QirQueryHandle *h) {
+/* Frees all arena allocations owned by the handle and resets it.
+ * Ownership: caller retains the handle object itself.
+ * Side effects: frees memory.
+ * Returns void. */
+void qir_handle_destroy(QirQueryHandle *h) {
   if (!h) return;
   pl_arena_clean(&h->arena);
   h->q = NULL;
@@ -39,6 +47,10 @@ void qir_handle_clean(QirQueryHandle *h) {
 // Touch report freeing
 // ----------------------------
 
+/* Frees a touch report and its arena allocations.
+ * Ownership: caller must not use 'tr' afterwards.
+ * Side effects: frees memory.
+ * Returns void. */
 void qir_touch_report_destroy(QirTouchReport *tr) {
   if (!tr) return;
   pl_arena_clean(&tr->arena);
@@ -100,13 +112,13 @@ static QirTouchKind qir_resolve_qualifier_kind(
 }
 
 
-/* Appends a new touch recor to the report. */
+/* Appends a new touch record to the report. */
 static int qir_touch_report_add(
     QirTouchReport *tr,
     QirScope scope,
     QirTouchKind kind,
     const QirColRef *col,
-    QirTouch **head
+    PtrVec *touches
 ) {
   if (!tr || !col) return -1;
 
@@ -116,13 +128,8 @@ static int qir_touch_report_add(
   t->scope = scope;
   t->kind = kind;
   t->col = *col; // shallow copy; identifiers are owned by QueryIR
-  t->next = NULL;
-
-  // We build a linked list to avoid repeated array allocations. We flatten
-  // into a contiguous array once at the end of extraction.
-  if (!*head) {
-    *head = t;
-  }
+  // Keep a temporary pointer vector and flatten it once at the end.
+  if (ptrvec_push(touches, t) != OK) return -1;
   tr->ntouches++;
 
   if (kind == QIR_TOUCH_UNKNOWN) tr->has_unknown_touches = true;
@@ -134,7 +141,7 @@ static void qir_extract_from_query_rec(
     const QirQuery *q,
     QirScope scope,
     QirTouchReport *tr,
-    QirTouch **head
+    PtrVec *touches
 );
 
 /* Walk an expression tree and record every column reference encountered. Adds
@@ -147,14 +154,14 @@ static void qir_extract_from_expr_rec(
     const QirExpr *e,
     QirScope scope,
     QirTouchReport *tr,
-    QirTouch **head
+    PtrVec *touches
 ) {
   if (!e || !tr) return;
 
   switch (e->kind) {
     case QIR_EXPR_COLREF: {
       QirTouchKind kind = qir_resolve_qualifier_kind(owner_query, &e->u.colref.qualifier);
-      if (qir_touch_report_add(tr, scope, kind, &e->u.colref, head) != 0) {
+      if (qir_touch_report_add(tr, scope, kind, &e->u.colref, touches) != 0) {
         tr->has_unsupported = true; // allocation failure treated as "cannot safely proceed"
       }
       break;
@@ -169,8 +176,13 @@ static void qir_extract_from_expr_rec(
       // Even "safe" function calls can reference columns through their arguments.
       // Touch extraction must walk arguments regardless of allowlist decisions.
       for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
-        qir_extract_from_expr_rec(owner_query, e->u.funcall.args[i], scope, tr, head);
+        qir_extract_from_expr_rec(owner_query, e->u.funcall.args[i], scope, tr, touches);
       }
+      break;
+
+    case QIR_EXPR_CAST:
+      // Cast touches come from the underlying expression.
+      qir_extract_from_expr_rec(owner_query, e->u.cast.expr, scope, tr, touches);
       break;
 
     case QIR_EXPR_EQ:
@@ -182,15 +194,15 @@ static void qir_extract_from_expr_rec(
     case QIR_EXPR_AND:
     case QIR_EXPR_OR:
     case QIR_EXPR_NOT:
-      qir_extract_from_expr_rec(owner_query, e->u.bin.l, scope, tr, head);
-      qir_extract_from_expr_rec(owner_query, e->u.bin.r, scope, tr, head);
+      qir_extract_from_expr_rec(owner_query, e->u.bin.l, scope, tr, touches);
+      qir_extract_from_expr_rec(owner_query, e->u.bin.r, scope, tr, touches);
       break;
 
     case QIR_EXPR_IN:
       // IN(lhs, items...): touches can appear in lhs and in each item.
-      qir_extract_from_expr_rec(owner_query, e->u.in_.lhs, scope, tr, head);
+      qir_extract_from_expr_rec(owner_query, e->u.in_.lhs, scope, tr, touches);
       for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-        qir_extract_from_expr_rec(owner_query, e->u.in_.items[i], scope, tr, head);
+        qir_extract_from_expr_rec(owner_query, e->u.in_.items[i], scope, tr, touches);
       }
       break;
 
@@ -198,7 +210,7 @@ static void qir_extract_from_expr_rec(
       // Subquery introduces a new scope for alias resolution and also should
       // be treated as "nested" for Sensitive Mode rules.
       if (e->u.subquery) {
-        qir_extract_from_query_rec(e->u.subquery, QIR_SCOPE_NESTED, tr, head);
+        qir_extract_from_query_rec(e->u.subquery, QIR_SCOPE_NESTED, tr, touches);
       }
       break;
 
@@ -220,7 +232,7 @@ static void qir_extract_from_query_rec(
     const QirQuery *q,
     QirScope scope,
     QirTouchReport *tr,
-    QirTouch **head
+    PtrVec *touches
 ) {
   if (!q || !tr) return;
 
@@ -231,7 +243,7 @@ static void qir_extract_from_query_rec(
   for (uint32_t i = 0; i < q->nctes; i++) {
     const QirCte *cte = q->ctes ? q->ctes[i] : NULL;
     if (!cte || !cte->query) continue;
-    qir_extract_from_query_rec(cte->query, QIR_SCOPE_NESTED, tr, head);
+    qir_extract_from_query_rec(cte->query, QIR_SCOPE_NESTED, tr, touches);
   }
 
   // Recurse into FROM subqueries (nested)
@@ -239,7 +251,7 @@ static void qir_extract_from_query_rec(
     const QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
     if (!fi) continue;
     if (fi->kind == QIR_FROM_SUBQUERY && fi->u.subquery) {
-      qir_extract_from_query_rec(fi->u.subquery, QIR_SCOPE_NESTED, tr, head);
+      qir_extract_from_query_rec(fi->u.subquery, QIR_SCOPE_NESTED, tr, touches);
     }
   }
 
@@ -249,11 +261,11 @@ static void qir_extract_from_query_rec(
     if (!j) continue;
 
     if (j->rhs && j->rhs->kind == QIR_FROM_SUBQUERY && j->rhs->u.subquery) {
-      qir_extract_from_query_rec(j->rhs->u.subquery, QIR_SCOPE_NESTED, tr, head);
+      qir_extract_from_query_rec(j->rhs->u.subquery, QIR_SCOPE_NESTED, tr, touches);
     }
 
     if (j->on) {
-      qir_extract_from_expr_rec(q, j->on, scope, tr, head);
+      qir_extract_from_expr_rec(q, j->on, scope, tr, touches);
     }
   }
 
@@ -264,14 +276,14 @@ static void qir_extract_from_query_rec(
 
     // In this IR, select item value is always a colref.
     QirTouchKind kind = qir_resolve_qualifier_kind(q, &si->value.qualifier);
-    if (qir_touch_report_add(tr, scope, kind, &si->value, head) != 0) {
+    if (qir_touch_report_add(tr, scope, kind, &si->value, touches) != 0) {
       tr->has_unsupported = true;
     }
   }
 
   // WHERE touches
   if (q->where) {
-    qir_extract_from_expr_rec(q, q->where, scope, tr, head);
+    qir_extract_from_expr_rec(q, q->where, scope, tr, touches);
   }
 }
 
@@ -293,27 +305,18 @@ QirTouchReport *qir_extract_touches(const QirQuery *q) {
     return NULL;
   }
 
-  QirTouch *head = NULL;
+  PtrVec touches = {0};
 
   // Start at top-level query in MAIN scope.
-  qir_extract_from_query_rec(q, QIR_SCOPE_MAIN, tr, &head);
+  qir_extract_from_query_rec(q, QIR_SCOPE_MAIN, tr, &touches);
 
-  // Flatten the linked list into a contiguous array for cache-friendly
-  // traversal by validators. This duplicates the memory for the QirTouch
-  // but makes it simpler and faster for validators.
+  // Flatten the pointer list into a contiguous array for cache-friendly
+  // traversal by validators. The array is arena-owned.
   if (tr->ntouches > 0) {
-    QirTouch **arr = (QirTouch **)pl_arena_alloc(
-        &tr->arena, (uint32_t)(tr->ntouches * sizeof(*arr)));
-    if (!arr) {
-      tr->has_unsupported = true;
-    } else {
-      uint32_t i = 0;
-      for (QirTouch *t = head; t && i < tr->ntouches; t = t->next) {
-        arr[i++] = t;
-      }
-      tr->touches = arr;
-    }
+    tr->touches = (QirTouch **)ptrvec_flatten(&touches, &tr->arena);
+    if (!tr->touches) tr->has_unsupported = true;
   }
+  ptrvec_clean(&touches);
 
   // If we saw unknown touches or unsupported constructs, caller may reject.
   // Also propagate backend's unsupported flag at top-level.
