@@ -47,7 +47,7 @@ typedef struct QirIdent {
 
 // alias.column
 typedef struct QirColRef {
-  QirIdent qualifier; // table alias (policy: must be present)
+  QirIdent qualifier; // table alias
   QirIdent column;    // column name
 } QirColRef;
 
@@ -69,6 +69,8 @@ typedef struct QirTypeRef {
 
 typedef struct QirQuery QirQuery;
 typedef struct QirExpr QirExpr;
+typedef struct QirCaseWhen QirCaseWhen;
+typedef struct QirCaseExpr QirCaseExpr;
 
 typedef enum QirExprKind {
   QIR_EXPR_COLREF = 1,     // alias.column
@@ -83,6 +85,8 @@ typedef enum QirExprKind {
   QIR_EXPR_GE,
   QIR_EXPR_LT,
   QIR_EXPR_LE,
+  QIR_EXPR_LIKE,           // lhs LIKE rhs
+  QIR_EXPR_NOT_LIKE,       // lhs NOT LIKE rhs
 
   QIR_EXPR_IN,             // lhs IN (item, item, ...)
 
@@ -90,6 +94,8 @@ typedef enum QirExprKind {
   QIR_EXPR_OR,
   QIR_EXPR_NOT,
 
+  QIR_EXPR_CASE,           // CASE [arg] WHEN cond THEN expr ... [ELSE expr] END
+  QIR_EXPR_WINDOWFUNC,     // func(...) OVER (...)
   QIR_EXPR_SUBQUERY,       // scalar subquery, EXISTS, IN (SELECT...), etc.
   QIR_EXPR_UNSUPPORTED     // anything not modeled safely
 } QirExprKind;
@@ -119,13 +125,38 @@ typedef struct QirFuncCall {
   QirIdent name;
   QirExpr **args;
   uint32_t nargs;
+  bool is_distinct;
+  bool is_star;
 } QirFuncCall;
+
+typedef struct QirWindowFunc {
+  QirFuncCall func;
+  QirExpr **partition_by;
+  uint32_t n_partition_by;
+  QirExpr **order_by;
+  uint32_t n_order_by;
+  bool has_frame;
+} QirWindowFunc;
 
 typedef struct QirInExpr {
   QirExpr *lhs;
   QirExpr **items;    // items inside IN(...)
   uint32_t nitems;
 } QirInExpr;
+
+// One WHEN ... THEN ... clause inside a CASE expression.
+typedef struct QirCaseWhen {
+  QirExpr *when_expr;
+  QirExpr *then_expr;
+} QirCaseWhen;
+
+// CASE expression with optional argument and ELSE clause.
+typedef struct QirCaseExpr {
+  QirExpr *arg;           // NULL for "CASE WHEN ..." form
+  QirCaseWhen **whens;    // ordered WHEN/THEN clauses
+  uint32_t nwhens;
+  QirExpr *else_expr;     // NULL if ELSE is absent
+} QirCaseExpr;
 
 // Example: 'l' = 'r'
 // For QIR_EXPR_NOT, only bin.l is used; bin.r must be NULL.
@@ -134,6 +165,8 @@ typedef struct QirBinExpr {
   QirExpr *r;
 } QirBinExpr;
 
+// QirExpr is the core expression node used throughout the IR (SELECT, WHERE,
+// GROUP BY, HAVING, ORDER BY, function args, etc.).
 struct QirExpr {
   QirExprKind kind;
   union {
@@ -147,6 +180,8 @@ struct QirExpr {
     } cast;                // QIR_EXPR_CAST
     QirBinExpr bin;        // EQ, AND
     QirInExpr in_;         // IN
+    QirCaseExpr case_;     // CASE
+    QirWindowFunc window;  // WINDOWFUNC
     QirQuery *subquery;    // QIR_EXPR_SUBQUERY
   } u;
 };
@@ -197,9 +232,9 @@ typedef struct QirJoin {
 // SELECT items
 // ----------------------------
 
-// each select item must be a simple column reference and must have alias
+// Each select item is an expression with a mandatory output alias.
 typedef struct QirSelectItem {
-  QirColRef value;   // alias.column
+  QirExpr *value;    // expression (arena-owned)
   QirIdent out_alias; // mandatory alias
 } QirSelectItem;
 
@@ -223,13 +258,7 @@ struct QirQuery {
   // Conservative feature flags (backend sets these).
   bool has_star;          // SELECT * or table.*
   bool has_distinct;
-  bool has_group_by;
-  bool has_having;
-  bool has_order_by;
-  bool has_union_like;    // UNION/INTERSECT/EXCEPT
   bool has_offset;
-  bool has_cast;
-  bool has_subquery;      // any nested query present anywhere
   bool has_unsupported;   // backend saw nodes it couldn't map safely
 
   // CTEs
@@ -250,6 +279,17 @@ struct QirQuery {
 
   // WHERE
   QirExpr *where; // may be NULL
+
+  // GROUP BY items (expressions)
+  QirExpr **group_by;
+  uint32_t n_group_by;
+
+  // HAVING
+  QirExpr *having; // may be NULL
+
+  // ORDER BY items (expressions)
+  QirExpr **order_by;
+  uint32_t n_order_by;
 
   // LIMIT / OFFSET (offset may be represented by has_offset for now)
   // limit_value: -1 means missing.
@@ -314,7 +354,13 @@ void qir_touch_report_destroy(QirTouchReport *tr);
 // - alias resolution is based on q->from_items aliases + joins rhs aliases.
 // - scope is MAIN for the top-level query and NESTED for any nested query.
 // - The extractor is conservative: if it sees unsupported expressions or cannot
-//   resolve a qualifier, it marks UNKNOWN touches and/or has_unsupported.
+//   resolve a qualifier, it marks UNKNOWN touches and has_unsupported.
 QirTouchReport *qir_extract_touches(const QirQuery *q);
+
+/* Resolves ORDER BY alias references to SELECT item expressions.
+ * Ownership: returned pointer is owned by the QueryIR arena.
+ * Side effects: may mark q->has_unsupported on ambiguous aliases.
+ * Returns the resolved expression or the original expression if no match. */
+QirExpr *qir_resolve_order_alias(QirQuery *q, QirExpr *expr);
 
 #endif // QUERY_IR_H

@@ -68,6 +68,34 @@ static bool qir_ident_eq(const QirIdent *a, const QirIdent *b) {
   return strcmp(a->name, b->name) == 0;
 }
 
+/* Resolves ORDER BY alias references to SELECT item expressions.
+ * Ownership: returned pointer is owned by the QueryIR arena.
+ * Side effects: may mark q->has_unsupported on ambiguous aliases.
+ * Returns the resolved expression or the original expression if no match. */
+QirExpr *qir_resolve_order_alias(QirQuery *q, QirExpr *expr) {
+  if (!q || !expr || expr->kind != QIR_EXPR_COLREF) return expr;
+  if (!expr->u.colref.qualifier.name || expr->u.colref.qualifier.name[0] != '\0') {
+    return expr;
+  }
+
+  const char *name = expr->u.colref.column.name;
+  if (!name || name[0] == '\0') return expr;
+
+  QirExpr *resolved = NULL;
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
+    if (!si || !si->out_alias.name) continue;
+    if (strcmp(si->out_alias.name, name) == 0) {
+      if (resolved) {
+        q->has_unsupported = true;
+        return expr;
+      }
+      resolved = si->value;
+    }
+  }
+  return resolved ? resolved : expr;
+}
+
 /* Given a column qualifier (the "alias" in alias.column), decide whether it
  * refers to:
  * - a BASE relation (table/view) alias, or
@@ -191,6 +219,8 @@ static void qir_extract_from_expr_rec(
     case QIR_EXPR_GE:
     case QIR_EXPR_LT:
     case QIR_EXPR_LE:
+    case QIR_EXPR_LIKE:
+    case QIR_EXPR_NOT_LIKE:
     case QIR_EXPR_AND:
     case QIR_EXPR_OR:
     case QIR_EXPR_NOT:
@@ -203,6 +233,31 @@ static void qir_extract_from_expr_rec(
       qir_extract_from_expr_rec(owner_query, e->u.in_.lhs, scope, tr, touches);
       for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
         qir_extract_from_expr_rec(owner_query, e->u.in_.items[i], scope, tr, touches);
+      }
+      break;
+
+    case QIR_EXPR_CASE:
+      // CASE may reference columns in arg, WHEN, THEN, and ELSE branches.
+      qir_extract_from_expr_rec(owner_query, e->u.case_.arg, scope, tr, touches);
+      for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
+        QirCaseWhen *w = e->u.case_.whens[i];
+        if (!w) continue;
+        qir_extract_from_expr_rec(owner_query, w->when_expr, scope, tr, touches);
+        qir_extract_from_expr_rec(owner_query, w->then_expr, scope, tr, touches);
+      }
+      qir_extract_from_expr_rec(owner_query, e->u.case_.else_expr, scope, tr, touches);
+      break;
+
+    case QIR_EXPR_WINDOWFUNC:
+      // Window functions can reference columns in args and window clauses.
+      for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
+        qir_extract_from_expr_rec(owner_query, e->u.window.func.args[i], scope, tr, touches);
+      }
+      for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
+        qir_extract_from_expr_rec(owner_query, e->u.window.partition_by[i], scope, tr, touches);
+      }
+      for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
+        qir_extract_from_expr_rec(owner_query, e->u.window.order_by[i], scope, tr, touches);
       }
       break;
 
@@ -269,21 +324,46 @@ static void qir_extract_from_query_rec(
     }
   }
 
-  // SELECT list touches (v1: each item is a colref)
+  // SELECT list touches (expressions can reference columns).
   for (uint32_t i = 0; i < q->nselect; i++) {
     const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
     if (!si) continue;
 
-    // In this IR, select item value is always a colref.
-    QirTouchKind kind = qir_resolve_qualifier_kind(q, &si->value.qualifier);
-    if (qir_touch_report_add(tr, scope, kind, &si->value, touches) != 0) {
+    if (!si->value) {
       tr->has_unsupported = true;
+      continue;
     }
+    qir_extract_from_expr_rec(q, si->value, scope, tr, touches);
   }
 
   // WHERE touches
   if (q->where) {
     qir_extract_from_expr_rec(q, q->where, scope, tr, touches);
+  }
+
+  // GROUP BY touches
+  for (uint32_t i = 0; i < q->n_group_by; i++) {
+    QirExpr *e = q->group_by ? q->group_by[i] : NULL;
+    if (!e) {
+      tr->has_unsupported = true;
+      continue;
+    }
+    qir_extract_from_expr_rec(q, e, scope, tr, touches);
+  }
+
+  // HAVING touches
+  if (q->having) {
+    qir_extract_from_expr_rec(q, q->having, scope, tr, touches);
+  }
+
+  // ORDER BY touches
+  for (uint32_t i = 0; i < q->n_order_by; i++) {
+    QirExpr *e = q->order_by ? q->order_by[i] : NULL;
+    if (!e) {
+      tr->has_unsupported = true;
+      continue;
+    }
+    qir_extract_from_expr_rec(q, e, scope, tr, touches);
   }
 }
 

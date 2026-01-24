@@ -227,6 +227,16 @@ static QirExpr *pg_parse_literal(const JsonGetter *jg, PlArena *a, QirQuery *q) 
             return e;
         }
 
+        JsonGetter bjg0 = {0};
+        if (jsget_object(&vjg, "boolval", &bjg0) == YES) {
+            int b01 = 0;
+            if (jsget_bool01(&bjg0, "boolval", &b01) == YES) {
+                e->u.lit.kind = QIR_LIT_BOOL;
+                e->u.lit.v.b = (b01 != 0);
+                return e;
+            }
+        }
+
         JsonGetter ijg2 = {0};
         if (jsget_object(&vjg, "Integer", &ijg2) == YES) {
             int64_t i64 = 0;
@@ -275,6 +285,158 @@ static QirExpr *pg_parse_literal(const JsonGetter *jg, PlArena *a, QirQuery *q) 
  * Side effects: may set query flags.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q);
+
+/* Parses a WindowDef node into a QirWindowFunc.
+ * Ownership: all arrays are arena-owned.
+ * Side effects: may set q->has_unsupported for unsupported shapes.
+ * Returns OK/ERR on allocation failure. */
+static int pg_parse_window_def(
+    const JsonGetter *wg,
+    PlArena *a,
+    QirQuery *q,
+    QirWindowFunc *wf
+) {
+    if (!wg || !a || !q || !wf) return ERR;
+
+    // Named/ref windows are not resolved yet; mark unsupported.
+    char *tmp = NULL;
+    if (jsget_string_decode_alloc(wg, "refname", &tmp) == YES) {
+        if (tmp[0] != '\0') q->has_unsupported = true;
+        free(tmp);
+    }
+    if (jsget_string_decode_alloc(wg, "name", &tmp) == YES) {
+        if (tmp[0] != '\0') q->has_unsupported = true;
+        free(tmp);
+    }
+
+    // PARTITION BY
+    PtrVec parts = {0};
+    JsonArrIter it = {0};
+    if (jsget_array_objects_begin(wg, "partitionClause", &it) == YES) {
+        JsonGetter elem = {0};
+        int rc = 0;
+        while ((rc = jsget_array_objects_next(wg, &it, &elem)) == YES) {
+            QirExpr *expr = pg_parse_expr(&elem, a, q);
+            if (!expr) { rc = ERR; break; }
+            if (ptrvec_push(&parts, expr) != OK) { rc = ERR; break; }
+        }
+        if (rc == ERR) q->has_unsupported = true;
+    }
+    wf->partition_by = (QirExpr **)ptrvec_flatten(&parts, a);
+    wf->n_partition_by = parts.len;
+    ptrvec_clean(&parts);
+
+    // ORDER BY (SortBy list)
+    PtrVec orders = {0};
+    if (jsget_array_objects_begin(wg, "orderClause", &it) == YES) {
+        JsonGetter elem = {0};
+        int rc = 0;
+        while ((rc = jsget_array_objects_next(wg, &it, &elem)) == YES) {
+            JsonGetter sjg = {0};
+            if (jsget_object(&elem, "SortBy", &sjg) != YES) { rc = ERR; break; }
+
+            JsonGetter njg = {0};
+            if (jsget_object(&sjg, "node", &njg) != YES) { rc = ERR; break; }
+            QirExpr *expr = pg_parse_expr(&njg, a, q);
+            if (!expr) { rc = ERR; break; }
+            if (ptrvec_push(&orders, expr) != OK) { rc = ERR; break; }
+        }
+        if (rc == ERR) q->has_unsupported = true;
+    }
+    wf->order_by = (QirExpr **)ptrvec_flatten(&orders, a);
+    wf->n_order_by = orders.len;
+    ptrvec_clean(&orders);
+
+    // Frame options (bitmask; 0 means no explicit frame).
+    int64_t frame = 0;
+    int frc = jsget_i64(wg, "frameOptions", &frame);
+    if (frc == ERR) {
+        q->has_unsupported = true;
+        wf->has_frame = true;
+    } else {
+        wf->has_frame = (frc == YES && frame != 0);
+    }
+
+    return OK;
+}
+
+/* Parses a CaseExpr node into a QirExpr.
+ * Ownership: returned expression and its children are arena-owned.
+ * Side effects: may set q->has_unsupported on malformed or unknown shapes.
+ * Returns NULL on allocation error. */
+static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
+    QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_CASE);
+    if (!e) return NULL;
+
+    e->u.case_.arg = NULL;
+    e->u.case_.whens = NULL;
+    e->u.case_.nwhens = 0;
+    e->u.case_.else_expr = NULL;
+
+    // CASE has an optional argument expression.
+    JsonGetter ajg = {0};
+    int rc = jsget_object(jg, "arg", &ajg);
+    if (rc == ERR) return NULL;
+    if (rc == YES) {
+        e->u.case_.arg = pg_parse_expr(&ajg, a, q);
+        if (!e->u.case_.arg) return NULL;
+    }
+
+    // CASE has a list of WHEN/THEN arms.
+    JsonArrIter it = {0};
+    rc = jsget_array_objects_begin(jg, "args", &it);
+    if (rc == ERR) return NULL;
+    if (rc == NO) {
+        q->has_unsupported = true;
+        return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+    }
+
+    PtrVec whens = {0};
+    JsonGetter elem = {0};
+    while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
+        JsonGetter wjg = {0};
+        if (jsget_object(&elem, "CaseWhen", &wjg) != YES) { rc = ERR; break; }
+
+        JsonGetter wexpr = {0};
+        JsonGetter wres = {0};
+        if (jsget_object(&wjg, "expr", &wexpr) != YES) { rc = ERR; break; }
+        if (jsget_object(&wjg, "result", &wres) != YES) { rc = ERR; break; }
+
+        QirCaseWhen *w = (QirCaseWhen *)pl_arena_alloc(a, (uint32_t)sizeof(*w));
+        if (!w) { rc = ERR; break; }
+        w->when_expr = pg_parse_expr(&wexpr, a, q);
+        w->then_expr = pg_parse_expr(&wres, a, q);
+        if (!w->when_expr || !w->then_expr) { rc = ERR; break; }
+        if (ptrvec_push(&whens, w) != OK) { rc = ERR; break; }
+    }
+
+    if (rc == ERR) {
+        ptrvec_clean(&whens);
+        return NULL;
+    }
+    if (whens.len == 0) {
+        ptrvec_clean(&whens);
+        q->has_unsupported = true;
+        return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+    }
+
+    uint32_t nwhens = (uint32_t)whens.len;
+    e->u.case_.whens = (QirCaseWhen **)ptrvec_flatten(&whens, a);
+    ptrvec_clean(&whens);
+    if (!e->u.case_.whens) return NULL;
+    e->u.case_.nwhens = nwhens;
+
+    // Optional ELSE clause.
+    JsonGetter ejg = {0};
+    rc = jsget_object(jg, "defresult", &ejg);
+    if (rc == ERR) return NULL;
+    if (rc == YES) {
+        e->u.case_.else_expr = pg_parse_expr(&ejg, a, q);
+        if (!e->u.case_.else_expr) return NULL;
+    }
+
+    return e;
+}
 
 /* Parses a boolean expression list into a left-deep binary tree.
  * Ownership: returned expression is arena-owned.
@@ -353,6 +515,158 @@ static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, PlArena *a, QirQuery *q
  * Side effects: may set q->has_unsupported.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
+    // BETWEEN is encoded via A_Expr.kind with rexpr as a 2-item list.
+    char *akind = NULL;
+    int krc = jsget_string_decode_alloc(jg, "kind", &akind);
+    if (krc == ERR) return NULL;
+    if (krc == YES) {
+        if (strcmp(akind, "AEXPR_BETWEEN_SYM") == 0 ||
+            strcmp(akind, "AEXPR_NOT_BETWEEN_SYM") == 0) {
+            free(akind);
+            q->has_unsupported = true;
+            return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+        }
+        if (strcmp(akind, "AEXPR_BETWEEN") == 0 ||
+            strcmp(akind, "AEXPR_NOT_BETWEEN") == 0) {
+            // Normalize BETWEEN into (lhs >= lo AND lhs <= hi) and NOT BETWEEN
+            // into (lhs < lo OR lhs > hi) so the IR stays in simple predicates.
+            bool is_not = (strcmp(akind, "AEXPR_NOT_BETWEEN") == 0);
+            free(akind);
+
+            JsonGetter ljg = {0};
+            JsonGetter rjg = {0};
+            if (jsget_object(jg, "lexpr", &ljg) != YES) return NULL;
+            if (jsget_object(jg, "rexpr", &rjg) != YES) return NULL;
+
+            JsonGetter listjg = {0};
+            if (jsget_object(&rjg, "List", &listjg) != YES) {
+                q->has_unsupported = true;
+                return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+            }
+
+            JsonArrIter it = {0};
+            if (jsget_array_objects_begin(&listjg, "items", &it) != YES) return NULL;
+
+            JsonGetter elem = {0};
+            if (jsget_array_objects_next(&listjg, &it, &elem) != YES) return NULL;
+            QirExpr *lo = pg_parse_expr(&elem, a, q);
+            if (!lo) return NULL;
+            if (jsget_array_objects_next(&listjg, &it, &elem) != YES) return NULL;
+            QirExpr *hi = pg_parse_expr(&elem, a, q);
+            if (!hi) return NULL;
+            if (jsget_array_objects_next(&listjg, &it, &elem) == YES) {
+                q->has_unsupported = true;
+                return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+            }
+
+            QirExpr *lhs = pg_parse_expr(&ljg, a, q);
+            if (!lhs) return NULL;
+
+            QirExprKind k1 = is_not ? QIR_EXPR_LT : QIR_EXPR_GE;
+            QirExprKind k2 = is_not ? QIR_EXPR_GT : QIR_EXPR_LE;
+            QirExprKind kbool = is_not ? QIR_EXPR_OR : QIR_EXPR_AND;
+
+            QirExpr *e1 = pg_qir_new_expr(a, k1);
+            QirExpr *e2 = pg_qir_new_expr(a, k2);
+            QirExpr *res = pg_qir_new_expr(a, kbool);
+            if (!e1 || !e2 || !res) return NULL;
+            e1->u.bin.l = lhs;
+            e1->u.bin.r = lo;
+            e2->u.bin.l = lhs;
+            e2->u.bin.r = hi;
+            res->u.bin.l = e1;
+            res->u.bin.r = e2;
+            return res;
+        }
+        if (strcmp(akind, "AEXPR_NOT_LIKE") == 0) {
+            free(akind);
+            QirExprKind nkind = QIR_EXPR_NOT_LIKE;
+            JsonArrIter it = {0};
+            if (jsget_array_objects_begin(jg, "name", &it) != YES) return NULL;
+
+            JsonGetter elem = {0};
+            if (jsget_array_objects_next(jg, &it, &elem) != YES) return NULL;
+
+            JsonGetter sjg = {0};
+            if (jsget_object(&elem, "String", &sjg) != YES) return NULL;
+
+            char *op = NULL;
+            if (pg_get_string_field(&sjg, "str", "sval", &op) != YES) return NULL;
+            free(op);
+
+            JsonGetter ljg = {0};
+            JsonGetter rjg = {0};
+            if (jsget_object(jg, "lexpr", &ljg) != YES) return NULL;
+            if (jsget_object(jg, "rexpr", &rjg) != YES) return NULL;
+
+            QirExpr *lhs = pg_parse_expr(&ljg, a, q);
+            QirExpr *rhs = pg_parse_expr(&rjg, a, q);
+            if (!lhs || !rhs) return NULL;
+
+            QirExpr *e = pg_qir_new_expr(a, nkind);
+            if (!e) return NULL;
+            e->u.bin.l = lhs;
+            e->u.bin.r = rhs;
+            return e;
+        }
+        if (strcmp(akind, "AEXPR_IN") == 0 ||
+            strcmp(akind, "AEXPR_NOT_IN") == 0) {
+            bool is_not = (strcmp(akind, "AEXPR_NOT_IN") == 0);
+            free(akind);
+
+            JsonGetter ljg = {0};
+            JsonGetter rjg = {0};
+            if (jsget_object(jg, "lexpr", &ljg) != YES) return NULL;
+            if (jsget_object(jg, "rexpr", &rjg) != YES) return NULL;
+
+            PtrVec items = {0};
+            JsonGetter listjg = {0};
+            int rc = 0;
+            if (jsget_object(&rjg, "List", &listjg) == YES) {
+                JsonArrIter it = {0};
+                if (jsget_array_objects_begin(&listjg, "items", &it) != YES) return NULL;
+
+                JsonGetter elem = {0};
+                while ((rc = jsget_array_objects_next(&listjg, &it, &elem)) == YES) {
+                    QirExpr *ie = pg_parse_expr(&elem, a, q);
+                    if (!ie) { rc = ERR; break; }
+                    if (ptrvec_push(&items, ie) != OK) { rc = ERR; break; }
+                }
+            } else {
+                QirExpr *ie = pg_parse_expr(&rjg, a, q);
+                if (!ie) return NULL;
+                if (ptrvec_push(&items, ie) != OK) return NULL;
+            }
+            if (rc == ERR) {
+                ptrvec_clean(&items);
+                return NULL;
+            }
+
+            QirExpr *lhs = pg_parse_expr(&ljg, a, q);
+            if (!lhs) { ptrvec_clean(&items); return NULL; }
+
+            QirExpr **arr = (QirExpr **)ptrvec_flatten(&items, a);
+            uint32_t nitems = items.len;
+            ptrvec_clean(&items);
+
+            QirExpr *in = pg_qir_new_expr(a, QIR_EXPR_IN);
+            if (!in) return NULL;
+            in->u.in_.lhs = lhs;
+            in->u.in_.items = arr;
+            in->u.in_.nitems = nitems;
+
+            if (is_not) {
+                QirExpr *ne = pg_qir_new_expr(a, QIR_EXPR_NOT);
+                if (!ne) return NULL;
+                ne->u.bin.l = in;
+                ne->u.bin.r = NULL;
+                return ne;
+            }
+            return in;
+        }
+        free(akind);
+    }
+
     JsonArrIter it = {0};
     if (jsget_array_objects_begin(jg, "name", &it) != YES) return NULL;
 
@@ -383,6 +697,10 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     else if (strcmp(op, ">=") == 0) kind = QIR_EXPR_GE;
     else if (strcmp(op, "<") == 0) kind = QIR_EXPR_LT;
     else if (strcmp(op, "<=") == 0) kind = QIR_EXPR_LE;
+    else if (strcmp(op, "~~") == 0) kind = QIR_EXPR_LIKE;
+    else if (strcmp(op, "LIKE") == 0) kind = QIR_EXPR_LIKE;
+    else if (strcmp(op, "!~~") == 0) kind = QIR_EXPR_NOT_LIKE;
+    else if (strcmp(op, "NOT LIKE") == 0) kind = QIR_EXPR_NOT_LIKE;
     free(op);
 
     if (kind == QIR_EXPR_UNSUPPORTED) {
@@ -428,9 +746,14 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q
     sb_clean(&sb);
     if (!fname) return NULL;
 
-    QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_FUNCALL);
-    if (!e) return NULL;
-    e->u.funcall.name.name = fname;
+    // Reject FILTER for now (agents can use CASE WHEN instead).
+    if (jsget_exists_nonnull(jg, "agg_filter") == YES) {
+        q->has_unsupported = true;
+        return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+    }
+
+    QirFuncCall fc = {0};
+    fc.name.name = fname;
 
     // parse args
     PtrVec args = {0};
@@ -444,10 +767,48 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q
     }
 
     if (args.len > 0) {
-        e->u.funcall.args = (QirExpr **)ptrvec_flatten(&args, a);
-        e->u.funcall.nargs = args.len;
+        fc.args = (QirExpr **)ptrvec_flatten(&args, a);
+        fc.nargs = args.len;
+        if (!fc.args) { ptrvec_clean(&args); return NULL; }
+    }
+    int is_distinct = 0;
+    if (jsget_bool01(jg, "agg_distinct", &is_distinct) == YES) {
+        fc.is_distinct = (is_distinct != 0);
+    } else {
+        fc.is_distinct = false;
+    }
+    int is_star = 0;
+    if (jsget_bool01(jg, "agg_star", &is_star) == YES) {
+        fc.is_star = (is_star != 0);
+    } else {
+        fc.is_star = false;
     }
     ptrvec_clean(&args);
+
+    // Window function: FuncCall with OVER clause.
+    JsonGetter overjg = {0};
+    if (jsget_object(jg, "over", &overjg) == YES) {
+        JsonGetter wdjg = {0};
+        if (jsget_object(&overjg, "WindowDef", &wdjg) == YES) {
+            overjg = wdjg;
+        }
+
+        QirExpr *we = pg_qir_new_expr(a, QIR_EXPR_WINDOWFUNC);
+        if (!we) return NULL;
+        we->u.window.func = fc;
+        we->u.window.partition_by = NULL;
+        we->u.window.n_partition_by = 0;
+        we->u.window.order_by = NULL;
+        we->u.window.n_order_by = 0;
+        we->u.window.has_frame = false;
+
+        if (pg_parse_window_def(&overjg, a, q, &we->u.window) != OK) return NULL;
+        return we;
+    }
+
+    QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_FUNCALL);
+    if (!e) return NULL;
+    e->u.funcall = fc;
     return e;
 }
 
@@ -560,11 +921,15 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
         return pg_parse_func_call(&sub, a, q);
     }
 
+    if (jsget_object(jg, "CaseExpr", &sub) == YES) {
+        return pg_parse_caseexpr(&sub, a, q);
+    }
+
     if (jsget_object(jg, "SubLink", &sub) == YES) {
-        q->has_subquery = true;
         QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_SUBQUERY);
         if (!e) return NULL;
 
+        // We don't model EXISTS/IN/ANY differences; validator treats all subqueries uniformly.
         JsonGetter subjg = {0};
         if (jsget_object(&sub, "subselect", &subjg) != YES) {
             q->has_unsupported = true;
@@ -583,7 +948,6 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     }
 
     if (jsget_object(jg, "TypeCast", &sub) == YES) {
-        q->has_cast = true;
         QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_CAST);
         if (!e) return NULL;
 
@@ -688,7 +1052,6 @@ static int pg_parse_join_expr(
     if (jsget_object(&rjg, "RangeVar", &rjg) == YES) {
         j->rhs = pg_parse_rangevar(&rjg, a);
     } else if (jsget_object(&rjg, "RangeSubselect", &rjg) == YES) {
-        q->has_subquery = true;
         JsonGetter ssjg = rjg;
         JsonGetter subjg = {0};
         if (jsget_object(&ssjg, "subquery", &subjg) == YES) {
@@ -716,10 +1079,12 @@ static int pg_parse_join_expr(
         if (j->rhs) j->rhs->kind = QIR_FROM_UNSUPPORTED;
     }
 
-    // ON clause
+    // ON clause (no quals with INNER join is treated as CROSS JOIN).
     JsonGetter qjg = {0};
     if (jsget_object(jg, "quals", &qjg) == YES) {
         j->on = pg_parse_expr(&qjg, a, q);
+    } else if (j->kind == QIR_JOIN_INNER) {
+        j->kind = QIR_JOIN_CROSS;
     }
 
     if (ptrvec_push(joins, j) != OK) return ERR;
@@ -749,7 +1114,6 @@ static int pg_parse_from_item(
 
     JsonGetter ssjg = {0};
     if (jsget_object(jg, "RangeSubselect", &ssjg) == YES) {
-        q->has_subquery = true;
         QirFromItem *fi = pl_arena_alloc(a, (uint32_t)sizeof(QirFromItem));
         if (!fi) return ERR;
         fi->kind = QIR_FROM_SUBQUERY;
@@ -785,11 +1149,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
     // Flags
     if (jsget_exists_nonnull(jg, "distinctClause") == YES) q->has_distinct = true;
-    if (jsget_exists_nonnull(jg, "groupClause") == YES) q->has_group_by = true;
-    if (jsget_exists_nonnull(jg, "havingClause") == YES) q->has_having = true;
-    if (jsget_exists_nonnull(jg, "sortClause") == YES) q->has_order_by = true;
     if (jsget_exists_nonnull(jg, "limitOffset") == YES) q->has_offset = true;
-    if (jsget_exists_nonnull(jg, "withClause") == YES) q->has_subquery = true;
 
     // targetList
     PtrVec sels = {0};
@@ -814,13 +1174,8 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
             JsonGetter vjg = {0};
             if (jsget_object(&rjg, "val", &vjg) != YES) { rc = ERR; break; }
             QirExpr *expr = pg_parse_expr(&vjg, a, q);
-            if (!expr || expr->kind != QIR_EXPR_COLREF) {
-                q->has_unsupported = true;
-                si->value.qualifier.name = (char *)pl_arena_add(a, (void *)"", 0);
-                si->value.column.name = (char *)pl_arena_add(a, (void *)"", 0);
-            } else {
-                si->value = expr->u.colref;
-            }
+            if (!expr) { rc = ERR; break; }
+            si->value = expr;
 
             if (ptrvec_push(&sels, si) != OK) { rc = ERR; break; }
         }
@@ -853,6 +1208,55 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     q->joins = (QirJoin **)ptrvec_flatten(&joins, a);
     q->njoins = joins.len;
     ptrvec_clean(&joins);
+
+    // GROUP BY
+    PtrVec groups = {0};
+    if (jsget_array_objects_begin(jg, "groupClause", &it) == YES) {
+        JsonGetter elem = {0};
+        int rc = 0;
+        while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
+            QirExpr *expr = pg_parse_expr(&elem, a, q);
+            if (!expr) { rc = ERR; break; }
+            if (ptrvec_push(&groups, expr) != OK) { rc = ERR; break; }
+        }
+        if (rc == ERR) q->has_unsupported = true;
+    }
+    q->group_by = (QirExpr **)ptrvec_flatten(&groups, a);
+    q->n_group_by = groups.len;
+    ptrvec_clean(&groups);
+
+    // HAVING
+    JsonGetter hvg = {0};
+    int hrc = jsget_object(jg, "havingClause", &hvg);
+    if (hrc == ERR) {
+        q->has_unsupported = true;
+    } else if (hrc == YES) {
+        q->having = pg_parse_expr(&hvg, a, q);
+        if (!q->having) q->has_unsupported = true;
+    }
+
+    // ORDER BY
+    PtrVec orders = {0};
+    if (jsget_array_objects_begin(jg, "sortClause", &it) == YES) {
+        JsonGetter elem = {0};
+        int rc = 0;
+        while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
+            JsonGetter sjg = {0};
+            if (jsget_object(&elem, "SortBy", &sjg) != YES) { rc = ERR; break; }
+
+            JsonGetter njg = {0};
+            if (jsget_object(&sjg, "node", &njg) != YES) { rc = ERR; break; }
+            QirExpr *expr = pg_parse_expr(&njg, a, q);
+            if (!expr) { rc = ERR; break; }
+            expr = qir_resolve_order_alias(q, expr);
+
+            if (ptrvec_push(&orders, expr) != OK) { rc = ERR; break; }
+        }
+        if (rc == ERR) q->has_unsupported = true;
+    }
+    q->order_by = (QirExpr **)ptrvec_flatten(&orders, a);
+    q->n_order_by = orders.len;
+    ptrvec_clean(&orders);
 
     // WHERE
     JsonGetter wjg = {0};
