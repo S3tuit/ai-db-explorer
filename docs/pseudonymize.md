@@ -224,14 +224,14 @@ In Sensitive Mode, sensitive columns can appear only in this mode:
 Disallowed clauses in Sensitive Mode:
 
 * All JOIN except for INNER / ON can only contain = and AND
-* GROUP BY / HAVING
+* GROUP BY / HAVING on non sensitive columns
 * ORDER BY
 * DISTINCT
 * WITH (CTEs)
 * UNION/INTERSECT/EXCEPT
 * subqueries (anywhere)
 * OFFSET
-* any casts or expressions in SELECT list that touches a sensitive column
+* any casts or expressions that touches a sensitive column
 
 **SELECT list rules (Sensitive Mode):**
 

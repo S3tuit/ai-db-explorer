@@ -102,7 +102,7 @@ static inline QirExpr *pg_qir_new_expr(PlArena *a, QirExprKind kind) {
 
 /* Parses a ColumnRef node into a QirExpr.
  * Ownership: returned expression is arena-owned.
- * Side effects: may set q->has_star or q->has_unsupported.
+ * Side effects: may set has_star or mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     if (!jg || !a || !q) return NULL;
@@ -138,13 +138,13 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
             continue;
         }
 
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported column reference");
     }
 
     if (saw_star) {
         q->has_star = true;
         if (nparts > 1) {
-            q->has_unsupported = true;
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported column reference");
             return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
         }
         QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_COLREF);
@@ -155,7 +155,7 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
         return e;
     }
     if (nparts == 0 || nparts > 2) {
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported column reference");
         return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
     }
 
@@ -175,7 +175,7 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
 /* Parses a simple literal (A_Const).
  * Ownership: returned expression is arena-owned.
- * Side effects: may set q->has_unsupported.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_literal(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     if (!jg || !a || !q) return NULL;
@@ -276,7 +276,7 @@ static QirExpr *pg_parse_literal(const JsonGetter *jg, PlArena *a, QirQuery *q) 
             return e;
         }
 
-    q->has_unsupported = true;
+    qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported literal");
     return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
 }
 
@@ -288,7 +288,7 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q);
 
 /* Parses a WindowDef node into a QirWindowFunc.
  * Ownership: all arrays are arena-owned.
- * Side effects: may set q->has_unsupported for unsupported shapes.
+ * Side effects: may mark QIR_UNSUPPORTED for unsupported shapes.
  * Returns OK/ERR on allocation failure. */
 static int pg_parse_window_def(
     const JsonGetter *wg,
@@ -301,11 +301,11 @@ static int pg_parse_window_def(
     // Named/ref windows are not resolved yet; mark unsupported.
     char *tmp = NULL;
     if (jsget_string_decode_alloc(wg, "refname", &tmp) == YES) {
-        if (tmp[0] != '\0') q->has_unsupported = true;
+        if (tmp[0] != '\0') qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported window reference");
         free(tmp);
     }
     if (jsget_string_decode_alloc(wg, "name", &tmp) == YES) {
-        if (tmp[0] != '\0') q->has_unsupported = true;
+        if (tmp[0] != '\0') qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported window reference");
         free(tmp);
     }
 
@@ -320,7 +320,7 @@ static int pg_parse_window_def(
             if (!expr) { rc = ERR; break; }
             if (ptrvec_push(&parts, expr) != OK) { rc = ERR; break; }
         }
-        if (rc == ERR) q->has_unsupported = true;
+        if (rc == ERR) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported window clause");
     }
     wf->partition_by = (QirExpr **)ptrvec_flatten(&parts, a);
     wf->n_partition_by = parts.len;
@@ -341,7 +341,7 @@ static int pg_parse_window_def(
             if (!expr) { rc = ERR; break; }
             if (ptrvec_push(&orders, expr) != OK) { rc = ERR; break; }
         }
-        if (rc == ERR) q->has_unsupported = true;
+        if (rc == ERR) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported window clause");
     }
     wf->order_by = (QirExpr **)ptrvec_flatten(&orders, a);
     wf->n_order_by = orders.len;
@@ -351,7 +351,7 @@ static int pg_parse_window_def(
     int64_t frame = 0;
     int frc = jsget_i64(wg, "frameOptions", &frame);
     if (frc == ERR) {
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported window frame");
         wf->has_frame = true;
     } else {
         wf->has_frame = (frc == YES && frame != 0);
@@ -362,7 +362,7 @@ static int pg_parse_window_def(
 
 /* Parses a CaseExpr node into a QirExpr.
  * Ownership: returned expression and its children are arena-owned.
- * Side effects: may set q->has_unsupported on malformed or unknown shapes.
+ * Side effects: may mark QIR_UNSUPPORTED on malformed or unknown shapes.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_CASE);
@@ -387,7 +387,7 @@ static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a, QirQuery *q)
     rc = jsget_array_objects_begin(jg, "args", &it);
     if (rc == ERR) return NULL;
     if (rc == NO) {
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported column reference");
         return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
     }
 
@@ -416,7 +416,7 @@ static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a, QirQuery *q)
     }
     if (whens.len == 0) {
         ptrvec_clean(&whens);
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported CASE expression");
         return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
     }
 
@@ -461,7 +461,7 @@ static QirExpr *pg_fold_bool_expr(
 
 /* Parses a BoolExpr node into a QirExpr.
  * Ownership: returned expression is arena-owned.
- * Side effects: may set q->has_unsupported.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     JsonArrIter it = {0};
@@ -478,7 +478,7 @@ static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, PlArena *a, QirQuery *q
 
     if (rc == ERR || args.len == 0) {
         ptrvec_clean(&args);
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported CASE expression");
         return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
     }
 
@@ -493,7 +493,7 @@ static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, PlArena *a, QirQuery *q
 
     if (kind == QIR_EXPR_UNSUPPORTED) {
         free(args.items);
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported boolean expression");
         return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
     }
 
@@ -512,7 +512,7 @@ static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, PlArena *a, QirQuery *q
 
 /* Parses an A_Expr node into a QirExpr.
  * Ownership: returned expression is arena-owned.
- * Side effects: may set q->has_unsupported.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     // BETWEEN is encoded via A_Expr.kind with rexpr as a 2-item list.
@@ -523,7 +523,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
         if (strcmp(akind, "AEXPR_BETWEEN_SYM") == 0 ||
             strcmp(akind, "AEXPR_NOT_BETWEEN_SYM") == 0) {
             free(akind);
-            q->has_unsupported = true;
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported BETWEEN SYMMETRIC");
             return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
         }
         if (strcmp(akind, "AEXPR_BETWEEN") == 0 ||
@@ -540,7 +540,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
             JsonGetter listjg = {0};
             if (jsget_object(&rjg, "List", &listjg) != YES) {
-                q->has_unsupported = true;
+                qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported BETWEEN expression");
                 return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
             }
 
@@ -555,7 +555,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
             QirExpr *hi = pg_parse_expr(&elem, a, q);
             if (!hi) return NULL;
             if (jsget_array_objects_next(&listjg, &it, &elem) == YES) {
-                q->has_unsupported = true;
+                qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported BETWEEN expression");
                 return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
             }
 
@@ -704,7 +704,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     free(op);
 
     if (kind == QIR_EXPR_UNSUPPORTED) {
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported operator");
         return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
     }
 
@@ -717,7 +717,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
 /* Parses a FuncCall node into a QirExpr.
  * Ownership: returned expression is arena-owned.
- * Side effects: may set q->has_unsupported.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     JsonArrIter it = {0};
@@ -748,7 +748,7 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q
 
     // Reject FILTER for now (agents can use CASE WHEN instead).
     if (jsget_exists_nonnull(jg, "agg_filter") == YES) {
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "FILTER not supported");
         return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
     }
 
@@ -926,25 +926,41 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     }
 
     if (jsget_object(jg, "SubLink", &sub) == YES) {
-        QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_SUBQUERY);
-        if (!e) return NULL;
-
-        // We don't model EXISTS/IN/ANY differences; validator treats all subqueries uniformly.
         JsonGetter subjg = {0};
         if (jsget_object(&sub, "subselect", &subjg) != YES) {
-            q->has_unsupported = true;
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported subquery");
             return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
         }
         JsonGetter seljg = {0};
         if (jsget_object(&subjg, "SelectStmt", &seljg) != YES) {
-            q->has_unsupported = true;
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported subquery");
             return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
         }
         QirQuery *sq = pg_qir_new_query(a);
         if (!sq) return NULL;
-        e->u.subquery = sq;
         pg_parse_select_stmt(&seljg, a, sq);
-        return e;
+
+        QirExpr *subexpr = pg_qir_new_expr(a, QIR_EXPR_SUBQUERY);
+        if (!subexpr) return NULL;
+        subexpr->u.subquery = sq;
+
+        // Map IN (SELECT ...) to a QIR_EXPR_IN when a test expression exists.
+        JsonGetter tjg = {0};
+        if (jsget_object(&sub, "testexpr", &tjg) == YES) {
+            QirExpr *lhs = pg_parse_expr(&tjg, a, q);
+            if (!lhs) return NULL;
+            QirExpr *in = pg_qir_new_expr(a, QIR_EXPR_IN);
+            if (!in) return NULL;
+            in->u.in_.lhs = lhs;
+            in->u.in_.items = (QirExpr **)pl_arena_alloc(a, (uint32_t)sizeof(QirExpr *));
+            if (!in->u.in_.items) return NULL;
+            in->u.in_.items[0] = subexpr;
+            in->u.in_.nitems = 1;
+            return in;
+        }
+
+        // We don't model EXISTS/IN/ANY differences beyond the testexpr mapping above.
+        return subexpr;
     }
 
     if (jsget_object(jg, "TypeCast", &sub) == YES) {
@@ -959,7 +975,7 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
         JsonGetter tnjg = {0};
         if (jsget_object(&sub, "typeName", &tnjg) != YES) {
-            q->has_unsupported = true;
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported cast type");
             return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
         }
         JsonGetter tnjg2 = {0};
@@ -967,13 +983,13 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
             tnjg = tnjg2;
         }
         if (pg_parse_typename(&tnjg, a, &e->u.cast.type) != OK) {
-            q->has_unsupported = true;
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported cast type");
             return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
         }
         return e;
     }
 
-    q->has_unsupported = true;
+    qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported expression");
     return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
 }
 
@@ -1010,7 +1026,7 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
 
 /* Parses a range item or join and populates froms/joins (left-deep).
  * Ownership: from/joins vectors own their temporary buffers.
- * Side effects: may set q->has_unsupported.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
 static int pg_parse_from_item(
     const JsonGetter *jg, PlArena *a, QirQuery *q, PtrVec *froms, PtrVec *joins
@@ -1018,7 +1034,7 @@ static int pg_parse_from_item(
 
 /* Parses a join expression into from-items and joins (left-deep).
  * Ownership: join nodes are arena-owned.
- * Side effects: may set q->has_unsupported.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
 static int pg_parse_join_expr(
     const JsonGetter *jg, PlArena *a, QirQuery *q, PtrVec *froms, PtrVec *joins
@@ -1032,8 +1048,12 @@ static int pg_parse_join_expr(
     int jointype = 0;
     int64_t v = 0;
     if (jsget_i64(jg, "jointype", &v) == YES) jointype = (int)v;
-    if (jsget_exists_nonnull(jg, "usingClause") == YES) q->has_unsupported = true;
-    if (jsget_exists_nonnull(jg, "isNatural") == YES) q->has_unsupported = true;
+    if (jsget_exists_nonnull(jg, "usingClause") == YES) {
+        qir_set_status(q, a, QIR_UNSUPPORTED, "JOIN USING not supported");
+    }
+    if (jsget_exists_nonnull(jg, "isNatural") == YES) {
+        qir_set_status(q, a, QIR_UNSUPPORTED, "NATURAL JOIN not supported");
+    }
 
     QirJoin *j = pl_arena_alloc(a, (uint32_t)sizeof(QirJoin));
     if (!j) return ERR;
@@ -1042,7 +1062,7 @@ static int pg_parse_join_expr(
         case 1: j->kind = QIR_JOIN_LEFT; break;
         case 2: j->kind = QIR_JOIN_FULL; break;
         case 3: j->kind = QIR_JOIN_RIGHT; break;
-        default: j->kind = QIR_JOIN_UNSUPPORTED; q->has_unsupported = true; break;
+        default: j->kind = QIR_JOIN_UNSUPPORTED; qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported join type"); break;
     }
 
     // right
@@ -1074,7 +1094,7 @@ static int pg_parse_join_expr(
             }
         }
     } else {
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported join rhs");
         j->rhs = pl_arena_alloc(a, (uint32_t)sizeof(QirFromItem));
         if (j->rhs) j->rhs->kind = QIR_FROM_UNSUPPORTED;
     }
@@ -1093,7 +1113,7 @@ static int pg_parse_join_expr(
 
 /* Parses a range item or join and populates froms/joins (left-deep).
  * Ownership: from/join nodes are arena-owned.
- * Side effects: may set q->has_unsupported.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
 static int pg_parse_from_item(
     const JsonGetter *jg, PlArena *a, QirQuery *q, PtrVec *froms, PtrVec *joins
@@ -1136,7 +1156,7 @@ static int pg_parse_from_item(
         return ptrvec_push(froms, fi);
     }
 
-    q->has_unsupported = true;
+    qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported FROM item");
     return OK;
 }
 
@@ -1179,7 +1199,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
             if (ptrvec_push(&sels, si) != OK) { rc = ERR; break; }
         }
-        if (rc == ERR) q->has_unsupported = true;
+        if (rc == ERR) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported SELECT list");
     }
 
     q->select_items = (QirSelectItem **)ptrvec_flatten(&sels, a);
@@ -1198,7 +1218,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
                 break;
             }
         }
-        if (rc == ERR) q->has_unsupported = true;
+        if (rc == ERR) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported FROM clause");
     }
 
     q->from_items = (QirFromItem **)ptrvec_flatten(&froms, a);
@@ -1219,7 +1239,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
             if (!expr) { rc = ERR; break; }
             if (ptrvec_push(&groups, expr) != OK) { rc = ERR; break; }
         }
-        if (rc == ERR) q->has_unsupported = true;
+        if (rc == ERR) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported GROUP BY");
     }
     q->group_by = (QirExpr **)ptrvec_flatten(&groups, a);
     q->n_group_by = groups.len;
@@ -1229,10 +1249,10 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     JsonGetter hvg = {0};
     int hrc = jsget_object(jg, "havingClause", &hvg);
     if (hrc == ERR) {
-        q->has_unsupported = true;
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported HAVING");
     } else if (hrc == YES) {
         q->having = pg_parse_expr(&hvg, a, q);
-        if (!q->having) q->has_unsupported = true;
+        if (!q->having) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported HAVING");
     }
 
     // ORDER BY
@@ -1248,11 +1268,11 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
             if (jsget_object(&sjg, "node", &njg) != YES) { rc = ERR; break; }
             QirExpr *expr = pg_parse_expr(&njg, a, q);
             if (!expr) { rc = ERR; break; }
-            expr = qir_resolve_order_alias(q, expr);
+            expr = qir_resolve_order_alias(q, a, expr);
 
             if (ptrvec_push(&orders, expr) != OK) { rc = ERR; break; }
         }
-        if (rc == ERR) q->has_unsupported = true;
+        if (rc == ERR) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported ORDER BY");
     }
     q->order_by = (QirExpr **)ptrvec_flatten(&orders, a);
     q->n_order_by = orders.len;
@@ -1294,7 +1314,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
                     if (ptrvec_push(&ctes, cte) != OK) { rc = ERR; break; }
                 }
-                if (rc == ERR) q->has_unsupported = true;
+                if (rc == ERR) qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported CTE");
             }
             q->ctes = (QirCte **)ptrvec_flatten(&ctes, a);
             q->nctes = ctes.len;
@@ -1311,13 +1331,13 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
                 if (lit->u.lit.v.i64 >= 0 && lit->u.lit.v.i64 <= INT32_MAX) {
                     q->limit_value = (int32_t)lit->u.lit.v.i64;
                 } else {
-                    q->has_unsupported = true;
+                    qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported LIMIT");
                 }
             } else {
-                q->has_unsupported = true;
+                qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported LIMIT");
             }
         } else {
-            q->has_unsupported = true;
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported LIMIT");
         }
     }
 
@@ -1337,41 +1357,41 @@ static int pg_make_query_ir(DbBackend *db, const char *sql, QirQueryHandle *out)
 
     PgQueryParseResult res = pg_query_parse(sql);
     if (res.error) {
-        q->status = QIR_PARSE_ERROR;
+        qir_set_status(q, &out->arena, QIR_PARSE_ERROR, res.error->message);
         pg_query_free_parse_result(res);
         return OK;
     }
 
     if (!res.parse_tree) {
-        q->status = QIR_PARSE_ERROR;
+        qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
         pg_query_free_parse_result(res);
         return OK;
     }
 
     JsonGetter root = {0};
     if (jsget_init(&root, res.parse_tree, strlen(res.parse_tree)) != OK) {
-        q->status = QIR_PARSE_ERROR;
+        qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
         pg_query_free_parse_result(res);
         return OK;
     }
 
     JsonArrIter it = {0};
     if (jsget_array_objects_begin(&root, "stmts", &it) != YES) {
-        q->status = QIR_PARSE_ERROR;
+        qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
         pg_query_free_parse_result(res);
         return OK;
     }
 
     JsonGetter stmt = {0};
     if (jsget_array_objects_next(&root, &it, &stmt) != YES) {
-        q->status = QIR_PARSE_ERROR;
+        qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
         pg_query_free_parse_result(res);
         return OK;
     }
 
     // multiple statements are a parse error
     if (jsget_array_objects_next(&root, &it, &stmt) == YES) {
-        q->status = QIR_PARSE_ERROR;
+        qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "multiple statements");
         pg_query_free_parse_result(res);
         return OK;
     }
@@ -1383,7 +1403,7 @@ static int pg_make_query_ir(DbBackend *db, const char *sql, QirQueryHandle *out)
 
     JsonGetter stg = {0};
     if (jsget_object(&stmt, "stmt", &stg) != YES) {
-        q->status = QIR_PARSE_ERROR;
+        qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
         pg_query_free_parse_result(res);
         return OK;
     }
@@ -1396,11 +1416,7 @@ static int pg_make_query_ir(DbBackend *db, const char *sql, QirQueryHandle *out)
             return ERR;
         }
     } else {
-        q->status = QIR_UNSUPPORTED;
-    }
-
-    if (q->status == QIR_OK && q->has_unsupported) {
-        q->status = QIR_UNSUPPORTED;
+        qir_set_status(q, &out->arena, QIR_UNSUPPORTED, "unsupported statement type");
     }
 
     pg_query_free_parse_result(res);

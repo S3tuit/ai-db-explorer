@@ -27,6 +27,7 @@ int qir_handle_init(QirQueryHandle *h) {
   }
 
   q->status = QIR_OK;
+  q->status_reason = NULL;
   q->kind = QIR_STMT_SELECT;
   q->limit_value = -1;
   h->q = q;
@@ -57,6 +58,24 @@ void qir_touch_report_destroy(QirTouchReport *tr) {
   free(tr);
 }
 
+/* Sets query status and (optional) reason once; first status wins.
+ * Ownership: copies reason into arena when provided.
+ * Side effects: mutates q->status and q->status_reason.
+ * Error semantics: no return value; on invalid input it is a no-op. */
+void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status, const char *reason) {
+  if (!q) return;
+  if (q->status == QIR_OK) q->status = status;
+  if (q->status != status) return;
+  if (!q->status_reason && reason) {
+    if (arena) {
+      q->status_reason = (const char *)pl_arena_add(
+          arena, (void *)reason, (uint32_t)strlen(reason));
+    } else {
+      q->status_reason = reason;
+    }
+  }
+}
+
 // ----------------------------
 // Touch extraction
 // ----------------------------
@@ -70,9 +89,9 @@ static bool qir_ident_eq(const QirIdent *a, const QirIdent *b) {
 
 /* Resolves ORDER BY alias references to SELECT item expressions.
  * Ownership: returned pointer is owned by the QueryIR arena.
- * Side effects: may mark q->has_unsupported on ambiguous aliases.
+ * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
  * Returns the resolved expression or the original expression if no match. */
-QirExpr *qir_resolve_order_alias(QirQuery *q, QirExpr *expr) {
+QirExpr *qir_resolve_order_alias(QirQuery *q, PlArena *arena, QirExpr *expr) {
   if (!q || !expr || expr->kind != QIR_EXPR_COLREF) return expr;
   if (!expr->u.colref.qualifier.name || expr->u.colref.qualifier.name[0] != '\0') {
     return expr;
@@ -87,7 +106,7 @@ QirExpr *qir_resolve_order_alias(QirQuery *q, QirExpr *expr) {
     if (!si || !si->out_alias.name) continue;
     if (strcmp(si->out_alias.name, name) == 0) {
       if (resolved) {
-        q->has_unsupported = true;
+        qir_set_status(q, arena, QIR_UNSUPPORTED, "ambiguous ORDER BY alias");
         return expr;
       }
       resolved = si->value;
@@ -292,7 +311,7 @@ static void qir_extract_from_query_rec(
   if (!q || !tr) return;
 
   // If backend has already flagged unsupported constructs, carry it through.
-  if (q->has_unsupported) tr->has_unsupported = true;
+  if (q->status == QIR_UNSUPPORTED) tr->has_unsupported = true;
 
   // Recurse into CTE bodies (always nested relative to the parent query).
   for (uint32_t i = 0; i < q->nctes; i++) {
@@ -400,7 +419,7 @@ QirTouchReport *qir_extract_touches(const QirQuery *q) {
 
   // If we saw unknown touches or unsupported constructs, caller may reject.
   // Also propagate backend's unsupported flag at top-level.
-  if (q->has_unsupported) tr->has_unsupported = true;
+  if (q->status == QIR_UNSUPPORTED) tr->has_unsupported = true;
 
   return tr;
 }

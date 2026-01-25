@@ -138,6 +138,8 @@ typedef struct QirWindowFunc {
   bool has_frame;
 } QirWindowFunc;
 
+// IN(...). Note that IN(SELECT...) is modelled setting items[0] to a QirExpr
+// representing a QirQuery
 typedef struct QirInExpr {
   QirExpr *lhs;
   QirExpr **items;    // items inside IN(...)
@@ -253,13 +255,14 @@ typedef struct QirCte {
 
 struct QirQuery {
   QirStatus status;
+  const char *status_reason; // arena-owned; NULL if unset. Indicates the
+                             // reason why the status is not QIR_OK
   QirStmtKind kind;
 
   // Conservative feature flags (backend sets these).
   bool has_star;          // SELECT * or table.*
   bool has_distinct;
   bool has_offset;
-  bool has_unsupported;   // backend saw nodes it couldn't map safely
 
   // CTEs
   QirCte **ctes;
@@ -330,7 +333,7 @@ typedef struct QirTouchReport {
 
   // Convenience flags
   bool has_unknown_touches;   // true if any touch.kind == UNKNOWN
-  bool has_unsupported;       // true if query.has_unsupported or unsupported exprs encountered
+  bool has_unsupported;       // true if unsupported exprs encountered
 } QirTouchReport;
 
 // ----------------------------
@@ -357,10 +360,16 @@ void qir_touch_report_destroy(QirTouchReport *tr);
 //   resolve a qualifier, it marks UNKNOWN touches and has_unsupported.
 QirTouchReport *qir_extract_touches(const QirQuery *q);
 
+/* Sets query status and (optional) reason once; first status wins.
+ * Ownership: copies reason into arena when provided.
+ * Side effects: mutates q->status and q->status_reason.
+ * Error semantics: no return value; on invalid input it is a no-op. */
+void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status, const char *reason);
+
 /* Resolves ORDER BY alias references to SELECT item expressions.
  * Ownership: returned pointer is owned by the QueryIR arena.
- * Side effects: may mark q->has_unsupported on ambiguous aliases.
+ * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
  * Returns the resolved expression or the original expression if no match. */
-QirExpr *qir_resolve_order_alias(QirQuery *q, QirExpr *expr);
+QirExpr *qir_resolve_order_alias(QirQuery *q, PlArena *arena, QirExpr *expr);
 
 #endif // QUERY_IR_H

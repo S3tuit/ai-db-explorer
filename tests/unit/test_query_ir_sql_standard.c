@@ -57,7 +57,6 @@ static void test_sql_standard_predicates_and_limit(void) {
     ASSERT_TRUE(h.q->status == QIR_OK);
     ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
     ASSERT_TRUE(h.q->has_star == false);
-    ASSERT_TRUE(h.q->has_unsupported == false);
     ASSERT_TRUE(h.q->limit_value == 200);
 
     // SELECT list
@@ -112,7 +111,6 @@ static void test_sql_standard_in_list(void) {
 
     ASSERT_TRUE(h.q != NULL);
     ASSERT_TRUE(h.q->status == QIR_OK);
-    ASSERT_TRUE(h.q->has_unsupported == false);
 
     ASSERT_TRUE(h.q->where != NULL);
     ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
@@ -328,7 +326,6 @@ static void test_sql_standard_semicolon_literal(void) {
 
     ASSERT_TRUE(h.q != NULL);
     ASSERT_TRUE(h.q->status == QIR_OK);
-    ASSERT_TRUE(h.q->has_unsupported == false);
 
     qir_handle_destroy(&h);
 }
