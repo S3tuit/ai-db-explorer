@@ -5,9 +5,10 @@
 #include <stdint.h>
 #include "safety_policy.h"
 
+#define CURR_CONN_CAT_VERSION 1.0
+
 typedef enum {
   DB_KIND_POSTGRES = 1,
-  DB_KIND_MONGO    = 2,
 } DbKind;
 
 /**

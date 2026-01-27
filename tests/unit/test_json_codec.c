@@ -394,6 +394,18 @@ static void test_jsget_object_view(void) {
     ASSERT_TRUE(jsget_object(&jg, "a.missing", &sub) == NO);
 }
 
+static void test_jsget_object_inplace(void) {
+    const char *json = "{\"a\":{\"b\":{\"c\":\"z\"}},\"x\":2}";
+    JsonGetter jg;
+    JsonStrSpan sp = {0};
+
+    ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+    ASSERT_TRUE(jsget_object(&jg, "a.b", &jg) == YES);
+    ASSERT_TRUE(jsget_string_span(&jg, "c", &sp) == YES);
+    ASSERT_TRUE(sp.len == 1);
+    ASSERT_TRUE(sp.ptr[0] == 'z');
+}
+
 static void test_jsget_null_and_overflow(void) {
     const char *json = "{\"a\":null,\"b\":4294967296}";
     JsonGetter jg;
@@ -544,6 +556,7 @@ int main (void) {
     test_jsget_simple_rpc_validation();
     test_jsget_paths();
     test_jsget_object_view();
+    test_jsget_object_inplace();
     test_jsget_null_and_overflow();
     test_jsget_u32_and_bool();
     test_jsget_f64();

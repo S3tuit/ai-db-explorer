@@ -40,7 +40,8 @@ typedef enum QirScope {
 } QirScope;
 
 // Identifiers are stored as normalized strings by the backend parser.
-// For Postgres, backend should normalize unquoted identifiers to lower-case.
+// For v1, the backend must lower-case identifiers so validator matching is
+// case-insensitive, even if the source SQL used quotes.
 typedef struct QirIdent {
   const char *name; // never NULL; may be "" if backend couldn't recover a name.
 } QirIdent;
@@ -192,16 +193,15 @@ struct QirExpr {
 // FROM items / joins
 // ----------------------------
 
-typedef struct QirFromItem QirFromItem;
-
 typedef enum QirFromKind {
   QIR_FROM_BASE_REL = 1,   // table/view reference
   QIR_FROM_SUBQUERY,       // derived table: FROM (SELECT ...) AS alias
   QIR_FROM_CTE_REF,        // FROM cte_name AS alias
+  QIR_FROM_VALUES,         // FROM (VALUES ...) AS alias
   QIR_FROM_UNSUPPORTED
 } QirFromKind;
 
-struct QirFromItem {
+typedef struct QirFromItem {
   QirFromKind kind;
 
   // Policy: every range item must have an alias; references must use that alias.
@@ -211,8 +211,12 @@ struct QirFromItem {
     QirRelRef rel;        // BASE_REL
     QirQuery *subquery;   // SUBQUERY
     QirIdent cte_name;    // CTE_REF
+    struct {              // VALUES
+      QirIdent *colnames; // optional column list from AS v(x,y)
+      uint32_t ncolnames;
+    } values;
   } u;
-};
+} QirFromItem;
 
 // Join modeling
 typedef enum QirJoinKind {

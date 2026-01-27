@@ -965,7 +965,6 @@ int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out) {
     if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv)) return NO;
     if (tv->type != JSMN_OBJECT) return ERR;
 
-    memset(out, 0, sizeof(*out));
     out->json = jg->json;
     out->json_len = jg->json_len;
     out->toks = jg->toks;

@@ -1,27 +1,41 @@
 {
-  "safetyPolicy": {
-    "readOnly": "yes",
-    "statementTimeoutMs": 5000,
-    "maxRowReturned": 200,
-    "maxQueryKiloBytes": 64
+  "version":"1.0",
+
+  "safetyPolicy":{
+    "readOnly":"yes",
+    "statementTimeoutMs":5000,
+    "maxRowReturned":200,
+    "maxQueryKiloBytes":64
   },
 
-  "databases": [
+  "databases":[
     {
-      "type": "postgres",
-      "connectionName": "MyPostgres",
-      "host": "localhost",
-      "port": 5432,
-      "username": "postgres",
-      "database": "postgres"
+      "type":"postgres",
+      "connectionName":"MyPostgres",
+      "host":"localhost",
+      "port":5432,
+      "username":"postgres",
+      "database":"postgres",
+      "columnPolicy":{
+        "pseudonymize":{
+          "deterministic":[
+            "users.email",
+            "users.phone"
+          ],
+          "randomized":[
+            "cards.number"
+          ]
+        }
+      }
     },
+
     {
-      "type": "postgres",
-      "connectionName": "AnotherPostgres",
-      "host": "localhost",
-      "port": 5432,
-      "username": "postgres",
-      "database": "another"
+      "type":"postgres",
+      "connectionName":"AnotherPostgres",
+      "host":"localhost",
+      "port":5432,
+      "username":"postgres",
+      "database":"another"
     }
   ]
 }

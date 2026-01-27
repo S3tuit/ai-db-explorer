@@ -6,6 +6,71 @@
 #include "query_ir.h"
 #include "test.h"
 
+/* Extracts a touch report for a parsed query.
+ * Ownership: caller must destroy the report with qir_touch_report_destroy().
+ * Side effects: allocates memory for the report.
+ * Returns pointer; assertions abort on failure. */
+static QirTouchReport *extract_touches(const QirQueryHandle *h) {
+    ASSERT_TRUE(h != NULL);
+    ASSERT_TRUE(h->q != NULL);
+    QirTouchReport *tr = qir_extract_touches(h->q);
+    ASSERT_TRUE(tr != NULL);
+    return tr;
+}
+
+/* Asserts that a touch matching the given fields exists. */
+static void assert_touch_has(
+        const QirTouchReport *tr,
+        QirScope scope,
+        QirTouchKind kind,
+        const char *qual,
+        const char *col,
+        const char *file,
+        int line) {
+    ASSERT_TRUE_AT(tr != NULL, file, line);
+    ASSERT_TRUE_AT(qual != NULL, file, line);
+    ASSERT_TRUE_AT(col != NULL, file, line);
+    for (uint32_t i = 0; i < tr->ntouches; i++) {
+        const QirTouch *t = tr->touches ? tr->touches[i] : NULL;
+        if (!t) continue;
+        if (t->scope != scope) continue;
+        if (t->kind != kind) continue;
+        if (!t->col.qualifier.name || !t->col.column.name) continue;
+        if (strcmp(t->col.qualifier.name, qual) != 0) continue;
+        if (strcmp(t->col.column.name, col) != 0) continue;
+        return;
+    }
+    ASSERT_TRUE_AT(false, file, line);
+}
+#define ASSERT_TOUCH(tr, scope, kind, qual, col) \
+    assert_touch_has((tr), (scope), (kind), (qual), (col), __FILE__, __LINE__)
+
+/* Prints all touches to stderr for debugging failed expectations. */
+static void dump_touches(const QirTouchReport *tr) {
+    if (!tr) return;
+    for (uint32_t i = 0; i < tr->ntouches; i++) {
+        const QirTouch *t = tr->touches ? tr->touches[i] : NULL;
+        if (!t) continue;
+        fprintf(stderr, "TOUCH[%u] scope=%d kind=%d qual=%s col=%s\n",
+                i,
+                (int)t->scope,
+                (int)t->kind,
+                t->col.qualifier.name ? t->col.qualifier.name : "(null)",
+                t->col.column.name ? t->col.column.name : "(null)");
+    }
+}
+
+/* Asserts no unknown touches; dumps all touches on failure. */
+static void assert_no_unknown_touches(
+        const QirTouchReport *tr, const char *file, int line) {
+    ASSERT_TRUE_AT(tr != NULL, file, line);
+    if (tr->has_unknown_touches) {
+        dump_touches(tr);
+        ASSERT_TRUE_AT(false, file, line);
+    }
+}
+#define ASSERT_NO_UNKNOWN_TOUCHES(tr) assert_no_unknown_touches((tr), __FILE__, __LINE__)
+
 /* Builds a QueryIR using the Postgres backend.
  * Ownership: caller must call qir_handle_destroy() on out_h.
  * Side effects: allocates backend + arena memory.
@@ -24,7 +89,10 @@ static void assert_ident_eq(
         const QirIdent *id, const char *expected, const char *file, int line) {
     ASSERT_TRUE_AT(id != NULL, file, line);
     ASSERT_TRUE_AT(id->name != NULL, file, line);
-    ASSERT_TRUE_AT(strcmp(id->name, expected) == 0, file, line);
+    if (strcmp(id->name, expected) != 0) {
+        fprintf(stderr, "IDENT MISMATCH: got='%s' expected='%s'\n", id->name, expected);
+        ASSERT_TRUE_AT(false, file, line);
+    }
 }
 #define ASSERT_IDENT_EQ(id, expected) assert_ident_eq((id), (expected), __FILE__, __LINE__)
 
@@ -96,6 +164,14 @@ static void test_sql_standard_predicates_and_limit(void) {
     ASSERT_TRUE(rhs->u.bin.r->u.lit.kind == QIR_LIT_STRING);
     ASSERT_TRUE(strcmp(rhs->u.bin.r->u.lit.v.s, "c") == 0);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_NO_UNKNOWN_TOUCHES(tr);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "age");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "region");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
@@ -130,6 +206,13 @@ static void test_sql_standard_in_list(void) {
     ASSERT_TRUE(strcmp(i0->u.lit.v.s, "a") == 0);
     ASSERT_TRUE(strcmp(i1->u.lit.v.s, "b") == 0);
     ASSERT_TRUE(strcmp(i2->u.lit.v.s, "c") == 0);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_NO_UNKNOWN_TOUCHES(tr);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "name");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "region");
+    qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
 }
@@ -175,6 +258,12 @@ static void test_sql_standard_not(void) {
     ASSERT_TRUE(h.q->where->u.bin.l != NULL);
     ASSERT_TRUE(h.q->where->u.bin.r == NULL);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "disabled");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
@@ -196,7 +285,7 @@ static void test_sql_standard_order_by(void) {
     qir_handle_destroy(&h);
 }
 
-/* A5b. ORDER BY resolves SELECT alias. */
+/* A6. ORDER BY resolves SELECT alias. */
 static void test_sql_standard_order_by_alias(void) {
     const char *sql =
         "WITH cte_people AS ("
@@ -215,10 +304,17 @@ static void test_sql_standard_order_by_alias(void) {
     ASSERT_TRUE(h.q->n_order_by == 1);
     ASSERT_COLREF(h.q->order_by[0], "p", "nm");
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "p", "nm");
+    ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "name");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
-/* A6. DISTINCT. */
+/* A7. DISTINCT. */
 static void test_sql_standard_distinct(void) {
     const char *sql =
         "SELECT DISTINCT p.region AS region "
@@ -234,7 +330,7 @@ static void test_sql_standard_distinct(void) {
     qir_handle_destroy(&h);
 }
 
-/* A7. Function calls in SELECT and WHERE. */
+/* A8. Function calls in SELECT and WHERE. */
 static void test_sql_standard_func_call(void) {
     const char *sql =
         "SELECT lower(p.email) AS email_lc "
@@ -258,7 +354,7 @@ static void test_sql_standard_func_call(void) {
     qir_handle_destroy(&h);
 }
 
-/* A8. INNER JOIN + ON predicate. */
+/* A9. INNER JOIN + ON predicate. */
 static void test_sql_standard_join_inner(void) {
     const char *sql =
         "SELECT p.name AS person_name, f.friend_name AS friend_name "
@@ -274,11 +370,23 @@ static void test_sql_standard_join_inner(void) {
     ASSERT_TRUE(h.q->njoins == 1);
     ASSERT_TRUE(h.q->joins[0]->kind == QIR_JOIN_INNER);
     ASSERT_TRUE(h.q->joins[0]->on != NULL);
+    ASSERT_TRUE(h.q->joins[0]->rhs != NULL);
+    ASSERT_IDENT_EQ(&h.q->joins[0]->rhs->alias, "f");
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_NO_UNKNOWN_TOUCHES(tr);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "name");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "f", "friend_name");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "f", "person_id");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
+    qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
 }
 
-/* A9. CROSS JOIN. */
+/* A10. CROSS JOIN. */
 static void test_sql_standard_join_cross(void) {
     const char *sql =
         "SELECT p.name AS n, r.code AS c "
@@ -297,7 +405,7 @@ static void test_sql_standard_join_cross(void) {
     qir_handle_destroy(&h);
 }
 
-/* A10. OFFSET. */
+/* A11. OFFSET. */
 static void test_sql_standard_offset(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -315,7 +423,7 @@ static void test_sql_standard_offset(void) {
     qir_handle_destroy(&h);
 }
 
-/* A11. Semicolon inside string literal. */
+/* A12. Semicolon inside string literal. */
 static void test_sql_standard_semicolon_literal(void) {
     const char *sql =
         "SELECT 'a; b; c' AS txt "
@@ -327,10 +435,16 @@ static void test_sql_standard_semicolon_literal(void) {
     ASSERT_TRUE(h.q != NULL);
     ASSERT_TRUE(h.q->status == QIR_OK);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->ntouches == 0);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
-/* A12. IN with empty list (parse error). */
+/* A13. IN with empty list (parse error). */
 static void test_sql_standard_in_empty_list(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -346,7 +460,7 @@ static void test_sql_standard_in_empty_list(void) {
     qir_handle_destroy(&h);
 }
 
-/* A13. COUNT(*) */
+/* A14. COUNT(*) */
 static void test_sql_standard_count_star(void) {
     const char *sql =
         "SELECT COUNT(*) "
@@ -361,21 +475,61 @@ static void test_sql_standard_count_star(void) {
     ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
     ASSERT_TRUE(h.q->select_items[0]->value->u.funcall.is_star == true);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->ntouches == 0);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    qir_touch_report_destroy(tr);
+
+    qir_handle_destroy(&h);
+}
+
+/* A15. Literal-only SELECT list. */
+static void test_sql_standard_literal_select(void) {
+    const char *sql =
+        "SELECT 'a' AS a_string, 3 AS a_num;";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_OK);
+    ASSERT_TRUE(h.q->nselect == 2);
+    ASSERT_IDENT_EQ(&h.q->select_items[0]->out_alias, "a_string");
+    ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_LITERAL);
+    ASSERT_TRUE(h.q->select_items[0]->value->u.lit.kind == QIR_LIT_STRING);
+    ASSERT_TRUE(strcmp(h.q->select_items[0]->value->u.lit.v.s, "a") == 0);
+    ASSERT_IDENT_EQ(&h.q->select_items[1]->out_alias, "a_num");
+    ASSERT_TRUE(h.q->select_items[1]->value->kind == QIR_EXPR_LITERAL);
+    ASSERT_TRUE(h.q->select_items[1]->value->u.lit.kind == QIR_LIT_INT64);
+    ASSERT_TRUE(h.q->select_items[1]->value->u.lit.v.i64 == 3);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->ntouches == 0);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
 /* B1. Multiple CTEs. */
 static void test_sql_standard_ctes(void) {
     const char *sql =
-        "WITH male AS ("
-        "  SELECT p.name AS name "
-        "  FROM private.people AS p "
-        "  WHERE p.gender = 'M'"
+        "WITH people AS ("
+        "  SELECT h.name AS name, "
+        "         h.gender AS gender "
+        "  FROM private.humans h"
+        "), "
+        "male AS ("
+        "  SELECT pm.name AS name "
+        "  FROM people AS pm "
+        "  WHERE pm.gender = 'M'"
         "), "
         "female AS ("
-        "  SELECT p.name AS name "
-        "  FROM private.people AS p "
-        "  WHERE p.gender = 'F'"
+        "  SELECT pf.name AS name "
+        "  FROM people AS pf "
+        "  WHERE pf.gender = 'F'"
         ") "
         "SELECT m.name AS name "
         "FROM male AS m;";
@@ -385,9 +539,17 @@ static void test_sql_standard_ctes(void) {
 
     ASSERT_TRUE(h.q != NULL);
     ASSERT_TRUE(h.q->status == QIR_OK);
-    ASSERT_TRUE(h.q->nctes == 2);
-    ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "male");
-    ASSERT_IDENT_EQ(&h.q->ctes[1]->name, "female");
+    ASSERT_TRUE(h.q->nctes == 3);
+    ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "people");
+    ASSERT_IDENT_EQ(&h.q->ctes[1]->name, "male");
+    ASSERT_IDENT_EQ(&h.q->ctes[2]->name, "female");
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_NO_UNKNOWN_TOUCHES(tr);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_DERIVED, "pm", "gender");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "m", "name");
+    qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
 }
@@ -410,6 +572,13 @@ static void test_sql_standard_subquery_from(void) {
     ASSERT_TRUE(h.q->nfrom == 1);
     ASSERT_TRUE(h.q->from_items[0]->kind == QIR_FROM_SUBQUERY);
     ASSERT_IDENT_EQ(&h.q->from_items[0]->alias, "x");
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "age");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "x", "name");
+    qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
 }
@@ -483,6 +652,13 @@ static void test_sql_standard_in_subquery(void) {
     ASSERT_TRUE(h.q->where->u.in_.items[0] != NULL);
     ASSERT_TRUE(h.q->where->u.in_.items[0]->kind == QIR_EXPR_SUBQUERY);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
+    ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "o", "user_id");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
@@ -505,6 +681,10 @@ static void test_sql_standard_star_in_cte(void) {
     ASSERT_TRUE(h.q->ctes[0]->query != NULL);
     ASSERT_TRUE(h.q->ctes[0]->query->has_star == true);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == true);
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
@@ -519,6 +699,10 @@ static void test_sql_standard_multi_stmt_rejected(void) {
 
     ASSERT_TRUE(h.q != NULL);
     ASSERT_TRUE(h.q->status == QIR_PARSE_ERROR);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unsupported == true);
+    qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
 }
@@ -577,6 +761,10 @@ static void test_sql_standard_update_rejected(void) {
     ASSERT_TRUE(h.q != NULL);
     ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unsupported == true);
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
@@ -629,10 +817,39 @@ static void test_sql_standard_schema_func(void) {
     ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
     ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.name, "pg_catalog.lower");
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "email");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
-/* E3. LIKE operator. */
+/* E3. Mixed-case identifiers should be normalized. */
+static void test_sql_standard_mixed_case_touches(void) {
+    const char *sql =
+        "SELECT P.\"Name\" AS Nm "
+        "FROM private.people AS P "
+        "WHERE P.\"Age\" > 10;";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_OK);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "name");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "age");
+    qir_touch_report_destroy(tr);
+
+    qir_handle_destroy(&h);
+}
+
+/* E4. LIKE operator. */
 static void test_sql_standard_like(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -650,7 +867,7 @@ static void test_sql_standard_like(void) {
     qir_handle_destroy(&h);
 }
 
-/* E8. NOT LIKE operator. */
+/* E9. NOT LIKE operator. */
 static void test_sql_standard_not_like(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -668,7 +885,7 @@ static void test_sql_standard_not_like(void) {
     qir_handle_destroy(&h);
 }
 
-/* E4. BETWEEN and NOT BETWEEN. */
+/* E5. BETWEEN and NOT BETWEEN. */
 static void test_sql_standard_between(void) {
     const char *sql_between =
         "SELECT p.name AS name "
@@ -699,7 +916,7 @@ static void test_sql_standard_between(void) {
     qir_handle_destroy(&h2);
 }
 
-/* E5. CASE expression. */
+/* E6. CASE expression. */
 static void test_sql_standard_case(void) {
     const char *sql =
         "SELECT CASE WHEN p.age > 18 THEN p.name ELSE 'minor' END AS label "
@@ -713,10 +930,17 @@ static void test_sql_standard_case(void) {
     ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_CASE);
     ASSERT_TRUE(h.q->select_items[0]->value->u.case_.nwhens >= 1);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "age");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "name");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
-/* E6. Window function. */
+/* E7. Window function. */
 static void test_sql_standard_window(void) {
     const char *sql =
         "SELECT row_number() OVER (PARTITION BY p.region ORDER BY p.id) AS rn "
@@ -731,10 +955,17 @@ static void test_sql_standard_window(void) {
     ASSERT_TRUE(h.q->select_items[0]->value->u.window.n_partition_by == 1);
     ASSERT_TRUE(h.q->select_items[0]->value->u.window.n_order_by == 1);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "region");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
 
-/* E7. GROUP BY / HAVING. */
+/* E8. GROUP BY / HAVING. */
 static void test_sql_standard_group_by_having(void) {
     const char *sql =
         "SELECT p.region AS region, count(*) AS c "
@@ -751,6 +982,12 @@ static void test_sql_standard_group_by_having(void) {
     ASSERT_COLREF(h.q->group_by[0], "p", "region");
     ASSERT_TRUE(h.q->having != NULL);
     ASSERT_TRUE(h.q->having->kind == QIR_EXPR_GT);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "region");
+    qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
 }
@@ -770,8 +1007,57 @@ static void test_sql_standard_window_partition_only(void) {
     ASSERT_TRUE(h.q->select_items[0]->value->u.window.n_partition_by == 1);
     ASSERT_TRUE(h.q->select_items[0]->value->u.window.n_order_by == 0);
 
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "region");
+    qir_touch_report_destroy(tr);
+
     qir_handle_destroy(&h);
 }
+
+/* E10. Unqualified/unknown qualifier should be marked as UNKNOWN touch. */
+static void test_sql_standard_unknown_touch(void) {
+    const char *sql =
+        "SELECT p.name AS name "
+        "FROM private.people AS p "
+        "WHERE name = 'x' OR z.id = 1;";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_OK);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == true);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_UNKNOWN, "", "name");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_UNKNOWN, "z", "id");
+    qir_touch_report_destroy(tr);
+
+    qir_handle_destroy(&h);
+}
+
+/* E11. VALUES in FROM. */
+static void test_sql_standard_values_from_rejected(void) {
+    const char *sql =
+        "SELECT v.x AS x "
+        "FROM (VALUES (1), (2)) AS v(x) "
+        "LIMIT 10;";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_OK);
+    ASSERT_TRUE(h.q->nfrom == 1);
+    ASSERT_TRUE(h.q->from_items[0]->kind == QIR_FROM_VALUES);
+    ASSERT_IDENT_EQ(&h.q->from_items[0]->alias, "v");
+    ASSERT_TRUE(h.q->from_items[0]->u.values.ncolnames == 1);
+    ASSERT_IDENT_EQ(&h.q->from_items[0]->u.values.colnames[0], "x");
+    qir_handle_destroy(&h);
+}
+
+
 
 int main(void) {
     test_sql_standard_predicates_and_limit();
@@ -788,6 +1074,7 @@ int main(void) {
     test_sql_standard_semicolon_literal();
     test_sql_standard_in_empty_list();
     test_sql_standard_count_star();
+    test_sql_standard_literal_select();
     test_sql_standard_ctes();
     test_sql_standard_subquery_from();
     test_sql_standard_subquery_where();
@@ -802,6 +1089,7 @@ int main(void) {
     test_sql_standard_order_by_alias_conflict();
     test_sql_standard_unqualified_col();
     test_sql_standard_schema_func();
+    test_sql_standard_mixed_case_touches();
     test_sql_standard_like();
     test_sql_standard_not_like();
     test_sql_standard_between();
@@ -809,6 +1097,8 @@ int main(void) {
     test_sql_standard_window();
     test_sql_standard_window_partition_only();
     test_sql_standard_group_by_having();
+    test_sql_standard_unknown_touch();
+    test_sql_standard_values_from_rejected();
     fprintf(stderr, "OK: test_query_ir_sql_standard\n");
     return 0;
 }
