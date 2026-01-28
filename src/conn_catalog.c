@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -92,6 +93,264 @@ error:
   return ERR;
 }
 
+/* Lowercases an ASCII string in-place. */
+static void str_lower_inplace(char *s) {
+  if (!s) return;
+  for (; *s; s++) {
+    *s = (char)tolower((unsigned char)*s);
+  }
+}
+
+/* Splits a decoded column path into schema/table/column components.
+ * Ownership: caller owns 's' and any output pointers are into 's'.
+ * Side effects: mutates 's' by inserting NUL terminators.
+ * Returns OK/ERR. */
+static int split_column_path(char *s, char **out_schema,
+                             char **out_table, char **out_col) {
+  if (!s || !out_table || !out_col) return ERR;
+
+  *out_schema = NULL;
+  *out_table = NULL;
+  *out_col = NULL;
+
+  char *first = strchr(s, '.');
+  if (!first) return ERR;
+  char *second = strchr(first + 1, '.');
+
+  if (second && strchr(second + 1, '.')) return ERR; // too many parts
+
+  *first = '\0';
+  if (!second) {
+    *out_table = s;
+    *out_col = first + 1;
+  } else {
+    *second = '\0';
+    *out_schema = s;
+    *out_table = first + 1;
+    *out_col = second + 1;
+  }
+
+  if (!*out_table || !*out_col) return ERR;
+  if ((*out_table)[0] == '\0' || (*out_col)[0] == '\0') return ERR;
+  if (*out_schema && (*out_schema)[0] == '\0') return ERR;
+
+  return OK;
+}
+
+// Temporary rule list on heap: lets us parse, normalize, sort, and dedupe
+// before moving data into the arena in a compact form.
+typedef struct {
+  char *table;
+  char *col;
+  char *schema; // NULL for global rules
+} ColumnRuleTmp;
+
+/* Compares ColumnRuleTmp entries by table, col, schema (NULL first). */
+static int colruletmp_cmp(const void *a, const void *b) {
+  const ColumnRuleTmp *ra = (const ColumnRuleTmp *)a;
+  const ColumnRuleTmp *rb = (const ColumnRuleTmp *)b;
+
+  int tc = strcmp(ra->table, rb->table);
+  if (tc != 0) return tc;
+  int cc = strcmp(ra->col, rb->col);
+  if (cc != 0) return cc;
+
+  if (!ra->schema && !rb->schema) return 0;
+  if (!ra->schema) return -1;
+  if (!rb->schema) return 1;
+  return strcmp(ra->schema, rb->schema);
+}
+
+/* Parses columnPolicy.pseudonymize.{deterministic,randomized} into ColumnRules.
+ * Business logic is documented in connp_is_col_sensitive().
+ * Ownership: stores all strings and arrays in out->col_policy.arena. */
+static int parse_column_policy(const JsonGetter *jg, ConnProfile *out) {
+  if (!jg || !out) return ERR;
+
+  JsonGetter col = {0};
+  int crc = jsget_object(jg, "columnPolicy", &col);
+  if (crc == NO) return OK;
+  if (crc != YES) return ERR;
+
+  const char *const col_keys[] = {"pseudonymize"};
+  if (jsget_top_level_validation(&col, NULL, col_keys, ARRLEN(col_keys)) != YES) {
+    return ERR;
+  }
+
+  JsonGetter pseud = {0};
+  int prc = jsget_object(&col, "pseudonymize", &pseud);
+  if (prc == NO) return OK;
+  if (prc != YES) return ERR;
+
+  const char *const pseu_keys[] = {"deterministic", "randomized"};
+  if (jsget_top_level_validation(&pseud, NULL, pseu_keys, ARRLEN(pseu_keys)) != YES) {
+    return ERR;
+  }
+
+  // v1 only supports deterministic; reject randomized to avoid silent footguns.
+  JsonStrSpan span = {0};
+  int rrc = jsget_string_span(&pseud, "randomized", &span);
+  if (rrc == YES) return ERR;
+  if (rrc == ERR) return ERR;
+
+  // init a temporary heap list
+  ColumnRuleTmp *tmp = NULL;
+  size_t tmp_len = 0;
+  size_t tmp_cap = 0;
+
+  const char *const lists[] = {"deterministic"};
+  for (size_t li = 0; li < ARRLEN(lists); li++) {
+    JsonArrIter it;
+    int rc = jsget_array_strings_begin(&pseud, lists[li], &it);
+    if (rc == NO) continue;
+    if (rc != YES) goto error;
+
+    for (;;) {
+      JsonStrSpan sp = {0};
+      rc = jsget_array_strings_next(&pseud, &it, &sp);
+      if (rc == NO) break;
+      if (rc != YES) goto error;
+
+      char *decoded = NULL;
+      if (json_span_decode_alloc(&sp, &decoded) != YES) goto error;
+
+      char *schema = NULL;
+      char *table = NULL;
+      char *colname = NULL;
+      if (split_column_path(decoded, &schema, &table, &colname) != OK) {
+        free(decoded);
+        goto error;
+      }
+
+      str_lower_inplace(schema);
+      str_lower_inplace(table);
+      str_lower_inplace(colname);
+
+      // For v1 we only store "deterministic" rules (lists[0]) while still
+      // validating "randomized" entries to reject malformed configs.
+      // li == 0 means only "deterministic"
+      if (li == 0) {
+
+        // grow the temporary list
+        if (tmp_len == tmp_cap) {
+          size_t nc = (tmp_cap == 0) ? 8 : tmp_cap * 2;
+          ColumnRuleTmp *nt = (ColumnRuleTmp *)xrealloc(tmp, nc * sizeof(*tmp));
+          tmp = nt;
+          tmp_cap = nc;
+        }
+
+        // add elements to the temporary list
+        tmp[tmp_len].schema = schema ? strdup(schema) : NULL;
+        tmp[tmp_len].table = strdup(table);
+        tmp[tmp_len].col = strdup(colname);
+        tmp_len++;
+      }
+
+      free(decoded);
+    }
+  }
+
+  if (tmp_len == 0) return OK;
+
+  // sort the temporary list
+  qsort(tmp, tmp_len, sizeof(*tmp), colruletmp_cmp);
+
+  if (pl_arena_init(&out->col_policy.arena, NULL, NULL) != OK) goto error;
+
+  // find unique elemets
+  size_t n_rules = 0;
+  for (size_t i = 0; i < tmp_len; ) {
+    size_t j = i + 1;
+    while (j < tmp_len &&
+           strcmp(tmp[i].table, tmp[j].table) == 0 &&
+           strcmp(tmp[i].col, tmp[j].col) == 0) {
+      j++;
+    }
+    n_rules++;
+    i = j;
+  }
+
+  ColumnRule *rules = (ColumnRule *)pl_arena_alloc(&out->col_policy.arena,
+                                                   (uint32_t)(n_rules * sizeof(*rules)));
+  if (!rules) goto error;
+
+  size_t rix = 0;
+  for (size_t i = 0; i < tmp_len; ) {
+    size_t j = i;
+    int is_global = 0;
+    size_t n_schema = 0;
+    const char *last_schema = NULL;
+
+    // j skips duplicated elements
+    while (j < tmp_len &&
+           strcmp(tmp[i].table, tmp[j].table) == 0 &&
+           strcmp(tmp[i].col, tmp[j].col) == 0) {
+      // no schema-qualified -> global rule
+      if (!tmp[j].schema) {
+        is_global = 1;
+
+      // since the temp list is sorted, ignoring consecutive and equal schemas
+      // means deduplicating
+      } else if (!last_schema || strcmp(tmp[j].schema, last_schema) != 0) {
+        n_schema++;
+        last_schema = tmp[j].schema;
+      }
+      j++;
+    }
+
+    ColumnRule *r = &rules[rix++];
+    r->table = (const char *)pl_arena_add(&out->col_policy.arena,
+                                          tmp[i].table, (uint32_t)strlen(tmp[i].table));
+    r->col = (const char *)pl_arena_add(&out->col_policy.arena,
+                                        tmp[i].col, (uint32_t)strlen(tmp[i].col));
+    r->is_global = is_global;
+    r->n_schemas = (uint32_t)n_schema;
+    r->schemas = NULL;
+
+    if (n_schema > 0) {
+      const char **schemas = (const char **)pl_arena_alloc(
+          &out->col_policy.arena, (uint32_t)(n_schema * sizeof(*schemas)));
+      if (!schemas) goto error;
+
+      size_t k = 0;
+      last_schema = NULL;
+      for (size_t t = i; t < j; t++) {
+        if (!tmp[t].schema) continue;
+        if (last_schema && strcmp(tmp[t].schema, last_schema) == 0) continue;
+        schemas[k++] = (const char *)pl_arena_add(&out->col_policy.arena,
+                                                  tmp[t].schema,
+                                                  (uint32_t)strlen(tmp[t].schema));
+        last_schema = tmp[t].schema;
+      }
+      r->schemas = schemas;
+    }
+
+    i = j;
+  }
+
+  out->col_policy.rules = rules;
+  out->col_policy.n_rules = n_rules;
+
+  for (size_t i = 0; i < tmp_len; i++) {
+    free(tmp[i].schema);
+    free(tmp[i].table);
+    free(tmp[i].col);
+  }
+  free(tmp);
+  return OK;
+
+error:
+  if (tmp) {
+    for (size_t i = 0; i < tmp_len; i++) {
+      free(tmp[i].schema);
+      free(tmp[i].table);
+      free(tmp[i].col);
+    }
+    free(tmp);
+  }
+  return ERR;
+}
+
 /* Parses the "safetyPolicy" object and stores the resulting SafetyPolicy into
  * '*out'. */
 static int parse_policy(const JsonGetter *jg, SafetyPolicy *out) {
@@ -155,7 +414,8 @@ static int parse_db_entry(const JsonGetter *jg, ConnProfile *out) {
   if (!jg || !out) return ERR;
 
   const char *const keys[] = {
-    "type", "connectionName", "host", "port", "username", "database", "options"
+    "type", "connectionName", "host", "port", "username", "database",
+    "options", "columnPolicy"
   };
   int vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys));
   if (vrc != YES) return ERR;
@@ -184,6 +444,7 @@ static int parse_db_entry(const JsonGetter *jg, ConnProfile *out) {
   if (orc == NO) options = NULL;
 
   free(type);
+  type = NULL;
 
   out->connection_name = conn_name;
   out->kind = DB_KIND_POSTGRES;
@@ -192,6 +453,7 @@ static int parse_db_entry(const JsonGetter *jg, ConnProfile *out) {
   out->db_name = db_name;
   out->user = user;
   out->options = options;
+  if (parse_column_policy(jg, out) != OK) goto error;
   return OK;
 
 error:
@@ -201,6 +463,9 @@ error:
   free(user);
   free(db_name);
   free(options);
+  pl_arena_clean(&out->col_policy.arena);
+  out->col_policy.rules = NULL;
+  out->col_policy.n_rules = 0;
   return ERR;
 }
 
@@ -211,6 +476,7 @@ static void profile_free(ConnProfile *p) {
   free((char *)p->db_name);
   free((char *)p->user);
   free((char *)p->options);
+  pl_arena_clean(&p->col_policy.arena);
 }
 
 /* Parses the "databases" array and allocates ConnProfile entries. */
@@ -289,7 +555,7 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
   }
 
   // make sure these 2 objects are present in the config file
-  const char *const root_keys[] = {"safetyPolicy", "databases"};
+  const char *const root_keys[] = {"version", "safetyPolicy", "databases"};
   if (jsget_top_level_validation(&jg, NULL, root_keys, ARRLEN(root_keys)) != YES) {
     err_msg = "ConnCatalog: unknown key at top level.";
     goto error;
@@ -384,4 +650,51 @@ ConnProfile *catalog_get_by_name(ConnCatalog *cat, const char *connection_name) 
     }
   }
   return NULL;
+}
+
+/* Comparator for ColumnRule array sorting and lookup. */
+static int colrule_cmp(const void *a, const void *b) {
+  const ColumnRule *ra = (const ColumnRule *)a;
+  const ColumnRule *rb = (const ColumnRule *)b;
+  int tc = strcmp(ra->table, rb->table);
+  if (tc != 0) return tc;
+  return strcmp(ra->col, rb->col);
+}
+
+int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
+                           const char *table, const char *column) {
+  if (!cp || !table || !column) return ERR;
+
+  const ColumnPolicy *pol = &cp->col_policy;
+  if (!pol->rules || pol->n_rules == 0) return NO;
+
+  ColumnRule key = {0};
+  key.table = table;
+  key.col = column;
+
+  ColumnRule *r = (ColumnRule *)bsearch(&key, pol->rules, pol->n_rules,
+                                        sizeof(*pol->rules), colrule_cmp);
+  if (!r) return NO;
+
+  if (r->is_global) return YES;
+
+  const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
+  if (!schema_norm) {
+    // Unqualified SQL matches any schema-scoped rule (we do not resolve search_path).
+    return YES;
+  }
+
+  if (!r->schemas || r->n_schemas == 0) return NO;
+
+  // schemas are sorted; binary search
+  size_t lo = 0;
+  size_t hi = r->n_schemas;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    int c = strcmp(schema_norm, r->schemas[mid]);
+    if (c == 0) return YES;
+    if (c < 0) hi = mid;
+    else lo = mid + 1;
+  }
+  return NO;
 }

@@ -1994,6 +1994,13 @@ fail_bad_input:
     return (*out_qr ? OK : ERR);
 }
 
+/* Returns YES for now. TODO: enforce a real function allowlist. */
+static int pg_is_function_safe(DbBackend *db, const char *func_signature) {
+    (void)db;
+    (void)func_signature;
+    return YES;
+}
+
 /* ------------------------- constructor ------------------------- */
 
 static const DbBackendVTable PG_VT = {
@@ -2002,7 +2009,8 @@ static const DbBackendVTable PG_VT = {
     .disconnect = pg_disconnect,
     .destroy = pg_destroy,
     .exec = pg_exec,
-    .make_query_ir = pg_make_query_ir
+    .make_query_ir = pg_make_query_ir,
+    .is_function_safe = pg_is_function_safe
 };
 
 DbBackend *postgres_backend_create(void) {

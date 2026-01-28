@@ -20,7 +20,7 @@
         "pseudonymize":{
           "deterministic":[
             "users.email",
-            "users.phone"
+            "private.users.phone"
           ],
           "randomized":[
             "cards.number"

@@ -133,6 +133,12 @@ int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out);
  */
 int jsget_string_decode_alloc(const JsonGetter *jg, const char *key, char **out_nul);
 
+/* Decodes a JSON string span into a newly allocated NUL-terminated string.
+ * Ownership: caller owns *out_nul and must free it.
+ * Side effects: allocates memory.
+ * Returns YES on success, ERR on invalid input or allocation failure. */
+int json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul);
+
 /*
  * Gets a key path as a JsonGetter view rooted at the object value.
  *

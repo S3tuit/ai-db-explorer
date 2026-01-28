@@ -39,13 +39,11 @@
 
 Patterns:
 
-* `schema.table.column`
-* `schema.table.*`
-* (optional) allow shorthand `table.column` (treated as `public.table.column` in Postgres)
+* check connp_is_col_sensitive()
 
 Canonicalization rules:
 
-* identifiers normalized (e.g., lowercased) according to backend conventions (Postgres: unquoted identifiers lowercased).
+* identifiers lowercased1.
 * invalid patterns rejected at config-load time.
 
 ### 2.2 `describe_table` tool is mandatory
@@ -205,10 +203,8 @@ Implementation rule:
 * **Ban `SELECT *` entirely.** Users/agents must use `describe_table` and explicit columns.
 * Every column is qualified (alias.column) everywhere. Every range item must have an alias; references must use that alias.
 * Ban any non-safe function calls. Add a way for the user to define a function as safe.
-* Each select item must be a simple column reference: `alias.col`
-* `AS alias` are mandatory.
 * We treat views as tables, so it's up to the user to restrict a specific column of a view.
-* Sensitive columns can appear only in the SELECT or WHERE.
+* Sensitive columns can appear only in the main SELECT and only in the SELECT or WHERE.
 
 ### 7.2 Sensitive Mode: strict subset
 
@@ -224,12 +220,10 @@ In Sensitive Mode, sensitive columns can appear only in this mode:
 Disallowed clauses in Sensitive Mode:
 
 * All JOIN except for INNER / ON can only contain = and AND
-* GROUP BY / HAVING on non sensitive columns
-* ORDER BY
+* GROUP BY / HAVING on sensitive columns (allowed on non sensitive columns)
+* ORDER BY on sensitive columns
 * DISTINCT
-* WITH (CTEs)
 * UNION/INTERSECT/EXCEPT
-* subqueries (anywhere)
 * OFFSET
 * any casts or expressions that touches a sensitive column
 
@@ -247,14 +241,10 @@ Disallowed clauses in Sensitive Mode:
   * `col = $n`
   * `col IN ($n, $m, ...)`
     where each `$k` is a **token parameter** for that same column scope.
-* Non-sensitive predicates: (v1 choice)
-
-  * either allow only `=` and `IN` as well (simpler), or
-  * allow a larger subset; if expanded, must be carefully specified per backend.
 
 **LIMIT rules (Sensitive Mode):**
 
-* If missing, broker injects `LIMIT 200`.
+* If missing, validator injects `LIMIT 200`.
 * If present and > 200 → clamp.
 
 **Small result rule (Sensitive Mode):**

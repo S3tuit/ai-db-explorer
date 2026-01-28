@@ -952,6 +952,12 @@ int jsget_string_decode_alloc(const JsonGetter *jg, const char *key, char **out_
     return YES;
 }
 
+int json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul) {
+    if (!sp || !out_nul) return ERR;
+    if (json_string_unescape_alloc(sp->ptr, sp->len, out_nul) != OK) return ERR;
+    return YES;
+}
+
 int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out) {
     if (!jg || !key || !out) return ERR;
 

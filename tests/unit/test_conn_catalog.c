@@ -247,6 +247,243 @@ static void test_valid_config_maps_fields(void) {
   free(path);
 }
 
+/* Ensures columnPolicy lowercases identifiers and accepts mixed case. */
+static void test_column_policy_lowercase(void) {
+  const char *json =
+    "{"
+    "  \"databases\": ["
+    "    {"
+    "      \"type\": \"postgres\","
+    "      \"connectionName\": \"MyPostgres\","
+    "      \"host\": \"127.0.0.1\","
+    "      \"port\": 5432,"
+    "      \"username\": \"user\","
+    "      \"database\": \"db\","
+    "      \"columnPolicy\": {"
+    "        \"pseudonymize\": {"
+    "          \"deterministic\": ["
+    "            \"Users.Email\","
+    "            \"Private.Users.Phone\""
+    "          ]"
+    "        }"
+    "      }"
+    "    }"
+    "  ]"
+    "}";
+
+  char *path = write_tmp_config(json);
+  char *err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &err);
+  ASSERT_TRUE(cat != NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "MyPostgres");
+  ASSERT_TRUE(cp != NULL);
+  ASSERT_TRUE(cp->col_policy.n_rules == 2);
+  ASSERT_STREQ(cp->col_policy.rules[0].table, "users");
+  ASSERT_STREQ(cp->col_policy.rules[0].col, "email");
+  ASSERT_STREQ(cp->col_policy.rules[1].table, "users");
+  ASSERT_STREQ(cp->col_policy.rules[1].col, "phone");
+
+  catalog_destroy(cat);
+  unlink(path);
+  free(path);
+}
+
+/* Ensures duplicated deterministic entries are de-duplicated. */
+static void test_column_policy_dedup(void) {
+  const char *json =
+    "{"
+    "  \"databases\": ["
+    "    {"
+    "      \"type\": \"postgres\","
+    "      \"connectionName\": \"MyPostgres\","
+    "      \"host\": \"127.0.0.1\","
+    "      \"port\": 5432,"
+    "      \"username\": \"user\","
+    "      \"database\": \"db\","
+    "      \"columnPolicy\": {"
+    "        \"pseudonymize\": {"
+    "          \"deterministic\": ["
+    "            \"users.email\","
+    "            \"USERS.EMAIL\","
+    "            \"users.email\""
+    "          ]"
+    "        }"
+    "      }"
+    "    }"
+    "  ]"
+    "}";
+
+  char *path = write_tmp_config(json);
+  char *err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &err);
+  ASSERT_TRUE(cat != NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "MyPostgres");
+  ASSERT_TRUE(cp != NULL);
+  ASSERT_TRUE(cp->col_policy.n_rules == 1);
+  ASSERT_STREQ(cp->col_policy.rules[0].table, "users");
+  ASSERT_STREQ(cp->col_policy.rules[0].col, "email");
+
+  catalog_destroy(cat);
+  unlink(path);
+  free(path);
+}
+
+/* Ensures global rules win and schema list is preserved. */
+static void test_column_policy_global_and_schema(void) {
+  const char *json =
+    "{"
+    "  \"databases\": ["
+    "    {"
+    "      \"type\": \"postgres\","
+    "      \"connectionName\": \"MyPostgres\","
+    "      \"host\": \"127.0.0.1\","
+    "      \"port\": 5432,"
+    "      \"username\": \"user\","
+    "      \"database\": \"db\","
+    "      \"columnPolicy\": {"
+    "        \"pseudonymize\": {"
+    "          \"deterministic\": ["
+    "            \"users.email\","
+    "            \"private.users.email\""
+    "          ]"
+    "        }"
+    "      }"
+    "    }"
+    "  ]"
+    "}";
+
+  char *path = write_tmp_config(json);
+  char *err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &err);
+  ASSERT_TRUE(cat != NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "MyPostgres");
+  ASSERT_TRUE(cp != NULL);
+  ASSERT_TRUE(cp->col_policy.n_rules == 1);
+  ASSERT_TRUE(cp->col_policy.rules[0].is_global == 1);
+  ASSERT_TRUE(cp->col_policy.rules[0].n_schemas == 1);
+  ASSERT_STREQ(cp->col_policy.rules[0].schemas[0], "private");
+
+  catalog_destroy(cat);
+  unlink(path);
+  free(path);
+}
+
+/* Ensures malformed columnPolicy entries fail catalog load. */
+static void test_column_policy_malformed_fails(void) {
+  const char *json =
+    "{"
+    "  \"databases\": ["
+    "    {"
+    "      \"type\": \"postgres\","
+    "      \"connectionName\": \"MyPostgres\","
+    "      \"host\": \"127.0.0.1\","
+    "      \"port\": 5432,"
+    "      \"username\": \"user\","
+    "      \"database\": \"db\","
+    "      \"columnPolicy\": {"
+    "        \"pseudonymize\": {"
+    "          \"deterministic\": ["
+    "            \"justcolumn\""
+    "          ]"
+    "        }"
+    "      }"
+    "    }"
+    "  ]"
+    "}";
+
+  char *path = write_tmp_config(json);
+  char *err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &err);
+  ASSERT_TRUE(cat == NULL);
+  ASSERT_TRUE(err != NULL);
+
+  unlink(path);
+  free(path);
+}
+
+/* Ensures randomized rules are rejected in v1. */
+static void test_column_policy_randomized_fails(void) {
+  const char *json =
+    "{"
+    "  \"databases\": ["
+    "    {"
+    "      \"type\": \"postgres\","
+    "      \"connectionName\": \"MyPostgres\","
+    "      \"host\": \"127.0.0.1\","
+    "      \"port\": 5432,"
+    "      \"username\": \"user\","
+    "      \"database\": \"db\","
+    "      \"columnPolicy\": {"
+    "        \"pseudonymize\": {"
+    "          \"randomizedd\": ["
+    "            \"cards.number\""
+    "          ]"
+    "        }"
+    "      }"
+    "    }"
+    "  ]"
+    "}";
+
+  char *path = write_tmp_config(json);
+  char *err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &err);
+  ASSERT_TRUE(cat == NULL);
+  ASSERT_TRUE(err != NULL);
+
+  unlink(path);
+  free(path);
+}
+
+/* Validates connp_is_col_sensitive behavior for global and schema-scoped rules. */
+static void test_connp_is_col_sensitive(void) {
+  const char *json =
+    "{"
+    "  \"databases\": ["
+    "    {"
+    "      \"type\": \"postgres\","
+    "      \"connectionName\": \"MyPostgres\","
+    "      \"host\": \"127.0.0.1\","
+    "      \"port\": 5432,"
+    "      \"username\": \"user\","
+    "      \"database\": \"db\","
+    "      \"columnPolicy\": {"
+    "        \"pseudonymize\": {"
+    "          \"deterministic\": ["
+    "            \"users.email\","
+    "            \"private.users.name\""
+    "          ]"
+    "        }"
+    "      }"
+    "    }"
+    "  ]"
+    "}";
+
+  char *path = write_tmp_config(json);
+  char *err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &err);
+  ASSERT_TRUE(cat != NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "MyPostgres");
+  ASSERT_TRUE(cp != NULL);
+
+  ASSERT_TRUE(connp_is_col_sensitive(cp, "", "users", "email") == YES);
+  ASSERT_TRUE(connp_is_col_sensitive(cp, "public", "users", "email") == YES);
+  ASSERT_TRUE(connp_is_col_sensitive(cp, "private", "users", "email") == YES);
+
+  ASSERT_TRUE(connp_is_col_sensitive(cp, "private", "users", "name") == YES);
+  ASSERT_TRUE(connp_is_col_sensitive(cp, "public", "users", "name") == NO);
+  ASSERT_TRUE(connp_is_col_sensitive(cp, "", "users", "name") == YES);
+
+  ASSERT_TRUE(connp_is_col_sensitive(cp, "", "users", "age") == NO);
+
+  catalog_destroy(cat);
+  unlink(path);
+  free(path);
+}
+
 int main(void) {
   test_missing_policy_defaults();
   test_policy_missing_fields_defaults();
@@ -256,6 +493,12 @@ int main(void) {
   test_empty_databases_ok();
   test_db_entry_unknown_key_fails();
   test_valid_config_maps_fields();
+  test_column_policy_lowercase();
+  test_column_policy_dedup();
+  test_column_policy_global_and_schema();
+  test_column_policy_malformed_fails();
+  test_column_policy_randomized_fails();
+  test_connp_is_col_sensitive();
   fprintf(stderr, "OK: test_conn_catalog\n");
   return 0;
 }

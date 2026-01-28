@@ -276,7 +276,8 @@ struct QirQuery {
   QirSelectItem **select_items;
   uint32_t nselect;
 
-  // FROM clause: base items + optional joins
+  // FROM clause
+  // TODO: this should be a single FROM
   QirFromItem **from_items;
   uint32_t nfrom;
 
@@ -357,11 +358,18 @@ void qir_handle_destroy(QirQueryHandle *h);
 // Frees a touch report allocated by qir_extract_touches().
 void qir_touch_report_destroy(QirTouchReport *tr);
 
-// Extract touches from a QueryIR.
-// - alias resolution is based on q->from_items aliases + joins rhs aliases.
-// - scope is MAIN for the top-level query and NESTED for any nested query.
-// - The extractor is conservative: if it sees unsupported expressions or cannot
-//   resolve a qualifier, it marks UNKNOWN touches and has_unsupported.
+/* Extract touches from a QueryIR.
+ * The QirTouchReport checks that all the columns are referenced in the form
+ * 'alias.column'.
+ * It also checks that all the alias referenced are present in the QirQuery.
+ * If one of these 2 conditions is false, the specific QirTouch that references
+ * the column is set to QIR_TOUCH_UNKNOWN.
+ * It only handles column references, it doesn't check wheter all the subqueries
+ * or CTEs have an alias.
+ *
+ * - scope is MAIN for the top-level query and NESTED for any nested query.
+ * - The extractor is conservative: if it sees unsupported expressions or cannot
+ *   resolve a qualifier, it marks UNKNOWN touches and has_unsupported. */
 QirTouchReport *qir_extract_touches(const QirQuery *q);
 
 /* Sets query status and (optional) reason once; first status wins.

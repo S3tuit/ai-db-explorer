@@ -41,4 +41,8 @@ void sb_zero_clean(StrBuf *sb);
 /* Clean the internal allocation of 'sb'. */
 void sb_clean(StrBuf *sb);
 
+/* Best effort to reset the internal metadata, without freeing anything, so
+ * next time bytes will be appended as if 'sb' was clean. */
+void sb_reset(StrBuf *sb);
+
 #endif

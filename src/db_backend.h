@@ -40,6 +40,10 @@ typedef struct DbBackendVTable {
     // qir_handle_destroy().
     int (*make_query_ir)(DbBackend *db, const char *sql, QirQueryHandle *out);
 
+    // Returns YES if a function is safe to execute, NO if not, ERR on failure.
+    // func_signature is backend-defined (v1 uses function name only).
+    int (*is_function_safe)(DbBackend *db, const char *func_signature);
+
     // Returns the latest error detected by db. The returned string is owned by
     // 'db'
     const char *(*last_error)(DbBackend *db);
@@ -72,6 +76,16 @@ static inline int db_exec(DbBackend *db, const McpId *request_id, const char *sq
                           QueryResult **out_qr) {
     if (!db || !db->vt || !db->vt->exec) return ERR;
     return db->vt->exec(db, request_id, sql, out_qr);
+}
+
+static inline int db_make_query_ir(DbBackend *db, const char *sql, QirQueryHandle *out) {
+    if (!db || !db->vt || !db->vt->make_query_ir) return ERR;
+    return db->vt->make_query_ir(db, sql, out);
+}
+
+static inline int db_is_function_safe(DbBackend *db, const char *func_signature) {
+    if (!db || !db->vt || !db->vt->is_function_safe) return ERR;
+    return db->vt->is_function_safe(db, func_signature);
 }
 
 #endif

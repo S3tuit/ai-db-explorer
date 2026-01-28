@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "pl_arena.h"
 #include "safety_policy.h"
 
 #define CURR_CONN_CAT_VERSION 1.0
@@ -10,6 +11,22 @@
 typedef enum {
   DB_KIND_POSTGRES = 1,
 } DbKind;
+
+/* Represent whether or not a column should be treated as sensitive */
+typedef struct ColumnRule {
+  const char  *table;
+  const char  *col;
+  const char **schemas;     // sorted unique array; NULL if no schema list
+  uint32_t     n_schemas;
+  int          is_global;   // 1 if rule applies regardless of schema
+} ColumnRule;
+
+/* Groups all the ColumnRule for a ConnProfile. */
+typedef struct ColumnPolicy {
+  ColumnRule *rules;   // sorted by (table, col)
+  size_t      n_rules;
+  PlArena     arena;   // owns all strings and arrays in ColumnPolicy
+} ColumnPolicy;
 
 /**
  * Non-secret connection parameters.
@@ -26,9 +43,12 @@ typedef struct {
 
   // Optional: extra options, TLS mode, parameters, etc.
   const char *options;           // may be NULL
+
+  // Column sensitivity rules for this connection (may be empty).
+  ColumnPolicy col_policy;
 } ConnProfile;
 
-// TODO: use hash map
+// TODO: use bin search
 typedef struct ConnCatalog {
   ConnProfile  *profiles;    // owned array
   size_t        n_profiles;
@@ -70,5 +90,20 @@ SafetyPolicy *catalog_get_policy(ConnCatalog *cat);
  * returned value. May return NULL.
  */
 ConnProfile *catalog_get_by_name(ConnCatalog *cat, const char *connection_name);
+
+/**
+ * Returns YES if (schema?, table, column) is marked sensitive by the profile.
+ *
+ * Business logic (v1, no search_path resolution):
+ * - If a global rule table.column exists, it always matches (even if schema-qualified).
+ * - If no global rule exists and SQL is schema-qualified, it matches only if the
+ *   schema is listed for that table.column.
+ * - If no global rule exists and SQL is unqualified, any schema-scoped rule for
+ *   that table.column matches (since we do not resolve search_path in v1).
+ *
+ * Returns YES/NO/ERR.
+ */
+int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
+                           const char *table, const char *column);
 
 #endif

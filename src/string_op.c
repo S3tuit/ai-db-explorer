@@ -109,3 +109,9 @@ int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst) {
     sb->len += n;
     return OK;
 }
+
+void sb_reset(StrBuf *sb) {
+  if (!sb) return;
+  sb->len = 0;
+  if (sb->data) sb->data[0] = '\0';
+}

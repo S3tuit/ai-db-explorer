@@ -58,12 +58,19 @@ static int fake_exec(DbBackend *db, const McpId *request_id, const char *sql,
     return ERR;
 }
 
+static int fake_is_function_safe(DbBackend *db, const char *func_signature) {
+    (void)db;
+    (void)func_signature;
+    return YES;
+}
+
 static const DbBackendVTable FAKE_VT = {
   .connect = fake_connect,
   .is_connected = fake_is_connected,
   .disconnect = fake_disconnect,
   .destroy = fake_destroy,
   .exec = fake_exec,
+  .is_function_safe = fake_is_function_safe,
 };
 
 static DbBackend *fake_backend_create(DbKind kind) {
