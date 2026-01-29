@@ -213,10 +213,6 @@ Sensitive Mode applies only when:
 * vault is open AND
 * query touches any sensitive column. *A touched column is a column that appears anywhere inside the sql text.*
 
-In Sensitive Mode, sensitive columns can appear only in this mode:
-
-* `SELECT ... FROM ... INNER JOIN ... WHERE ... LIMIT ...`
-
 Disallowed clauses in Sensitive Mode:
 
 * All JOIN except for INNER / ON can only contain = and AND

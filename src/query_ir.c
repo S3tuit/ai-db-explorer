@@ -117,10 +117,10 @@ QirExpr *qir_resolve_order_alias(QirQuery *q, PlArena *arena, QirExpr *expr) {
 
 /* Checks if a name matches any CTE in scope. */
 static bool qir_is_cte_name(const QirQuery *cte_scope, const QirIdent *name) {
-  if (!cte_scope || !name || !name->name) return false;
+  if (!cte_scope) return false;
   for (uint32_t i = 0; i < cte_scope->nctes; i++) {
     const QirCte *cte = cte_scope->ctes ? cte_scope->ctes[i] : NULL;
-    if (!cte || !cte->name.name) continue;
+    // qir_ident_eq handles NULL inputs
     if (qir_ident_eq(&cte->name, name)) return true;
   }
   return false;
