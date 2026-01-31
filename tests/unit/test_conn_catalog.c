@@ -247,8 +247,8 @@ static void test_valid_config_maps_fields(void) {
   free(path);
 }
 
-/* Ensures columnPolicy lowercases identifiers and accepts mixed case. */
-static void test_column_policy_lowercase(void) {
+/* Ensures catalog lowercases identifiers and accepts mixed case. */
+static void test_policies_lowercase(void) {
   const char *json =
     "{"
     "  \"databases\": ["
@@ -259,6 +259,7 @@ static void test_column_policy_lowercase(void) {
     "      \"port\": 5432,"
     "      \"username\": \"user\","
     "      \"database\": \"db\","
+    "      \"safeFunctions\": [\"mD1\", \"PrivaTe.Md2\"],"
     "      \"columnPolicy\": {"
     "        \"pseudonymize\": {"
     "          \"deterministic\": ["
@@ -284,13 +285,21 @@ static void test_column_policy_lowercase(void) {
   ASSERT_STREQ(cp->col_policy.rules[1].table, "users");
   ASSERT_STREQ(cp->col_policy.rules[1].col, "phone");
 
+  ASSERT_TRUE(cp->safe_funcs.n_rules == 2);
+  ASSERT_STREQ(cp->safe_funcs.rules[0].name, "md1");
+  ASSERT_TRUE(cp->safe_funcs.rules[0].is_global == 1);
+  ASSERT_STREQ(cp->safe_funcs.rules[1].name, "md2");
+  ASSERT_TRUE(cp->safe_funcs.rules[1].is_global == 0);
+  ASSERT_TRUE(cp->safe_funcs.rules[1].n_schemas == 1);
+  ASSERT_STREQ(cp->safe_funcs.rules[1].schemas[0], "private");
+
   catalog_destroy(cat);
   unlink(path);
   free(path);
 }
 
-/* Ensures duplicated deterministic entries are de-duplicated. */
-static void test_column_policy_dedup(void) {
+/* Ensures duplicated entries inside the policies are de-duplicated. */
+static void test_policies_dedup(void) {
   const char *json =
     "{"
     "  \"databases\": ["
@@ -301,6 +310,7 @@ static void test_column_policy_dedup(void) {
     "      \"port\": 5432,"
     "      \"username\": \"user\","
     "      \"database\": \"db\","
+    "      \"safeFunctions\": [\"md1\", \"MD1\", \"public.md2\"],"
     "      \"columnPolicy\": {"
     "        \"pseudonymize\": {"
     "          \"deterministic\": ["
@@ -325,13 +335,21 @@ static void test_column_policy_dedup(void) {
   ASSERT_STREQ(cp->col_policy.rules[0].table, "users");
   ASSERT_STREQ(cp->col_policy.rules[0].col, "email");
 
+  ASSERT_TRUE(cp->safe_funcs.n_rules == 2);
+  ASSERT_STREQ(cp->safe_funcs.rules[0].name, "md1");
+  ASSERT_TRUE(cp->safe_funcs.rules[0].is_global == 1);
+  ASSERT_STREQ(cp->safe_funcs.rules[1].name, "md2");
+  ASSERT_TRUE(cp->safe_funcs.rules[1].is_global == 0);
+  ASSERT_TRUE(cp->safe_funcs.rules[1].n_schemas == 1);
+  ASSERT_STREQ(cp->safe_funcs.rules[1].schemas[0], "public");
+
   catalog_destroy(cat);
   unlink(path);
   free(path);
 }
 
 /* Ensures global rules win and schema list is preserved. */
-static void test_column_policy_global_and_schema(void) {
+static void test_policies_global_and_schema(void) {
   const char *json =
     "{"
     "  \"databases\": ["
@@ -342,6 +360,7 @@ static void test_column_policy_global_and_schema(void) {
     "      \"port\": 5432,"
     "      \"username\": \"user\","
     "      \"database\": \"db\","
+    "      \"safeFunctions\": [\"md1\", \"private.md1\"],"
     "      \"columnPolicy\": {"
     "        \"pseudonymize\": {"
     "          \"deterministic\": ["
@@ -365,6 +384,10 @@ static void test_column_policy_global_and_schema(void) {
   ASSERT_TRUE(cp->col_policy.rules[0].is_global == 1);
   ASSERT_TRUE(cp->col_policy.rules[0].n_schemas == 1);
   ASSERT_STREQ(cp->col_policy.rules[0].schemas[0], "private");
+  ASSERT_TRUE(cp->safe_funcs.n_rules == 1);
+  ASSERT_TRUE(cp->safe_funcs.rules[0].is_global == 1);
+  ASSERT_TRUE(cp->safe_funcs.rules[0].n_schemas == 1);
+  ASSERT_STREQ(cp->safe_funcs.rules[0].schemas[0], "private");
 
   catalog_destroy(cat);
   unlink(path);
@@ -387,6 +410,40 @@ static void test_column_policy_malformed_fails(void) {
     "        \"pseudonymize\": {"
     "          \"deterministic\": ["
     "            \"justcolumn\""
+    "          ]"
+    "        }"
+    "      }"
+    "    }"
+    "  ]"
+    "}";
+
+  char *path = write_tmp_config(json);
+  char *err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &err);
+  ASSERT_TRUE(cat == NULL);
+  ASSERT_TRUE(err != NULL);
+
+  unlink(path);
+  free(path);
+}
+
+/* Ensures malformed safeFunctions entries fail catalog load. */
+static void test_safe_functions_malformed_fails(void) {
+  const char *json =
+    "{"
+    "  \"databases\": ["
+    "    {"
+    "      \"type\": \"postgres\","
+    "      \"connectionName\": \"MyPostgres\","
+    "      \"host\": \"127.0.0.1\","
+    "      \"port\": 5432,"
+    "      \"username\": \"user\","
+    "      \"database\": \"db\","
+    "      \"safeFunctions\": [\"md1\", \"bad.\"],"
+    "      \"columnPolicy\": {"
+    "        \"pseudonymize\": {"
+    "          \"deterministic\": ["
+    "            \"users.email\""
     "          ]"
     "        }"
     "      }"
@@ -437,8 +494,8 @@ static void test_column_policy_randomized_fails(void) {
   free(path);
 }
 
-/* Validates connp_is_col_sensitive behavior for global and schema-scoped rules. */
-static void test_connp_is_col_sensitive(void) {
+/* Validates connp_is_*_sensitive behavior for global and schema-scoped rules. */
+static void test_connp_is_sensitive(void) {
   const char *json =
     "{"
     "  \"databases\": ["
@@ -449,6 +506,7 @@ static void test_connp_is_col_sensitive(void) {
     "      \"port\": 5432,"
     "      \"username\": \"user\","
     "      \"database\": \"db\","
+    "      \"safeFunctions\": [\"md1\", \"private.md2\"],"
     "      \"columnPolicy\": {"
     "        \"pseudonymize\": {"
     "          \"deterministic\": ["
@@ -479,6 +537,13 @@ static void test_connp_is_col_sensitive(void) {
 
   ASSERT_TRUE(connp_is_col_sensitive(cp, "", "users", "age") == NO);
 
+  ASSERT_TRUE(connp_is_func_safe(cp, "", "md1") == YES);
+  ASSERT_TRUE(connp_is_func_safe(cp, "public", "md1") == YES);
+  ASSERT_TRUE(connp_is_func_safe(cp, "", "md2") == YES);
+  ASSERT_TRUE(connp_is_func_safe(cp, "private", "md2") == YES);
+  ASSERT_TRUE(connp_is_func_safe(cp, "public", "md2") == NO);
+  ASSERT_TRUE(connp_is_func_safe(cp, "", "unknown") == NO);
+
   catalog_destroy(cat);
   unlink(path);
   free(path);
@@ -493,12 +558,13 @@ int main(void) {
   test_empty_databases_ok();
   test_db_entry_unknown_key_fails();
   test_valid_config_maps_fields();
-  test_column_policy_lowercase();
-  test_column_policy_dedup();
-  test_column_policy_global_and_schema();
+  test_policies_lowercase();
+  test_policies_dedup();
+  test_policies_global_and_schema();
   test_column_policy_malformed_fails();
+  test_safe_functions_malformed_fails();
   test_column_policy_randomized_fails();
-  test_connp_is_col_sensitive();
+  test_connp_is_sensitive();
   fprintf(stderr, "OK: test_conn_catalog\n");
   return 0;
 }

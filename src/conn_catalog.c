@@ -94,7 +94,7 @@ error:
 }
 
 /* Lowercases an ASCII string in-place. */
-static void str_lower_inplace(char *s) {
+static inline void str_lower_inplace(char *s) {
   if (!s) return;
   for (; *s; s++) {
     *s = (char)tolower((unsigned char)*s);
@@ -145,6 +145,11 @@ typedef struct {
   char *schema; // NULL for global rules
 } ColumnRuleTmp;
 
+typedef struct {
+  char *schema; // NULL for global rules
+  char *name;
+} SafeFuncRuleTmp;
+
 /* Compares ColumnRuleTmp entries by table, col, schema (NULL first). */
 static int colruletmp_cmp(const void *a, const void *b) {
   const ColumnRuleTmp *ra = (const ColumnRuleTmp *)a;
@@ -159,6 +164,43 @@ static int colruletmp_cmp(const void *a, const void *b) {
   if (!ra->schema) return -1;
   if (!rb->schema) return 1;
   return strcmp(ra->schema, rb->schema);
+}
+
+/* Compares SafeFuncRuleTmp entries by name, schema (NULL first). */
+static int saferuletmp_cmp(const void *a, const void *b) {
+  const SafeFuncRuleTmp *ra = (const SafeFuncRuleTmp *)a;
+  const SafeFuncRuleTmp *rb = (const SafeFuncRuleTmp *)b;
+
+  int nc = strcmp(ra->name, rb->name);
+  if (nc != 0) return nc;
+
+  if (!ra->schema && !rb->schema) return 0;
+  if (!ra->schema) return -1;
+  if (!rb->schema) return 1;
+  return strcmp(ra->schema, rb->schema);
+}
+
+static int split_func_path(char *input, char **out_schema, char **out_name) {
+  if (!input || !out_schema || !out_name) return ERR;
+  *out_schema = NULL;
+  *out_name = NULL;
+
+  char *dot = strchr(input, '.');
+  if (!dot) {
+    if (input[0] == '\0') return ERR;
+    *out_name = input;
+    return OK;
+  }
+
+  if (dot == input) return ERR;
+  *dot = '\0';
+  char *schema = input;
+  char *name = dot + 1;
+  if (schema[0] == '\0' || name[0] == '\0') return ERR;
+  if (strchr(name, '.')) return ERR;
+  *out_schema = schema;
+  *out_name = name;
+  return OK;
 }
 
 /* Parses columnPolicy.pseudonymize.{deterministic,randomized} into ColumnRules.
@@ -351,6 +393,133 @@ error:
   return ERR;
 }
 
+/* Parses safeFunctions into SafeFunctionRule list.
+ * Business logic is documented in connp_is_func_safe().
+ * Ownership: stores all strings and arrays in out->safe_funcs.arena. */
+static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out) {
+  if (!jg || !out) return ERR;
+
+  JsonArrIter it;
+  int rc = jsget_array_strings_begin(jg, "safeFunctions", &it);
+  if (rc == NO) return OK;
+  if (rc != YES) return ERR;
+
+  SafeFuncRuleTmp *tmp = NULL;
+  size_t tmp_len = 0;
+  size_t tmp_cap = 0;
+
+  for (;;) {
+    JsonStrSpan sp = {0};
+    rc = jsget_array_strings_next(jg, &it, &sp);
+    if (rc == NO) break;
+    if (rc != YES) goto error;
+
+    char *decoded = NULL;
+    if (json_span_decode_alloc(&sp, &decoded) != YES) goto error;
+
+    char *schema = NULL;
+    char *name = NULL;
+    if (split_func_path(decoded, &schema, &name) != OK) {
+      free(decoded);
+      goto error;
+    }
+
+    str_lower_inplace(schema);
+    str_lower_inplace(name);
+
+    if (tmp_len == tmp_cap) {
+      size_t nc = (tmp_cap == 0) ? 8 : tmp_cap * 2;
+      SafeFuncRuleTmp *nt = (SafeFuncRuleTmp *)xrealloc(tmp, nc * sizeof(*tmp));
+      tmp = nt;
+      tmp_cap = nc;
+    }
+    tmp[tmp_len].schema = schema ? strdup(schema) : NULL;
+    tmp[tmp_len].name = strdup(name);
+    tmp_len++;
+
+    free(decoded);
+  }
+
+  if (tmp_len == 0) return OK;
+
+  qsort(tmp, tmp_len, sizeof(*tmp), saferuletmp_cmp);
+
+  if (pl_arena_init(&out->safe_funcs.arena, NULL, NULL) != OK) goto error;
+
+  // find unique function names
+  size_t uniq = 0;
+  for (size_t i = 0; i < tmp_len; i++) {
+    if (i == 0 || strcmp(tmp[i].name, tmp[i - 1].name) != 0) uniq++;
+  }
+
+  out->safe_funcs.rules = (SafeFunctionRule *)pl_arena_alloc(
+      &out->safe_funcs.arena, (uint32_t)(uniq * sizeof(SafeFunctionRule)));
+  if (!out->safe_funcs.rules) goto error;
+  out->safe_funcs.n_rules = uniq;
+
+  size_t ri = 0;
+  size_t i = 0;
+  while (i < tmp_len) {
+    char *name = tmp[i].name;
+
+    size_t j = i;
+    size_t scount = 0;
+    int is_global = 0;
+    while (j < tmp_len && strcmp(tmp[j].name, name) == 0) {
+      if (!tmp[j].schema) {
+        is_global = 1;
+      } else {
+        scount++;
+      }
+      j++;
+    }
+
+    SafeFunctionRule *r = &out->safe_funcs.rules[ri++];
+    r->name = (const char *)pl_arena_add(&out->safe_funcs.arena, name,
+                                         (uint32_t)strlen(name));
+    if (!r->name) goto error;
+    r->is_global = is_global;
+    r->n_schemas = (uint32_t)scount;
+    if (scount == 0) {
+      r->schemas = NULL;
+    } else {
+      r->schemas = (const char **)pl_arena_alloc(
+          &out->safe_funcs.arena, (uint32_t)(scount * sizeof(char *)));
+      if (!r->schemas) goto error;
+      size_t k = 0;
+      for (size_t t = i; t < j; t++) {
+        if (!tmp[t].schema) continue;
+        r->schemas[k++] = (const char *)pl_arena_add(&out->safe_funcs.arena,
+                                                     tmp[t].schema,
+                                                     (uint32_t)strlen(tmp[t].schema));
+        if (!r->schemas[k - 1]) goto error;
+      }
+    }
+
+    i = j;
+  }
+
+  for (size_t t = 0; t < tmp_len; t++) {
+    free(tmp[t].schema);
+    free(tmp[t].name);
+  }
+  free(tmp);
+  return OK;
+
+error:
+  if (tmp) {
+    for (size_t t = 0; t < tmp_len; t++) {
+      free(tmp[t].schema);
+      free(tmp[t].name);
+    }
+  }
+  free(tmp);
+  pl_arena_clean(&out->safe_funcs.arena);
+  out->safe_funcs.rules = NULL;
+  out->safe_funcs.n_rules = 0;
+  return ERR;
+}
+
 /* Parses the "safetyPolicy" object and stores the resulting SafetyPolicy into
  * '*out'. */
 static int parse_policy(const JsonGetter *jg, SafetyPolicy *out) {
@@ -415,7 +584,7 @@ static int parse_db_entry(const JsonGetter *jg, ConnProfile *out) {
 
   const char *const keys[] = {
     "type", "connectionName", "host", "port", "username", "database",
-    "options", "columnPolicy"
+    "options", "columnPolicy", "safeFunctions"
   };
   int vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys));
   if (vrc != YES) return ERR;
@@ -454,6 +623,7 @@ static int parse_db_entry(const JsonGetter *jg, ConnProfile *out) {
   out->user = user;
   out->options = options;
   if (parse_column_policy(jg, out) != OK) goto error;
+  if (parse_safe_functions(jg, out) != OK) goto error;
   return OK;
 
 error:
@@ -466,6 +636,9 @@ error:
   pl_arena_clean(&out->col_policy.arena);
   out->col_policy.rules = NULL;
   out->col_policy.n_rules = 0;
+  pl_arena_clean(&out->safe_funcs.arena);
+  out->safe_funcs.rules = NULL;
+  out->safe_funcs.n_rules = 0;
   return ERR;
 }
 
@@ -477,6 +650,7 @@ static void profile_free(ConnProfile *p) {
   free((char *)p->user);
   free((char *)p->options);
   pl_arena_clean(&p->col_policy.arena);
+  pl_arena_clean(&p->safe_funcs.arena);
 }
 
 /* Parses the "databases" array and allocates ConnProfile entries. */
@@ -661,6 +835,13 @@ static int colrule_cmp(const void *a, const void *b) {
   return strcmp(ra->col, rb->col);
 }
 
+/* Comparator for SafeFunctionRule array lookup by name. */
+static int saferule_cmp(const void *a, const void *b) {
+  const SafeFunctionRule *ra = (const SafeFunctionRule *)a;
+  const SafeFunctionRule *rb = (const SafeFunctionRule *)b;
+  return strcmp(ra->name, rb->name);
+}
+
 int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
                            const char *table, const char *column) {
   if (!cp || !table || !column) return ERR;
@@ -686,15 +867,37 @@ int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
 
   if (!r->schemas || r->n_schemas == 0) return NO;
 
-  // schemas are sorted; binary search
-  size_t lo = 0;
-  size_t hi = r->n_schemas;
-  while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2;
-    int c = strcmp(schema_norm, r->schemas[mid]);
-    if (c == 0) return YES;
-    if (c < 0) hi = mid;
-    else lo = mid + 1;
+  // Schemas are few (usually <=10), so a linear scan is simpler and fast.
+  for (uint32_t i = 0; i < r->n_schemas; i++) {
+    if (strcmp(schema_norm, r->schemas[i]) == 0) return YES;
+  }
+  return NO;
+}
+
+int connp_is_func_safe(const ConnProfile *cp, const char *schema,
+                       const char *name) {
+  if (!cp || !name) return ERR;
+
+  SafeFunctionPolicy *pol = (SafeFunctionPolicy *)&cp->safe_funcs;
+  if (pol->n_rules == 0) return NO;
+
+  SafeFunctionRule key = {0};
+  key.name = name;
+  SafeFunctionRule *r = (SafeFunctionRule *)bsearch(
+      &key, pol->rules, pol->n_rules, sizeof(*pol->rules), saferule_cmp);
+  if (!r) return NO;
+
+  if (r->is_global) return YES;
+
+  const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
+  if (!schema_norm) {
+    // Unqualified SQL matches any schema-scoped rule (we do not resolve search_path).
+    return (r->n_schemas > 0) ? YES : NO;
+  }
+
+  // Schemas are few, so a linear scan is simpler and fast.
+  for (uint32_t i = 0; i < r->n_schemas; i++) {
+    if (strcmp(schema_norm, r->schemas[i]) == 0) return YES;
   }
   return NO;
 }

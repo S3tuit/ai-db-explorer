@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdalign.h>
 #include <string.h>
 #include <time.h>
 
@@ -49,7 +50,7 @@ static char *pg_arena_transfer(PlArena *a, char *owned) {
 
 /* Transfers an owned string into the arena after ASCII-lowercasing it.
  * Ownership: returns an arena-owned string; frees the input buffer.
- * Side effects: modifies the input buffer in place and allocates arena memory.
+ * Side effects: frees 'owned' and allocates arena memory.
  * Returns NULL on allocation failure or if input is NULL. */
 static char *pg_arena_transfer_lower(PlArena *a, char *owned) {
     if (!a || !owned) {
@@ -773,29 +774,43 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     JsonArrIter it = {0};
     if (jsget_array_objects_begin(jg, "funcname", &it) != YES) return NULL;
-
-    // Join funcname parts with '.'
-    StrBuf sb = {0};
+    // these will represent malloc'd strings that will have to be transferred
+    // to the arena
+    char *fname_to_tr = NULL;
+    char *schema_to_tr = NULL;
+    
     JsonGetter elem = {0};
-    int rc = 0;
-    while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
-        JsonGetter sjg = {0};
-        if (jsget_object(&elem, "String", &sjg) != YES) { rc = ERR; break; }
-        char *tmp = NULL;
-        if (pg_get_string_field(&sjg, "str", "sval", &tmp) != YES) { rc = ERR; break; }
-        if (sb.len > 0 && sb_append_bytes(&sb, ".", 1) != OK) { free(tmp); rc = ERR; break; }
-        if (sb_append_bytes(&sb, tmp, strlen(tmp)) != OK) { free(tmp); rc = ERR; break; }
-        free(tmp);
+    // the first string is the funcion name if there are no more strings, or
+    // it's the schema name if there's another string inside the object
+    if (jsget_array_objects_next(jg, &it, &elem) != YES) goto fail;
+    JsonGetter sjg = {0};
+    if (jsget_object(&elem, "String", &sjg) != YES) goto fail;
+    if (pg_get_string_field(&sjg, "str", "sval", &fname_to_tr) != YES) goto fail;
+    // check if there are two strings so the one we found before was the schema
+    // and not the fname
+    int rc;
+    if ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
+      schema_to_tr = fname_to_tr;
+      if (jsget_object(&elem, "String", &sjg) != YES) goto fail;
+      if (pg_get_string_field(&sjg, "str", "sval", &fname_to_tr) != YES) goto fail;
     }
+    if (rc == ERR) goto fail;
 
-    if (rc == ERR || sb.len == 0) {
-        sb_clean(&sb);
-        return NULL;
+    // we don't expect more than 2 strings
+    if (jsget_array_objects_next(jg, &it, &elem) != NO) goto fail;
+    
+    char *fname = pg_arena_transfer_lower(a, fname_to_tr);
+    if (!fname) goto fail;
+    fname_to_tr = NULL; // avoid double-free
+
+    char *schema;
+    if (schema_to_tr) {
+        schema = pg_arena_transfer_lower(a, schema_to_tr);
+    } else {
+        schema = pl_arena_add(a, (void *)"", 0);
     }
-
-    char *fname = (char *)pl_arena_add(a, sb.data, (uint32_t)sb.len);
-    sb_clean(&sb);
-    if (!fname) return NULL;
+    if (!schema) goto fail;
+    schema_to_tr = NULL;
 
     // Reject FILTER for now (agents can use CASE WHEN instead).
     if (jsget_exists_nonnull(jg, "agg_filter") == YES) {
@@ -804,6 +819,7 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q
     }
 
     QirFuncCall fc = {0};
+    fc.schema.name = schema;
     fc.name.name = fname;
 
     // parse args
@@ -820,7 +836,7 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q
     if (args.len > 0) {
         fc.args = (QirExpr **)ptrvec_flatten(&args, a);
         fc.nargs = args.len;
-        if (!fc.args) { ptrvec_clean(&args); return NULL; }
+        if (!fc.args) { ptrvec_clean(&args); goto fail; }
     }
     int is_distinct = 0;
     if (jsget_bool01(jg, "agg_distinct", &is_distinct) == YES) {
@@ -845,7 +861,7 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q
         }
 
         QirExpr *we = pg_qir_new_expr(a, QIR_EXPR_WINDOWFUNC);
-        if (!we) return NULL;
+        if (!we) goto fail;
         we->u.window.func = fc;
         we->u.window.partition_by = NULL;
         we->u.window.n_partition_by = 0;
@@ -853,14 +869,19 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a, QirQuery *q
         we->u.window.n_order_by = 0;
         we->u.window.has_frame = false;
 
-        if (pg_parse_window_def(&overjg, a, q, &we->u.window) != OK) return NULL;
+        if (pg_parse_window_def(&overjg, a, q, &we->u.window) != OK) goto fail;
         return we;
     }
 
     QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_FUNCALL);
-    if (!e) return NULL;
+    if (!e) goto fail;
     e->u.funcall = fc;
     return e;
+
+fail:
+    free(fname_to_tr);
+    if (schema_to_tr && schema_to_tr != fname_to_tr) free(schema_to_tr);
+    return NULL;
 }
 
 /* Parses a TypeName into a QirTypeRef.
@@ -968,6 +989,41 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
 
     if (jsget_object(jg, "BoolExpr", &sub) == YES) {
         return pg_parse_bool_expr(&sub, a, q);
+    }
+
+    if (jsget_object(jg, "NullTest", &sub) == YES) {
+        JsonGetter argjg = {0};
+        if (jsget_object(&sub, "arg", &argjg) != YES) return NULL;
+        QirExpr *arg = pg_parse_expr(&argjg, a, q);
+        if (!arg) return NULL;
+
+        char *ntype = NULL;
+        if (jsget_string_decode_alloc(&sub, "nulltesttype", &ntype) != YES) {
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported NULL test");
+            return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+        }
+
+        QirExprKind k = QIR_EXPR_UNSUPPORTED;
+        if (strcmp(ntype, "IS_NULL") == 0) {
+            k = QIR_EXPR_EQ;
+        } else if (strcmp(ntype, "IS_NOT_NULL") == 0) {
+            k = QIR_EXPR_NE;
+        } else {
+            free(ntype);
+            qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported NULL test");
+            return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
+        }
+        free(ntype);
+
+        QirExpr *nulllit = pg_qir_new_expr(a, QIR_EXPR_LITERAL);
+        if (!nulllit) return NULL;
+        nulllit->u.lit.kind = QIR_LIT_NULL;
+
+        QirExpr *res = pg_qir_new_expr(a, k);
+        if (!res) return NULL;
+        res->u.bin.l = arg;
+        res->u.bin.r = nulllit;
+        return res;
     }
 
     if (jsget_object(jg, "FuncCall", &sub) == YES) {

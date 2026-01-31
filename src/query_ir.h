@@ -122,8 +122,9 @@ typedef struct QirLiteral {
 
 typedef struct QirFuncCall {
   // For v1 policy, function names are treated as unqualified identifiers.
-  // Backend may still include schema-qualified in the string if it wants.
+  // Schema is optional; backends should set schema.name="" if unqualified.
   QirIdent name;
+  QirIdent schema;
   QirExpr **args;
   uint32_t nargs;
   bool is_distinct;
@@ -299,7 +300,7 @@ struct QirQuery {
   QirExpr **order_by;
   uint32_t n_order_by;
 
-  // LIMIT / OFFSET (offset may be represented by has_offset for now)
+  // LIMIT
   // limit_value: -1 means missing.
   int32_t limit_value;
 };

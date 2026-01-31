@@ -28,6 +28,21 @@ typedef struct ColumnPolicy {
   PlArena     arena;   // owns all strings and arrays in ColumnPolicy
 } ColumnPolicy;
 
+/* Represent whether or not a function is safe to call. */
+typedef struct SafeFunctionRule {
+  const char  *name;
+  const char **schemas;     // sorted unique array; NULL if no schema list
+  uint32_t     n_schemas;
+  int          is_global;   // 1 if rule applies regardless of schema
+} SafeFunctionRule;
+
+/* Groups all the SafeFunctionRule for a ConnProfile. */
+typedef struct SafeFunctionPolicy {
+  SafeFunctionRule *rules;  // sorted by function name
+  size_t            n_rules;
+  PlArena           arena;  // owns all strings and arrays in SafeFunctionPolicy
+} SafeFunctionPolicy;
+
 /**
  * Non-secret connection parameters.
  * All strings are owned by the catalog and remain valid until catalog_destroy().
@@ -46,6 +61,9 @@ typedef struct {
 
   // Column sensitivity rules for this connection (may be empty).
   ColumnPolicy col_policy;
+
+  // User-defined safe functions for this connection (may be empty).
+  SafeFunctionPolicy safe_funcs;
 } ConnProfile;
 
 // TODO: use bin search
@@ -105,5 +123,20 @@ ConnProfile *catalog_get_by_name(ConnCatalog *cat, const char *connection_name);
  */
 int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
                            const char *table, const char *column);
+
+/**
+ * Returns YES if the function name is marked safe by the profile.
+ *
+ * Business logic (v1, no search_path resolution):
+ * - If a global rule "fn" exists, it always matches (even if schema-qualified).
+ * - If no global rule exists and SQL is schema-qualified, it matches only if the
+ *   schema is listed for that function name.
+ * - If no global rule exists and SQL is unqualified, any schema-scoped rule for
+ *   that function name matches (since we do not resolve search_path in v1).
+ *
+ * Returns YES/NO/ERR.
+ */
+int connp_is_func_safe(const ConnProfile *cp, const char *schema,
+                       const char *name);
 
 #endif

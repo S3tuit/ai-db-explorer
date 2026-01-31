@@ -344,6 +344,7 @@ static void test_sql_standard_func_call(void) {
     ASSERT_TRUE(h.q->status == QIR_OK);
     ASSERT_TRUE(h.q->nselect == 1);
     ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
+    ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.schema, "");
     ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.name, "lower");
 
     ASSERT_TRUE(h.q->where != NULL);
@@ -806,7 +807,7 @@ static void test_sql_standard_unqualified_col(void) {
 /* E2. Schema-qualified function call. */
 static void test_sql_standard_schema_func(void) {
     const char *sql =
-        "SELECT pg_catalog.lower(p.email) AS email_lc "
+        "SELECT pg_cataLog.\"loWer\"(p.email) AS email_lc "
         "FROM private.people AS p;";
 
     QirQueryHandle h = {0};
@@ -815,7 +816,8 @@ static void test_sql_standard_schema_func(void) {
     ASSERT_TRUE(h.q != NULL);
     ASSERT_TRUE(h.q->status == QIR_OK);
     ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
-    ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.name, "pg_catalog.lower");
+    ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.schema, "pg_catalog");
+    ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.name, "lower");
 
     QirTouchReport *tr = extract_touches(&h);
     ASSERT_TRUE(tr->has_unknown_touches == false);
@@ -829,7 +831,7 @@ static void test_sql_standard_schema_func(void) {
 /* E3. Mixed-case identifiers should be normalized. */
 static void test_sql_standard_mixed_case_touches(void) {
     const char *sql =
-        "SELECT P.\"Name\" AS Nm "
+        "SELECT P.\"Name\" AS Nm, P.coLumn AS C1, P.\"coLumn\" AS C2 "
         "FROM private.people AS P "
         "WHERE P.\"Age\" > 10;";
 
@@ -844,6 +846,7 @@ static void test_sql_standard_mixed_case_touches(void) {
     ASSERT_TRUE(tr->has_unsupported == false);
     ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "name");
     ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "age");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "column");
     qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
@@ -1057,7 +1060,37 @@ static void test_sql_standard_values_from_rejected(void) {
     qir_handle_destroy(&h);
 }
 
+/* E12. IS NULL and IS NOT NULL*/
+static void test_sql_standard_null_comparison(void) {
+  const char *sql =
+    "SELECT v.x AS x "
+    "FROM values v "
+    "WHERE v.y IS NULL AND v.z IS NOT NULL;";
+    
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
 
+  QirExpr *lhs = h.q->where->u.bin.l;
+  QirExpr *rhs = h.q->where->u.bin.r;
+  ASSERT_TRUE(lhs->kind == QIR_EXPR_EQ);
+  ASSERT_TRUE(rhs->kind == QIR_EXPR_NE);
+
+  ASSERT_TRUE(lhs->u.bin.l->kind == QIR_EXPR_COLREF);
+  ASSERT_TRUE(lhs->u.bin.r->kind == QIR_EXPR_LITERAL);
+  ASSERT_IDENT_EQ(&lhs->u.bin.l->u.colref.qualifier, "v");
+  ASSERT_IDENT_EQ(&lhs->u.bin.l->u.colref.column, "y");
+  ASSERT_TRUE(lhs->u.bin.r->u.lit.kind == QIR_LIT_NULL);
+
+  ASSERT_TRUE(rhs->u.bin.l->kind == QIR_EXPR_COLREF);
+  ASSERT_TRUE(rhs->u.bin.r->kind == QIR_EXPR_LITERAL);
+  ASSERT_IDENT_EQ(&rhs->u.bin.l->u.colref.qualifier, "v");
+  ASSERT_IDENT_EQ(&rhs->u.bin.l->u.colref.column, "z");
+  ASSERT_TRUE(rhs->u.bin.r->u.lit.kind == QIR_LIT_NULL);
+
+  qir_handle_destroy(&h);
+}
 
 int main(void) {
     test_sql_standard_predicates_and_limit();
@@ -1099,6 +1132,7 @@ int main(void) {
     test_sql_standard_group_by_having();
     test_sql_standard_unknown_touch();
     test_sql_standard_values_from_rejected();
+    test_sql_standard_null_comparison();
     fprintf(stderr, "OK: test_query_ir_sql_standard\n");
     return 0;
 }

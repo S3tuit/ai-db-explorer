@@ -91,6 +91,7 @@ build/tests/%: build/tests/%.o $(TEST_APP_OBJ) $(LIBPG_QUERY_LIB)
 	$(CC) $^ -o $@ $(TLDFLAGS)
 
 # Run unit tests
+test-unit: EXTRA_TCFLAGS=-DADBX_TESTLOG
 test-unit: $(UNIT_TEST_BINS)
 	@set -e; \
 	for t in $(UNIT_TEST_BINS); do \
