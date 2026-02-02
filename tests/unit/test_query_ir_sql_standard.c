@@ -550,12 +550,55 @@ static void test_sql_standard_ctes(void) {
     ASSERT_TRUE(tr->has_unsupported == false);
     ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_DERIVED, "pm", "gender");
     ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "m", "name");
+    for (uint32_t i = 0; i < tr->ntouches; i++) {
+        const QirTouch *t = tr->touches[i];
+        if (t->scope == QIR_SCOPE_NESTED) {
+            ASSERT_TRUE(t->source_query != h.q);
+            break;
+        }
+    }
     qir_touch_report_destroy(tr);
 
     qir_handle_destroy(&h);
 }
 
-/* B2. Subquery in FROM. */
+/* B2. CTE with sensitive column should still parse and be touchable. */
+static void test_sql_standard_cte_sensitive_col(void) {
+    const char *sql =
+        "WITH tab1 AS ("
+        "  SELECT u.fiscal_code AS fiscal_code "
+        "  FROM users u "
+        "  WHERE u.id = 1"
+        ") "
+        "SELECT t.fiscal_code AS fiscal_code "
+        "FROM tab1 AS t "
+        "LIMIT 10;";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_OK);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "u", "fiscal_code");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "t", "fiscal_code");
+    for (uint32_t i = 0; i < tr->ntouches; i++) {
+        const QirTouch *t = tr->touches[i];
+        if (t->scope == QIR_SCOPE_MAIN && t->col.qualifier.name &&
+            strcmp(t->col.qualifier.name, "t") == 0) {
+            ASSERT_TRUE(t->source_query == h.q);
+            break;
+        }
+    }
+    qir_touch_report_destroy(tr);
+
+    qir_handle_destroy(&h);
+}
+
+/* B3. Subquery in FROM. */
 static void test_sql_standard_subquery_from(void) {
     const char *sql =
         "SELECT x.name AS name "
@@ -584,7 +627,7 @@ static void test_sql_standard_subquery_from(void) {
     qir_handle_destroy(&h);
 }
 
-/* B3. Scalar subquery in WHERE. */
+/* B4. Scalar subquery in WHERE. */
 static void test_sql_standard_subquery_where(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -609,7 +652,7 @@ static void test_sql_standard_subquery_where(void) {
     qir_handle_destroy(&h);
 }
 
-/* B4. EXISTS subquery. */
+/* B5. EXISTS subquery. */
 static void test_sql_standard_exists(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -631,7 +674,7 @@ static void test_sql_standard_exists(void) {
     qir_handle_destroy(&h);
 }
 
-/* B5. IN (SELECT ...) */
+/* B6. IN (SELECT ...) */
 static void test_sql_standard_in_subquery(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -1092,6 +1135,38 @@ static void test_sql_standard_null_comparison(void) {
   qir_handle_destroy(&h);
 }
 
+/* E13. LEFT JOIN yields base touches for both tables. */
+static void test_left_join_base_touches(void) {
+    const char *sql =
+        "SELECT u.id AS id, e.amount AS amount "
+        "FROM users u "
+        "LEFT JOIN expenses e ON e.user_id = u.id "
+        "WHERE u.balance = 10 "
+        "LIMIT 10;";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_OK);
+
+    ASSERT_TRUE(h.q->njoins == 1);
+    ASSERT_TRUE(h.q->joins != NULL);
+    ASSERT_TRUE(h.q->joins[0] != NULL);
+    ASSERT_TRUE(h.q->joins[0]->kind == QIR_JOIN_LEFT);
+
+    QirTouchReport *tr = extract_touches(&h);
+    ASSERT_TRUE(tr->has_unknown_touches == false);
+    ASSERT_TRUE(tr->has_unsupported == false);
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "u", "id");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "u", "balance");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "e", "amount");
+    ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "e", "user_id");
+    qir_touch_report_destroy(tr);
+
+    qir_handle_destroy(&h);
+}
+
 int main(void) {
     test_sql_standard_predicates_and_limit();
     test_sql_standard_in_list();
@@ -1109,6 +1184,7 @@ int main(void) {
     test_sql_standard_count_star();
     test_sql_standard_literal_select();
     test_sql_standard_ctes();
+    test_sql_standard_cte_sensitive_col();
     test_sql_standard_subquery_from();
     test_sql_standard_subquery_where();
     test_sql_standard_exists();
@@ -1133,6 +1209,7 @@ int main(void) {
     test_sql_standard_unknown_touch();
     test_sql_standard_values_from_rejected();
     test_sql_standard_null_comparison();
+    test_left_join_base_touches();
     fprintf(stderr, "OK: test_query_ir_sql_standard\n");
     return 0;
 }

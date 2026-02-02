@@ -11,6 +11,11 @@
  * in order to be used. */
 typedef struct DbBackend DbBackend;
 
+typedef struct DbSafeFuncList {
+    const char **names;   // sorted, lowercase, unqualified names
+    uint32_t count;
+} DbSafeFuncList;
+
 typedef struct DbBackendVTable {
     // Establishes a connection described by 'profile' using 'pwd' when needed.
     // The SafetyPolicy is borrowed and copied inside the backend.
@@ -40,9 +45,8 @@ typedef struct DbBackendVTable {
     // qir_handle_destroy().
     int (*make_query_ir)(DbBackend *db, const char *sql, QirQueryHandle *out);
 
-    // Returns YES if a function is safe to execute, NO if not, ERR on failure.
-    // func_signature is backend-defined (v1 uses function name only).
-    int (*is_function_safe)(DbBackend *db, const char *func_signature);
+    // Returns a list of functions that are safe to execute (v1 uses name only).
+    const DbSafeFuncList *(*safe_functions)(DbBackend *db);
 
     // Returns the latest error detected by db. The returned string is owned by
     // 'db'
@@ -83,9 +87,9 @@ static inline int db_make_query_ir(DbBackend *db, const char *sql, QirQueryHandl
     return db->vt->make_query_ir(db, sql, out);
 }
 
-static inline int db_is_function_safe(DbBackend *db, const char *func_signature) {
-    if (!db || !db->vt || !db->vt->is_function_safe) return ERR;
-    return db->vt->is_function_safe(db, func_signature);
+static inline const DbSafeFuncList *db_safe_functions(DbBackend *db) {
+    if (!db || !db->vt || !db->vt->safe_functions) return NULL;
+    return db->vt->safe_functions(db);
 }
 
 #endif

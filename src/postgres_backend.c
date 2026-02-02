@@ -1236,7 +1236,23 @@ static int pg_parse_join_expr(
     // join type
     int jointype = 0;
     int64_t v = 0;
-    if (jsget_i64(jg, "jointype", &v) == YES) jointype = (int)v;
+    if (jsget_i64(jg, "jointype", &v) == YES) {
+        jointype = (int)v;
+    } else {
+        // libpg_query may encode enums as strings; map common join names.
+        char *tmp = NULL;
+        if (jsget_string_decode_alloc(jg, "jointype", &tmp) == YES && tmp) {
+            if (strcmp(tmp, "JOIN_INNER") == 0) jointype = 0;
+            else if (strcmp(tmp, "JOIN_LEFT") == 0) jointype = 1;
+            else if (strcmp(tmp, "JOIN_FULL") == 0) jointype = 2;
+            else if (strcmp(tmp, "JOIN_RIGHT") == 0) jointype = 3;
+            else {
+                jointype = -1;
+                qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported join type");
+            }
+            free(tmp);
+        }
+    }
     if (jsget_exists_nonnull(jg, "usingClause") == YES) {
         qir_set_status(q, a, QIR_UNSUPPORTED, "JOIN USING not supported");
     }
@@ -2050,11 +2066,218 @@ fail_bad_input:
     return (*out_qr ? OK : ERR);
 }
 
-/* Returns YES for now. TODO: enforce a real function allowlist. */
-static int pg_is_function_safe(DbBackend *db, const char *func_signature) {
+// This list of functions MUST be sorted ASC.
+// You can use: py_utils/format_sorted_strings.py
+//
+// NOTE:
+//  - Time Functions: now() and related functions like current_timestamp are
+//    blocked because they access server state rather than operating purely on
+//    provided data.
+//  - Random Functions: random() and setseed() can be used for timing attacks.
+static const char *PG_SAFE_FUNCS[] = {
+  "abs",
+  "acos",
+  "acosd",
+  "acosh",
+  "age",
+  "area",
+  "array_agg",
+  "array_append",
+  "array_cat",
+  "array_dims",
+  "array_fill",
+  "array_length",
+  "array_lower",
+  "array_ndims",
+  "array_position",
+  "array_positions",
+  "array_prepend",
+  "array_remove",
+  "array_replace",
+  "array_to_json",
+  "array_to_string",
+  "array_upper",
+  "ascii",
+  "asin",
+  "asind",
+  "asinh",
+  "atan",
+  "atan2",
+  "atan2d",
+  "atand",
+  "atanh",
+  "avg",
+  "bit_length",
+  "btrim",
+  "cardinality",
+  "cast",
+  "cbrt",
+  "ceil",
+  "ceiling",
+  "center",
+  "char_length",
+  "chr",
+  "coalesce",
+  "concat",
+  "concat_ws",
+  "cos",
+  "cosd",
+  "cosh",
+  "count",
+  "cume_dist",
+  "date_part",
+  "date_trunc",
+  "decode",
+  "dense_rank",
+  "diameter",
+  "div",
+  "encode",
+  "exp",
+  "extract",
+  "first_value",
+  "floor",
+  "format",
+  "gcd",
+  "gen_random_uuid",
+  "get_bit",
+  "get_byte",
+  "greatest",
+  "height",
+  "ilike",
+  "initcap",
+  "isempty",
+  "json_agg",
+  "json_array_elements",
+  "json_array_elements_text",
+  "json_array_length",
+  "json_build_array",
+  "json_build_object",
+  "json_each",
+  "json_each_text",
+  "json_extract_path",
+  "json_object",
+  "json_object_agg",
+  "json_object_keys",
+  "json_typeof",
+  "jsonb_agg",
+  "jsonb_array_elements",
+  "jsonb_array_elements_text",
+  "jsonb_array_length",
+  "jsonb_build_array",
+  "jsonb_build_object",
+  "jsonb_delete",
+  "jsonb_delete_path",
+  "jsonb_each",
+  "jsonb_each_text",
+  "jsonb_extract_path",
+  "jsonb_insert",
+  "jsonb_object",
+  "jsonb_object_agg",
+  "jsonb_object_keys",
+  "jsonb_pretty",
+  "jsonb_set",
+  "jsonb_strip_nulls",
+  "jsonb_typeof",
+  "lag",
+  "last_value",
+  "lcm",
+  "lead",
+  "least",
+  "left",
+  "length",
+  "like",
+  "ln",
+  "log",
+  "lower",
+  "lower_inc",
+  "lower_inf",
+  "lpad",
+  "ltrim",
+  "make_date",
+  "make_interval",
+  "make_time",
+  "make_timestamp",
+  "make_timestamptz",
+  "max",
+  "min",
+  "min_scale",
+  "mod",
+  "npoints",
+  "nth_value",
+  "ntile",
+  "nullif",
+  "octet_length",
+  "overlay",
+  "percent_rank",
+  "position",
+  "power",
+  "radius",
+  "range_merge",
+  "rank",
+  "regexp_match",
+  "regexp_matches",
+  "regexp_replace",
+  "regexp_split_to_array",
+  "regexp_split_to_table",
+  "repeat",
+  "replace",
+  "reverse",
+  "right",
+  "round",
+  "row_number",
+  "row_to_json",
+  "rpad",
+  "rtrim",
+  "scale",
+  "set_bit",
+  "set_byte",
+  "sign",
+  "sin",
+  "sind",
+  "sinh",
+  "split_part",
+  "sqrt",
+  "stddev",
+  "stddev_pop",
+  "stddev_samp",
+  "string_agg",
+  "string_to_array",
+  "strpos",
+  "substring",
+  "sum",
+  "tan",
+  "tand",
+  "tanh",
+  "timezone",
+  "to_ascii",
+  "to_char",
+  "to_date",
+  "to_hex",
+  "to_json",
+  "to_jsonb",
+  "to_number",
+  "to_timestamp",
+  "trim",
+  "trim_scale",
+  "trunc",
+  "unnest",
+  "upper",
+  "upper_inc",
+  "upper_inf",
+  "uuid_nil",
+  "var_pop",
+  "var_samp",
+  "variance",
+  "width"
+};
+
+static const DbSafeFuncList *pg_safe_functions(DbBackend *db) {
     (void)db;
-    (void)func_signature;
-    return YES;
+    static const DbSafeFuncList list = {
+        .names = PG_SAFE_FUNCS,
+        .count = (uint32_t)(sizeof(PG_SAFE_FUNCS) / sizeof(PG_SAFE_FUNCS[0]))
+    };
+    return &list;
 }
 
 /* ------------------------- constructor ------------------------- */
@@ -2066,7 +2289,7 @@ static const DbBackendVTable PG_VT = {
     .destroy = pg_destroy,
     .exec = pg_exec,
     .make_query_ir = pg_make_query_ir,
-    .is_function_safe = pg_is_function_safe
+    .safe_functions = pg_safe_functions
 };
 
 DbBackend *postgres_backend_create(void) {

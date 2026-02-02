@@ -2,17 +2,11 @@
 #include "query_ir.h"
 #include "vault.h"
 #include "utils.h"
+#include "log.h"
 
 #include <string.h>
 
 #define MAX_ROWS_SENS_ON 200
-
-/* Resets 'old_msg' and writes 'new_msg' into 'old_msg'. */
-static int set_err(StrBuf *old_msg, const char *new_msg) {
-  if (!old_msg || !new_msg) return ERR;
-  sb_reset(old_msg);
-  return sb_append_bytes(old_msg, new_msg, strlen(new_msg));
-}
 
 /*---------------------------- QUERY VALIDATION -----------------------------*/
 /* To validate a query we combine the QirTouchReport and a two-pass approach:
@@ -56,16 +50,23 @@ typedef enum SensitiveLoc {
   SENS_LOC_ORDER_BY
 } SensitiveLoc;
 
-typedef struct SensitiveCtx {
+typedef struct ValidatorCtx {
   DbBackend *db;
   const ConnProfile *cp;
-  const QirQuery *q;
-  StrBuf *err;
-} SensitiveCtx;
+  ValidatorErr *err;
+} ValidatorCtx;
+
+/* Resets 'err->msg' and writes 'new_msg' into it. */
+static int set_err(ValidatorCtx *ctx, ValidatorErrCode code, const char *new_msg) {
+  if (!ctx || !ctx->err || !new_msg) return ERR;
+  ctx->err->code = code;
+  if (!ctx->err->msg) return ERR;
+  sb_reset(ctx->err->msg);
+  return sb_append_bytes(ctx->err->msg, new_msg, strlen(new_msg));
+}
 
 // PASS A START
-static int validate_query_pass_a(DbBackend *db, const ConnProfile *cp,
-                                 const QirQuery *q, StrBuf *err);
+static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q);
 
 /* Finds and return a QirFromItem using 'alias' in the given query. Returns
  * NULL on no match. */
@@ -90,13 +91,15 @@ static inline const QirFromItem *find_from_alias(const QirQuery *q, const char *
  * sensitive column because we don't resolve the original table. However, since
  * we enforced that sensitive columns can only appear in the main SELECT, this
  * can be used to understand if a colref, of the main SELECT, contains sensitive
- * data. */
+ * data. This should be called only on columns of the main SELECT. */
 static inline int colref_is_sensitive(const QirQuery *q, const ConnProfile *cp,
                                const QirColRef *c) {
   if (!q || !cp || !c) return ERR;
 
   const QirFromItem *fi = find_from_alias(q, c->qualifier.name);
-  if (!fi) return ERR;
+  if (!fi) {
+    return ERR;
+  }
   // We don't trace back the original relationship
   if (fi->kind != QIR_FROM_BASE_REL) return NO;
 
@@ -109,14 +112,14 @@ static inline int colref_is_sensitive(const QirQuery *q, const ConnProfile *cp,
 
 /* Validates that every QirFromItem and QirJoin has an alias. Returns YES, or 
  * NO/ERR and sets '*err'. */
-static int validate_range_aliases(const QirQuery *q, StrBuf *err) {
+static int validate_range_aliases(ValidatorCtx *ctx, const QirQuery *q) {
   if (!q) return ERR;
 
   for (uint32_t i = 0; i < q->nfrom; i++) {
     const QirFromItem *fi = q->from_items[i];
     if (!fi || !fi->alias.name || fi->alias.name[0] == '\0') {
       // TODO: log the table name too
-      set_err(err, "missing alias in FROM item");
+      set_err(ctx, VERR_NO_TABLE_ALIAS, "missing alias in FROM item");
       return NO;
     }
   }
@@ -124,7 +127,7 @@ static int validate_range_aliases(const QirQuery *q, StrBuf *err) {
     const QirJoin *j = q->joins[i];
     if (!j || !j->rhs || !j->rhs->alias.name || j->rhs->alias.name[0] == '\0') {
       // TODO: log the table name too
-      set_err(err, "missing alias in JOIN item");
+      set_err(ctx, VERR_NO_TABLE_ALIAS, "missing alias in JOIN item");
       return NO;
     }
   }
@@ -133,13 +136,12 @@ static int validate_range_aliases(const QirQuery *q, StrBuf *err) {
 
 /* Validates all the subqueries embedded inside 'e'. Return YES/NO/ERR. Sets
  * '*err' if it doesn't return YES. */
-typedef int (*ValidateQueryFn)(DbBackend *, const ConnProfile *, const QirQuery *, StrBuf *);
+typedef int (*ValidateQueryFn)(ValidatorCtx *, const QirQuery *);
 
 /* Walks an expression tree and validates all nested subqueries via the
  * callback provided by the caller. The callback controls the policy (Pass A
  * vs Pass B). */
-static int validate_expr_subqueries(DbBackend *db, const ConnProfile *cp,
-                                    const QirExpr *e, StrBuf *err,
+static int validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
                                     ValidateQueryFn validate_query_fn) {
   if (!e) return YES;
 
@@ -147,19 +149,18 @@ static int validate_expr_subqueries(DbBackend *db, const ConnProfile *cp,
   // all the QirExpr inside 'e'
   switch (e->kind) {
     case QIR_EXPR_SUBQUERY: {
-      return validate_query_fn(db, cp, e->u.subquery, err);
+      return validate_query_fn(ctx, e->u.subquery);
     }
     case QIR_EXPR_FUNCALL: {
       for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
-        int rc = validate_expr_subqueries(db, cp, e->u.funcall.args[i], err,
+        int rc = validate_expr_subqueries(ctx, e->u.funcall.args[i],
                                           validate_query_fn);
         if (rc != YES) return rc;
       }
       return YES;
     }
     case QIR_EXPR_CAST:
-      return validate_expr_subqueries(db, cp, e->u.cast.expr, err,
-                                      validate_query_fn);
+      return validate_expr_subqueries(ctx, e->u.cast.expr, validate_query_fn);
     case QIR_EXPR_EQ:
     case QIR_EXPR_NE:
     case QIR_EXPR_GT:
@@ -170,59 +171,53 @@ static int validate_expr_subqueries(DbBackend *db, const ConnProfile *cp,
     case QIR_EXPR_NOT_LIKE:
     case QIR_EXPR_AND:
     case QIR_EXPR_OR: {
-      int rc = validate_expr_subqueries(db, cp, e->u.bin.l, err, validate_query_fn);
+      int rc = validate_expr_subqueries(ctx, e->u.bin.l, validate_query_fn);
       if (rc != YES) return rc;
-      return validate_expr_subqueries(db, cp, e->u.bin.r, err, validate_query_fn);
+      return validate_expr_subqueries(ctx, e->u.bin.r, validate_query_fn);
     }
     case QIR_EXPR_NOT:
-      return validate_expr_subqueries(db, cp, e->u.bin.l, err, validate_query_fn);
+      return validate_expr_subqueries(ctx, e->u.bin.l, validate_query_fn);
     case QIR_EXPR_IN: {
-      int rc = validate_expr_subqueries(db, cp, e->u.in_.lhs, err,
-                                        validate_query_fn);
+      int rc = validate_expr_subqueries(ctx, e->u.in_.lhs, validate_query_fn);
       if (rc != YES) return rc;
       for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-        rc = validate_expr_subqueries(db, cp, e->u.in_.items[i], err,
-                                      validate_query_fn);
+        rc = validate_expr_subqueries(ctx, e->u.in_.items[i], validate_query_fn);
         if (rc != YES) return rc;
       }
       return YES;
     }
     case QIR_EXPR_CASE: {
       if (e->u.case_.arg) {
-        int rc = validate_expr_subqueries(db, cp, e->u.case_.arg, err,
-                                          validate_query_fn);
+        int rc = validate_expr_subqueries(ctx, e->u.case_.arg, validate_query_fn);
         if (rc != YES) return rc;
       }
       for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
         QirCaseWhen *w = e->u.case_.whens[i];
         if (!w) continue;
-        int rc = validate_expr_subqueries(db, cp, w->when_expr, err,
-                                          validate_query_fn);
+        int rc = validate_expr_subqueries(ctx, w->when_expr, validate_query_fn);
         if (rc != YES) return rc;
-        rc = validate_expr_subqueries(db, cp, w->then_expr, err,
-                                      validate_query_fn);
+        rc = validate_expr_subqueries(ctx, w->then_expr, validate_query_fn);
         if (rc != YES) return rc;
       }
       if (e->u.case_.else_expr) {
-        return validate_expr_subqueries(db, cp, e->u.case_.else_expr, err,
-                                        validate_query_fn);
+        return validate_expr_subqueries(ctx, e->u.case_.else_expr, validate_query_fn);
       }
       return YES;
     }
     case QIR_EXPR_WINDOWFUNC: {
       for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
-        int rc = validate_expr_subqueries(db, cp, e->u.window.func.args[i],
-                                          err, validate_query_fn);
+        int rc = validate_expr_subqueries(ctx, e->u.window.func.args[i],
+                                          validate_query_fn);
         if (rc != YES) return rc;
       }
       for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
-        int rc = validate_expr_subqueries(db, cp, e->u.window.partition_by[i],
-                                          err, validate_query_fn);
+        int rc = validate_expr_subqueries(ctx, e->u.window.partition_by[i],
+                                          validate_query_fn);
         if (rc != YES) return rc;
       }
       for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
-        int rc = validate_expr_subqueries(db, cp, e->u.window.order_by[i],
-                                          err, validate_query_fn);
+        int rc = validate_expr_subqueries(ctx, e->u.window.order_by[i],
+                                          validate_query_fn);
         if (rc != YES) return rc;
       }
       return YES;
@@ -232,43 +227,29 @@ static int validate_expr_subqueries(DbBackend *db, const ConnProfile *cp,
     case QIR_EXPR_LITERAL:
       return YES;
     case QIR_EXPR_UNSUPPORTED:
-      set_err(err, "unsupported expression");
+      set_err(ctx, VERR_UNSUPPORTED_QUERY, "unsupported expression");
       return NO;
   }
   return ERR;
 }
 
-static int validate_expr_subqueries_pass_a(DbBackend *db, const ConnProfile *cp,
-                                           const QirExpr *e, StrBuf *err) {
-  return validate_expr_subqueries(db, cp, e, err, validate_query_pass_a);
+static int validate_expr_subqueries_pass_a(ValidatorCtx *ctx, const QirExpr *e) {
+  return validate_expr_subqueries(ctx, e, validate_query_pass_a);
 }
 
-/* Returns YES if sensitive mode should be enabled based on the touch report.
- * We do not attempt schema resolution here; we only rely on the alias/col
- * mapping already produced by the touch extractor. */
-static int should_enable_sensitive_mode(const QirQuery *q, const ConnProfile *cp,
-                                        const QirTouchReport *tr) {
-  if (!q || !cp || !tr) return ERR;
-  if (tr->has_unknown_touches) return YES;
-
-  for (uint32_t i = 0; i < tr->ntouches; i++) {
-    const QirTouch *t = tr->touches[i];
-    if (!t) continue;
-    if (t->kind != QIR_TOUCH_BASE) continue;
-    int rc = colref_is_sensitive(q, cp, &t->col);
-    if (rc != NO) return rc;
-  }
-  return NO;
-}
-
-/* Returns YES if sensitive touches are only in allowed scopes.
- * Side effects: writes a human-readable reason into err on failure.
- * We reject any QIR_TOUCH_UNKNOWN because we cannot trust alias resolution. */
-static int validate_sensitive_touches_scope(const QirTouchReport *tr,
-                                            const ConnProfile *cp,
-                                            const QirQuery *q,
-                                            StrBuf *err) {
-  if (!tr || !cp || !q) return ERR;
+/* Returns YES if sensitive touches are only in allowed scopes and sets
+ * 'found_sensitive' to true if it saw at least one sensitive column.
+ *
+ * This function is the single source of truth for enabling sensitive mode:
+ * it scans all touches, rejects unknown aliases, and flips *found_sensitive
+ * when a sensitive base column is referenced. Touches carry their source
+ * query so alias resolution is scoped correctly.
+ *
+ * Side effects: writes a human-readable reason into err on failure. */
+static int validate_sensitive_touches_scope(ValidatorCtx *ctx,
+                                            const QirTouchReport *tr,
+                                            bool *found_sensitive) {
+  if (!tr || !ctx) return ERR;
 
   for (uint32_t i = 0; i < tr->ntouches; i++) {
     const QirTouch *t = tr->touches[i];
@@ -277,142 +258,113 @@ static int validate_sensitive_touches_scope(const QirTouchReport *tr,
     if (t->kind == QIR_TOUCH_UNKNOWN) {
       // Unknown touches mean alias resolution failed, so we cannot safely
       // reason about sensitive columns. Reject with a clear message.
-      set_err(err, "unknown column reference");
+      set_err(ctx, VERR_NO_COLUMN_ALIAS, "unknown column reference");
       return NO;
     }
 
+    // We skip touches of kind different from _BASE because its simpler to 
+    // resolte to the real, original table. It's safe because all the columns
+    // inside the whole query have at least 1 _BASE touch. So, even if a
+    // sensitive column is referenced in a subquery, it'll have one _BASE touch
+    // with t->scope != QIR_SCOPE_MAIN and we'll reject it. 
     if (t->kind != QIR_TOUCH_BASE) continue;
-    int rc = colref_is_sensitive(q, cp, &t->col);
+
+    int rc = colref_is_sensitive(t->source_query, ctx->cp, &t->col);
     if (rc == ERR) return ERR;
-    if (rc == YES && t->scope != QIR_SCOPE_MAIN) {
-      set_err(err, "sensitive columns only allowed in main query");
-      return NO;
+    if (rc == YES) {
+      if (*found_sensitive != true) *found_sensitive = true;
+      if (t->scope != QIR_SCOPE_MAIN) {
+        set_err(ctx, VERR_SENSITIVE_OUTSIDE_MAIN, "sensitive columns only allowed in main query");
+        return NO;
+      }
     }
   }
   return YES;
 }
 
+static int name_cpm(const void *s1, const void *s2) {
+  const char *key = s1;
+  const char * const*elem = s2;
+  return strcmp(key, *elem);
+}
+
+/* Returns YES if a function is safe to call for 'db' or is present in the
+ * user-defined list of 'cp'. Returns YES/NO/ERR. */
+static int validator_is_function_safe(ValidatorCtx *ctx,
+                                    const char *schema, const char *name) {
+  (void)schema;
+  if (!ctx || !ctx->db || !name || name[0] == '\0') return ERR;
+  const DbSafeFuncList *list = db_safe_functions(ctx->db);
+  
+  if (list && list->names && list->count > 0) {
+    // backend list is always global
+    char *safe_name = bsearch(name, list->names, list->count, sizeof(char*), name_cpm);
+    if (safe_name) return YES;
+  }
+  
+  return connp_is_func_safe(ctx->cp, schema, name);
+}
+
 /* Validates that all function calls in an expression tree are safe to call.
  * Returns YES/NO/ERR and sets err when returning NO/ERR. */
-static int validate_expr_functions(DbBackend *db, const ConnProfile *cp,
-                                  const QirExpr *e, StrBuf *err) {
+static int validate_expr_functions(ValidatorCtx *ctx, const QirExpr *e) {
   if (!e) return YES;
 
   switch (e->kind) {
     case QIR_EXPR_FUNCALL: {
-      StrBuf sb = {0};
-      const char *name = NULL;
-      if (e->u.funcall.schema.name && e->u.funcall.schema.name[0] != '\0') {
-        if (sb_append_bytes(&sb, e->u.funcall.schema.name,
-                            strlen(e->u.funcall.schema.name)) != OK ||
-            sb_append_bytes(&sb, ".", 1) != OK ||
-            sb_append_bytes(&sb, e->u.funcall.name.name,
-                            strlen(e->u.funcall.name.name)) != OK ||
-            sb_append_bytes(&sb, "", 1) != OK) {
-          sb_clean(&sb);
-          set_err(err, "unable to validate function call");
-          return ERR;
-        }
-        name = sb.data;
-      } else {
-        name = e->u.funcall.name.name;
-      }
+      const char *name = e->u.funcall.name.name;
       if (!name || name[0] == '\0') {
-        sb_clean(&sb);
-        set_err(err, "invalid function name");
+        set_err(ctx, VERR_FUNC_UNSAFE, "invalid function name");
         return NO;
       }
-      int rc = db_is_function_safe(db, name);
+      int rc = validator_is_function_safe(ctx, e->u.funcall.schema.name, name);
       if (rc == ERR) {
-        sb_clean(&sb);
-        set_err(err, "unable to validate function call");
+        set_err(ctx, VERR_ANALYZE_FAIL, "unable to validate function call");
         return ERR;
       }
       if (rc == NO) {
-        // did user explicitly said this function is safe to call?
-        int urc = connp_is_func_safe(cp, e->u.funcall.schema.name, e->u.funcall.name.name);
-        if (urc == ERR) {
-          sb_clean(&sb);
-          set_err(err, "unable to validate function call");
-          return ERR;
-        }
-        if (urc != YES) {
-          sb_clean(&sb);
-          // TODO: log the function name
-          set_err(err, "unsafe function call");
-          return NO;
-        }
+        set_err(ctx, VERR_FUNC_UNSAFE, "unsafe function call");
+        return NO;
       }
+
       for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
-        rc = validate_expr_functions(db, cp, e->u.funcall.args[i], err);
+        rc = validate_expr_functions(ctx, e->u.funcall.args[i]);
         if (rc != YES) return rc;
       }
-      sb_clean(&sb);
       return YES;
     }
     case QIR_EXPR_WINDOWFUNC: {
-      StrBuf sb = {0};
-      const char *name = NULL;
-      if (e->u.window.func.schema.name &&
-          e->u.window.func.schema.name[0] != '\0') {
-        if (sb_append_bytes(&sb, e->u.window.func.schema.name,
-                            strlen(e->u.window.func.schema.name)) != OK ||
-            sb_append_bytes(&sb, ".", 1) != OK ||
-            sb_append_bytes(&sb, e->u.window.func.name.name,
-                            strlen(e->u.window.func.name.name)) != OK ||
-            sb_append_bytes(&sb, "", 1) != OK) {
-          sb_clean(&sb);
-          set_err(err, "unable to validate function call");
-          return ERR;
-        }
-        name = sb.data;
-      } else {
-        name = e->u.window.func.name.name;
-      }
+      const char *name = e->u.window.func.name.name;
       if (!name || name[0] == '\0') {
-        sb_clean(&sb);
-        set_err(err, "invalid window function name");
+        set_err(ctx, VERR_FUNC_UNSAFE, "invalid window function name");
         return NO;
       }
-      int rc = db_is_function_safe(db, name);
+      int rc = validator_is_function_safe(ctx, e->u.window.func.schema.name, name);
       if (rc == ERR) {
-        sb_clean(&sb);
-        set_err(err, "unable to validate function call");
+        set_err(ctx, VERR_ANALYZE_FAIL, "unable to validate function call");
         return ERR;
       }
       if (rc == NO) {
-        // did user explicitly said this function is safe to call?
-        int urc = connp_is_func_safe(cp, e->u.window.func.schema.name,
-                                     e->u.window.func.name.name);
-        if (urc == ERR) {
-          sb_clean(&sb);
-          set_err(err, "unable to validate function call");
-          return ERR;
-        }
-        if (urc != YES) {
-          sb_clean(&sb);
-          // TODO: log the function call too
-          set_err(err, "unsafe function call");
-          return NO;
-        }
+        set_err(ctx, VERR_FUNC_UNSAFE, "unsafe function call");
+        return NO;
       }
+
       for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
-        rc = validate_expr_functions(db, cp, e->u.window.func.args[i], err);
+        rc = validate_expr_functions(ctx, e->u.window.func.args[i]);
         if (rc != YES) return rc;
       }
       for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
-        rc = validate_expr_functions(db, cp, e->u.window.partition_by[i], err);
+        rc = validate_expr_functions(ctx, e->u.window.partition_by[i]);
         if (rc != YES) return rc;
       }
       for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
-        rc = validate_expr_functions(db, cp, e->u.window.order_by[i], err);
+        rc = validate_expr_functions(ctx, e->u.window.order_by[i]);
         if (rc != YES) return rc;
       }
-      sb_clean(&sb);
       return YES;
     }
     case QIR_EXPR_CAST:
-      return validate_expr_functions(db, cp, e->u.cast.expr, err);
+      return validate_expr_functions(ctx, e->u.cast.expr);
     case QIR_EXPR_EQ:
     case QIR_EXPR_NE:
     case QIR_EXPR_GT:
@@ -423,36 +375,36 @@ static int validate_expr_functions(DbBackend *db, const ConnProfile *cp,
     case QIR_EXPR_NOT_LIKE:
     case QIR_EXPR_AND:
     case QIR_EXPR_OR: {
-      int rc = validate_expr_functions(db, cp, e->u.bin.l, err);
+      int rc = validate_expr_functions(ctx, e->u.bin.l);
       if (rc != YES) return rc;
-      return validate_expr_functions(db, cp, e->u.bin.r, err);
+      return validate_expr_functions(ctx, e->u.bin.r);
     }
     case QIR_EXPR_NOT:
-      return validate_expr_functions(db, cp, e->u.bin.l, err);
+      return validate_expr_functions(ctx, e->u.bin.l);
     case QIR_EXPR_IN: {
-      int rc = validate_expr_functions(db, cp, e->u.in_.lhs, err);
+      int rc = validate_expr_functions(ctx, e->u.in_.lhs);
       if (rc != YES) return rc;
       for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-        rc = validate_expr_functions(db, cp, e->u.in_.items[i], err);
+        rc = validate_expr_functions(ctx, e->u.in_.items[i]);
         if (rc != YES) return rc;
       }
       return YES;
     }
     case QIR_EXPR_CASE: {
       if (e->u.case_.arg) {
-        int rc = validate_expr_functions(db, cp, e->u.case_.arg, err);
+        int rc = validate_expr_functions(ctx, e->u.case_.arg);
         if (rc != YES) return rc;
       }
       for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
         QirCaseWhen *w = e->u.case_.whens[i];
         if (!w) continue;
-        int rc = validate_expr_functions(db, cp, w->when_expr, err);
+        int rc = validate_expr_functions(ctx, w->when_expr);
         if (rc != YES) return rc;
-        rc = validate_expr_functions(db, cp, w->then_expr, err);
+        rc = validate_expr_functions(ctx, w->then_expr);
         if (rc != YES) return rc;
       }
       if (e->u.case_.else_expr) {
-        return validate_expr_functions(db, cp, e->u.case_.else_expr, err);
+        return validate_expr_functions(ctx, e->u.case_.else_expr);
       }
       return YES;
     }
@@ -462,7 +414,7 @@ static int validate_expr_functions(DbBackend *db, const ConnProfile *cp,
     case QIR_EXPR_LITERAL:
       return YES;
     case QIR_EXPR_UNSUPPORTED:
-      set_err(err, "unsupported expression");
+      set_err(ctx, VERR_UNSUPPORTED_QUERY, "unsupported expression");
       return NO;
   }
   return ERR;
@@ -645,32 +597,32 @@ static int expr_has_param(const QirExpr *e) {
 
 /* Validates that parameters are only used inside WHERE and only compared to
  * sensitive columns. This is enforced in Pass A to avoid data exfiltration. */
-static int validate_params_where(const QirQuery *q, const ConnProfile *cp,
-                                 const QirExpr *e, StrBuf *err) {
-  if (!q || !cp || !e) return ERR;
+static int validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
+                                 const QirExpr *e) {
+  if (!q || !ctx || !e) return ERR;
 
   switch (e->kind) {
     case QIR_EXPR_AND: {
-      int rc = validate_params_where(q, cp, e->u.bin.l, err);
+      int rc = validate_params_where(ctx, q, e->u.bin.l);
       if (rc != YES) return rc;
-      return validate_params_where(q, cp, e->u.bin.r, err);
+      return validate_params_where(ctx, q, e->u.bin.r);
     }
     case QIR_EXPR_EQ: {
       int left_param = (e->u.bin.l && e->u.bin.l->kind == QIR_EXPR_PARAM);
       if (left_param) {
-        int sens_r = expr_has_sensitive(q, cp, e->u.bin.r);
+        int sens_r = expr_has_sensitive(q, ctx->cp, e->u.bin.r);
         if (sens_r == ERR) return ERR;
         if (sens_r != YES){
-          set_err(err, "parameters can only compare to sensitive columns");
+          set_err(ctx, VERR_PARAM_NON_SENSITIVE, "parameters can only compare to sensitive columns");
           return NO;
         }
       }
       int right_param = (e->u.bin.r && e->u.bin.r->kind == QIR_EXPR_PARAM);
       if (right_param) {
-        int sens_l = expr_has_sensitive(q, cp, e->u.bin.l);
+        int sens_l = expr_has_sensitive(q, ctx->cp, e->u.bin.l);
         if (sens_l == ERR) return ERR;
         if (sens_l != YES){
-          set_err(err, "parameters can only compare to sensitive columns");
+          set_err(ctx, VERR_PARAM_NON_SENSITIVE, "parameters can only compare to sensitive columns");
           return NO;
         }
       }
@@ -678,14 +630,14 @@ static int validate_params_where(const QirQuery *q, const ConnProfile *cp,
     }
     case QIR_EXPR_IN: {
       if (!e->u.in_.lhs) return ERR;
-      int sens_l = expr_has_sensitive(q, cp, e->u.in_.lhs);
+      int sens_l = expr_has_sensitive(q, ctx->cp, e->u.in_.lhs);
       if (sens_l == ERR) return ERR;
       for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
         const QirExpr *it = e->u.in_.items[i];
         if (!it) continue;
         if (it->kind == QIR_EXPR_PARAM) {
           if (sens_l != YES) {
-            set_err(err, "parameters can only compare to sensitive columns");
+            set_err(ctx, VERR_PARAM_NON_SENSITIVE, "parameters can only compare to sensitive columns");
             return NO;
           }
         }
@@ -702,14 +654,14 @@ static int validate_params_where(const QirQuery *q, const ConnProfile *cp,
     case QIR_EXPR_LIKE:
     case QIR_EXPR_NOT_LIKE: {
       if (expr_has_param(e) == YES) {
-        set_err(err, "parameters are only allowed inside WHERE comparisons");
+        set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE comparisons");
         return NO;
       }
       return YES;
     }
     case QIR_EXPR_PARAM:
       // we should not see a dangling param inside the WHERE
-      set_err(err, "parameters are only allowed inside WHERE comparisons");
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE comparisons");
       return NO;
     case QIR_EXPR_SUBQUERY:
     case QIR_EXPR_LITERAL:
@@ -719,7 +671,7 @@ static int validate_params_where(const QirQuery *q, const ConnProfile *cp,
     case QIR_EXPR_CASE:
     case QIR_EXPR_WINDOWFUNC:
       if (expr_has_param(e) == YES) {
-        set_err(err, "parameters are only allowed inside WHERE comparisons");
+        set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE comparisons");
         return NO;
       }
       return YES;
@@ -731,104 +683,103 @@ static int validate_params_where(const QirQuery *q, const ConnProfile *cp,
 
 /* Pass A: validates alias requirements, function safety, and validates
  * all nested queries. This pass is mode-independent and is always required. */
-static int validate_query_pass_a(DbBackend *db, const ConnProfile *cp,
-                                 const QirQuery *q, StrBuf *err) {
-  if (!db || !cp || !q) return ERR;
+static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q) {
+  if (!ctx || !ctx->db || !ctx->cp || !q) return ERR;
 
   // SELECT * is forbidden regardless of Sensitive Mode.
   if (q->has_star) {
-    set_err(err, "SELECT * is not allowed");
+    set_err(ctx, VERR_STAR, "SELECT * is not allowed");
     return NO;
   }
 
   // Even in nested queries, we require aliases for all range items. Without
   // this, a nested query could hide ambiguous references and we would miss it
   // because touch extraction only sees column references.
-  int rc = validate_range_aliases(q, err);
+  int rc = validate_range_aliases(ctx, q);
   if (rc != YES) return rc;
 
   // Function allowlist enforcement across the query.
   // SELECT
   for (uint32_t i = 0; i < q->nselect; i++) {
-    int rc = validate_expr_functions(db, cp, q->select_items[i]->value, err);
+    int rc = validate_expr_functions(ctx, q->select_items[i]->value);
     if (rc != YES) return rc;
     if (expr_has_param(q->select_items[i]->value) == YES) {
-      set_err(err, "parameters are only allowed inside WHERE");
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE");
       return NO;
     }
-    rc = validate_expr_subqueries_pass_a(db, cp, q->select_items[i]->value, err);
+    rc = validate_expr_subqueries_pass_a(ctx, q->select_items[i]->value);
     if (rc != YES) return rc;
   }
   // WHERE
   if (q->where) {
-    int rc = validate_expr_functions(db, cp, q->where, err);
+    int rc = validate_expr_functions(ctx, q->where);
     if (rc != YES) return rc;
-    rc = validate_params_where(q, cp, q->where, err);
+    rc = validate_params_where(ctx, q, q->where);
     if (rc != YES) return rc;
-    rc = validate_expr_subqueries_pass_a(db, cp, q->where, err);
+    rc = validate_expr_subqueries_pass_a(ctx, q->where);
     if (rc != YES) return rc;
   }
   // GROUP BY
   for (uint32_t i = 0; i < q->n_group_by; i++) {
-    int rc = validate_expr_functions(db, cp, q->group_by[i], err);
+    int rc = validate_expr_functions(ctx, q->group_by[i]);
     if (rc != YES) return rc;
     if (expr_has_param(q->group_by[i]) == YES) {
-      set_err(err, "parameters are only allowed inside WHERE");
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE");
       return NO;
     }
-    rc = validate_expr_subqueries_pass_a(db, cp, q->group_by[i], err);
+    rc = validate_expr_subqueries_pass_a(ctx, q->group_by[i]);
     if (rc != YES) return rc;
   }
   // HAVING
   if (q->having) {
-    int rc = validate_expr_functions(db, cp, q->having, err);
+    int rc = validate_expr_functions(ctx, q->having);
     if (rc != YES) return rc;
     if (expr_has_param(q->having) == YES) {
-      set_err(err, "parameters are only allowed inside WHERE");
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE");
       return NO;
     }
-    rc = validate_expr_subqueries_pass_a(db, cp, q->having, err);
+    rc = validate_expr_subqueries_pass_a(ctx, q->having);
     if (rc != YES) return rc;
   }
   // ORDER BY
   for (uint32_t i = 0; i < q->n_order_by; i++) {
-    int rc = validate_expr_functions(db, cp, q->order_by[i], err);
+    int rc = validate_expr_functions(ctx, q->order_by[i]);
     if (rc != YES) return rc;
     if (expr_has_param(q->order_by[i]) == YES) {
-      set_err(err, "parameters are only allowed inside WHERE");
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE");
       return NO;
     }
-    rc = validate_expr_subqueries_pass_a(db, cp, q->order_by[i], err);
+    rc = validate_expr_subqueries_pass_a(ctx, q->order_by[i]);
     if (rc != YES) return rc;
   }
   // JOIN
   for (uint32_t i = 0; i < q->njoins; i++) {
-    int rc = validate_expr_functions(db, cp, q->joins[i]->on, err);
+    int rc = validate_expr_functions(ctx, q->joins[i]->on);
     if (rc != YES) return rc;
     if (expr_has_param(q->joins[i]->on) == YES) {
-      set_err(err, "parameters are only allowed inside WHERE");
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE, "parameters are only allowed inside WHERE");
       return NO;
     }
-    rc = validate_expr_subqueries_pass_a(db, cp, q->joins[i]->on, err);
+    rc = validate_expr_subqueries_pass_a(ctx, q->joins[i]->on);
     if (rc != YES) return rc;
   }
 
   // Recurse into nested queries
   for (uint32_t i = 0; i < q->nctes; i++) {
-    rc = validate_query_pass_a(db, cp, q->ctes[i]->query, err);
+    rc = validate_query_pass_a(ctx, q->ctes[i]->query);
     if (rc != YES) return rc;
   }
   for (uint32_t i = 0; i < q->nfrom; i++) {
     const QirFromItem *fi = q->from_items[i];
     if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      rc = validate_query_pass_a(db, cp, fi->u.subquery, err);
+      rc = validate_query_pass_a(ctx, fi->u.subquery);
       if (rc != YES) return rc;
     }
   }
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirFromItem *fi = q->joins[i]->rhs;
     if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      rc = validate_query_pass_a(db, cp, fi->u.subquery, err);
+      rc = validate_query_pass_a(ctx, fi->u.subquery);
       if (rc != YES) return rc;
     }
   }
@@ -837,12 +788,10 @@ static int validate_query_pass_a(DbBackend *db, const ConnProfile *cp,
 
 // PASS B START
 
-static int validate_query_pass_b(DbBackend *db, const ConnProfile *cp,
-                                 const QirQuery *q, StrBuf *err);
+static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q);
 
-static int validate_expr_subqueries_pass_b(DbBackend *db, const ConnProfile *cp,
-                                           const QirExpr *e, StrBuf *err) {
-  return validate_expr_subqueries(db, cp, e, err, validate_query_pass_b);
+static int validate_expr_subqueries_pass_b(ValidatorCtx *ctx, const QirExpr *e) {
+  return validate_expr_subqueries(ctx, e, validate_query_pass_b);
 }
 
 static inline bool expr_is_simple_operand(const QirExpr *e) {
@@ -855,16 +804,16 @@ static inline bool expr_is_simple_operand(const QirExpr *e) {
 /* Validates Sensitive Mode expression rules based on location.
  * Returns YES/NO/ERR and writes a human-friendly reason to ctx->err on NO.
  * Read the start of validator.c for doc. */
-static int validate_sensitive_expr(const SensitiveCtx *ctx, const QirExpr *e,
-                                   SensitiveLoc loc) {
-  if (!ctx || !ctx->cp || !ctx->q || !e) return ERR;
+static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
+                                  const QirExpr *e, SensitiveLoc loc) {
+  if (!ctx || !main_q || !e) return ERR;
 
   switch (loc) {
     case SENS_LOC_SELECT: {
-      int sens = expr_has_sensitive(ctx->q, ctx->cp, e);
+      int sens = expr_has_sensitive(main_q, ctx->cp, e);
       if (sens == ERR) return ERR;
       if (sens == YES && e->kind != QIR_EXPR_COLREF) {
-        set_err(ctx->err, "sensitive columns must be selected directly");
+        set_err(ctx, VERR_SENSITIVE_SELECT_EXPR, "sensitive columns must be selected directly");
         return NO;
       }
       return YES;
@@ -873,74 +822,75 @@ static int validate_sensitive_expr(const SensitiveCtx *ctx, const QirExpr *e,
     case SENS_LOC_JOIN_ON: {
       switch (e->kind) {
         case QIR_EXPR_AND: {
-          int rc = validate_sensitive_expr(ctx, e->u.bin.l, loc);
+          int rc = validate_sensitive_expr(ctx, main_q, e->u.bin.l, loc);
           if (rc != YES) return rc;
-          return validate_sensitive_expr(ctx, e->u.bin.r, loc);
+          return validate_sensitive_expr(ctx, main_q, e->u.bin.r, loc);
         }
         case QIR_EXPR_EQ: {
           if (!expr_is_simple_operand(e->u.bin.l) ||
               !expr_is_simple_operand(e->u.bin.r)) {
-            set_err(ctx->err, "JOIN predicates must compare simple operands");
+            set_err(ctx, VERR_JOIN_ON_INVALID, "JOIN predicates must compare simple operands");
             return NO;
           }
-          int sens_l = expr_has_sensitive(ctx->q, ctx->cp, e->u.bin.l);
+          int sens_l = expr_has_sensitive(main_q, ctx->cp, e->u.bin.l);
           if (sens_l == ERR) return ERR;
-          int sens_r = expr_has_sensitive(ctx->q, ctx->cp, e->u.bin.r);
+          int sens_r = expr_has_sensitive(main_q, ctx->cp, e->u.bin.r);
           if (sens_r == ERR) return ERR;
           if (sens_l == YES || sens_r == YES) {
-            set_err(ctx->err, "sensitive columns cannot be referenced in JOIN");
+            set_err(ctx, VERR_JOIN_ON_SENSITIVE, "sensitive columns cannot be referenced in JOIN");
             return NO;
           }
           return YES;
         }
         default:
-          set_err(ctx->err, "JOIN ON must be AND of '=' predicates");
+          set_err(ctx, VERR_JOIN_ON_INVALID, "JOIN ON must be AND of '=' predicates");
           return NO;
       }
     }
 
     case SENS_LOC_WHERE: {
       switch (e->kind) {
-        case QIR_EXPR_SUBQUERY:
-          return validate_query_pass_b(ctx->db, ctx->cp, e->u.subquery, ctx->err);
+        case QIR_EXPR_SUBQUERY: {
+          return validate_query_pass_b(ctx, e->u.subquery);
+        }
         case QIR_EXPR_AND: {
-          int rc = validate_sensitive_expr(ctx, e->u.bin.l, loc);
+          int rc = validate_sensitive_expr(ctx, main_q, e->u.bin.l, loc);
           if (rc != YES) return rc;
-          return validate_sensitive_expr(ctx, e->u.bin.r, loc);
+          return validate_sensitive_expr(ctx, main_q, e->u.bin.r, loc);
         }
         case QIR_EXPR_EQ: {
-          int sens_l = expr_has_sensitive(ctx->q, ctx->cp, e->u.bin.l);
+          int sens_l = expr_has_sensitive(main_q, ctx->cp, e->u.bin.l);
           if (sens_l == ERR) return ERR;
-          int sens_r = expr_has_sensitive(ctx->q, ctx->cp, e->u.bin.r);
+          int sens_r = expr_has_sensitive(main_q, ctx->cp, e->u.bin.r);
           if (sens_r == ERR) return ERR;
 
           if (sens_l == YES) {
             if (e->u.bin.l->kind != QIR_EXPR_COLREF) {
-              set_err(ctx->err, "sensitive columns must be referenced directly in WHERE");
+              set_err(ctx, VERR_SENSITIVE_LOC, "sensitive columns must be referenced directly in WHERE");
               return NO;
             }
             if (e->u.bin.r->kind != QIR_EXPR_PARAM) {
-              set_err(ctx->err, "sensitive columns must compare only to parameters");
+              set_err(ctx, VERR_SENSITIVE_CMP, "sensitive columns must compare only to parameters");
               return NO;
             }
           }
           if (sens_r == YES) {
             if (e->u.bin.r->kind != QIR_EXPR_COLREF) {
-              set_err(ctx->err, "sensitive columns must be referenced directly in WHERE");
+              set_err(ctx, VERR_SENSITIVE_LOC, "sensitive columns must be referenced directly in WHERE");
               return NO;
             }
             if (e->u.bin.l->kind != QIR_EXPR_PARAM) {
-              set_err(ctx->err, "sensitive columns must compare only to parameters");
+              set_err(ctx, VERR_SENSITIVE_CMP, "sensitive columns must compare only to parameters");
               return NO;
             }
           }
           return YES;
         }
         case QIR_EXPR_IN: {
-          int sens_l = expr_has_sensitive(ctx->q, ctx->cp, e->u.in_.lhs);
+          int sens_l = expr_has_sensitive(main_q, ctx->cp, e->u.in_.lhs);
           if (sens_l == ERR) return ERR;
           if ((sens_l == YES && e->u.in_.lhs->kind != QIR_EXPR_COLREF)) {
-            set_err(ctx->err, "sensitive columns must be referenced directly in IN()");
+            set_err(ctx, VERR_SENSITIVE_LOC, "sensitive columns must be referenced directly in IN()");
             return NO;
           }
 
@@ -950,15 +900,15 @@ static int validate_sensitive_expr(const SensitiveCtx *ctx, const QirExpr *e,
             if (!it) continue;
             if (sens_l == YES) {
               if (it->kind != QIR_EXPR_PARAM) {
-                set_err(ctx->err, "sensitive columns must compare only to parameters");
+                set_err(ctx, VERR_SENSITIVE_CMP, "sensitive columns must compare only to parameters");
                 return NO;
               }
             }
 
-            int sens_i = expr_has_sensitive(ctx->q, ctx->cp, it);
+            int sens_i = expr_has_sensitive(main_q, ctx->cp, it);
             if (sens_i == ERR) return ERR;
             if (sens_i == YES) {
-              set_err(ctx->err, "sensitive columns cannot appear in IN list");
+              set_err(ctx, VERR_SENSITIVE_CMP, "sensitive columns cannot appear in IN list");
               return NO;
             }
           }
@@ -966,22 +916,22 @@ static int validate_sensitive_expr(const SensitiveCtx *ctx, const QirExpr *e,
         }
         case QIR_EXPR_OR:
         case QIR_EXPR_NOT:
-          set_err(ctx->err, "WHERE must be a conjunction of AND predicates");
+          set_err(ctx, VERR_WHERE_NOT_CONJ, "WHERE must be a conjunction of AND predicates");
           return NO;
         default:
-          set_err(ctx->err, "unsupported WHERE predicate in sensitive mode");
+          set_err(ctx, VERR_SENSITIVE_CMP, "unsupported WHERE predicate in sensitive mode");
           return NO;
       }
     }
     case SENS_LOC_GROUP_BY:
     case SENS_LOC_HAVING:
     case SENS_LOC_ORDER_BY: {
-      int sens = expr_has_sensitive(ctx->q, ctx->cp, e);
+      int sens = expr_has_sensitive(main_q, ctx->cp, e);
       if (sens == ERR) return ERR;
       if (sens == YES) {
-        if (loc == SENS_LOC_GROUP_BY) set_err(ctx->err, "GROUP BY cannot reference sensitive columns");
-        if (loc == SENS_LOC_HAVING) set_err(ctx->err, "HAVING cannot reference sensitive columns");
-        if (loc == SENS_LOC_ORDER_BY) set_err(ctx->err, "ORDER BY cannot reference sensitive columns");
+        if (loc == SENS_LOC_GROUP_BY) set_err(ctx, VERR_SENSITIVE_LOC, "GROUP BY cannot reference sensitive columns");
+        if (loc == SENS_LOC_HAVING) set_err(ctx, VERR_SENSITIVE_LOC, "HAVING cannot reference sensitive columns");
+        if (loc == SENS_LOC_ORDER_BY) set_err(ctx, VERR_SENSITIVE_LOC, "ORDER BY cannot reference sensitive columns");
         return NO;
       }
       return YES;
@@ -992,29 +942,27 @@ static int validate_sensitive_expr(const SensitiveCtx *ctx, const QirExpr *e,
 
 /* Pass B: enforces Sensitive Mode rules on this query and all nested queries.
  * This pass should only be executed when Sensitive Mode is enabled. */
-static int validate_query_pass_b(DbBackend *db, const ConnProfile *cp,
-                                 const QirQuery *q, StrBuf *err) {
-  if (!db || !cp || !q) return ERR;
-  SensitiveCtx ctx = {.db = db, .cp = cp, .q = q, .err = err};
+static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
+  if (!ctx || !ctx->db || !ctx->cp || !q) return ERR;
 
   if (q->has_star) {
-    set_err(err, "SELECT * is not allowed");
+    set_err(ctx, VERR_STAR, "SELECT * is not allowed");
     return NO;
   }
   if (q->has_distinct) {
-    set_err(err, "DISTINCT is not allowed in sensitive mode");
+    set_err(ctx, VERR_DISTINCT_SENSITIVE, "DISTINCT is not allowed in sensitive mode");
     return NO;
   }
   if (q->has_offset) {
-    set_err(err, "OFFSET is not allowed in sensitive mode");
+    set_err(ctx, VERR_OFFSET_SENSITIVE, "OFFSET is not allowed in sensitive mode");
     return NO;
   }
   if (q->limit_value < 0) {
-    set_err(err, "LIMIT is required in sensitive mode");
+    set_err(ctx, VERR_LIMIT_REQUIRED, "LIMIT is required in sensitive mode");
     return NO;
   }
   if (q->limit_value > MAX_ROWS_SENS_ON) {
-    set_err(err, "LIMIT exceeds sensitive mode maximum");
+    set_err(ctx, VERR_LIMIT_EXCEEDS, "LIMIT exceeds sensitive mode maximum");
     return NO;
   }
 
@@ -1023,18 +971,18 @@ static int validate_query_pass_b(DbBackend *db, const ConnProfile *cp,
     const QirJoin *j = q->joins ? q->joins[i] : NULL;
     if (!j) continue;
     if (j->kind != QIR_JOIN_INNER) {
-      set_err(err, "only INNER JOIN is allowed in sensitive mode");
+      set_err(ctx, VERR_JOIN_NOT_INNER, "only INNER JOIN is allowed in sensitive mode");
       return NO;
     }
     if (j->on) {
-      int rc = validate_sensitive_expr(&ctx, j->on, SENS_LOC_JOIN_ON);
+      int rc = validate_sensitive_expr(ctx, q, j->on, SENS_LOC_JOIN_ON);
       if (rc != YES) return rc;
     }
   }
 
   // WHERE
   if (q->where) {
-    int rc = validate_sensitive_expr(&ctx, q->where, SENS_LOC_WHERE);
+    int rc = validate_sensitive_expr(ctx, q, q->where, SENS_LOC_WHERE);
     if (rc != YES) return rc;
   }
 
@@ -1042,9 +990,9 @@ static int validate_query_pass_b(DbBackend *db, const ConnProfile *cp,
   for (uint32_t i = 0; i < q->nselect; i++) {
     const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
     if (!si || !si->value) continue; // TODO: maybe this should return error because the QirQuery is malformatted.
-    int rc = validate_sensitive_expr(&ctx, si->value, SENS_LOC_SELECT);
+    int rc = validate_sensitive_expr(ctx, q, si->value, SENS_LOC_SELECT);
     if (rc != YES) return rc;
-    rc = validate_expr_subqueries_pass_b(db, cp, si->value, err);
+    rc = validate_expr_subqueries_pass_b(ctx, si->value);
     if (rc != YES) return rc;
   }
 
@@ -1052,17 +1000,17 @@ static int validate_query_pass_b(DbBackend *db, const ConnProfile *cp,
   for (uint32_t i = 0; i < q->n_group_by; i++) {
     QirExpr *e = q->group_by ? q->group_by[i] : NULL;
     if (!e) continue;
-    int rc = validate_sensitive_expr(&ctx, e, SENS_LOC_GROUP_BY);
+    int rc = validate_sensitive_expr(ctx, q, e, SENS_LOC_GROUP_BY);
     if (rc != YES) return rc;
-    rc = validate_expr_subqueries_pass_b(db, cp, e, err);
+    rc = validate_expr_subqueries_pass_b(ctx, e);
     if (rc != YES) return rc;
   }
 
   // HAVING
   if (q->having) {
-    int rc = validate_sensitive_expr(&ctx, q->having, SENS_LOC_HAVING);
+    int rc = validate_sensitive_expr(ctx, q, q->having, SENS_LOC_HAVING);
     if (rc != YES) return rc;
-    rc = validate_expr_subqueries_pass_b(db, cp, q->having, err);
+    rc = validate_expr_subqueries_pass_b(ctx, q->having);
     if (rc != YES) return rc;
   }
 
@@ -1070,28 +1018,28 @@ static int validate_query_pass_b(DbBackend *db, const ConnProfile *cp,
   for (uint32_t i = 0; i < q->n_order_by; i++) {
     QirExpr *e = q->order_by ? q->order_by[i] : NULL;
     if (!e) continue;
-    int rc = validate_sensitive_expr(&ctx, e, SENS_LOC_ORDER_BY);
+    int rc = validate_sensitive_expr(ctx, q, e, SENS_LOC_ORDER_BY);
     if (rc != YES) return rc;
-    rc = validate_expr_subqueries_pass_b(db, cp, e, err);
+    rc = validate_expr_subqueries_pass_b(ctx, e);
     if (rc != YES) return rc;
   }
 
   // Recurse into nested queries to enforce the same Sensitive Mode rules.
   for (uint32_t i = 0; i < q->nctes; i++) {
-    int rc = validate_query_pass_b(db, cp, q->ctes[i]->query, err);
+    int rc = validate_query_pass_b(ctx, q->ctes[i]->query);
     if (rc != YES) return rc;
   }
   for (uint32_t i = 0; i < q->nfrom; i++) {
     const QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
     if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      int rc = validate_query_pass_b(db, cp, fi->u.subquery, err);
+      int rc = validate_query_pass_b(ctx, fi->u.subquery);
       if (rc != YES) return rc;
     }
   }
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirFromItem *fi = q->joins ? q->joins[i]->rhs : NULL;
     if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      int rc = validate_query_pass_b(db, cp, fi->u.subquery, err);
+      int rc = validate_query_pass_b(ctx, fi->u.subquery);
       if (rc != YES) return rc;
     }
   }
@@ -1101,48 +1049,58 @@ static int validate_query_pass_b(DbBackend *db, const ConnProfile *cp,
 
 int validate_query(DbBackend *db, const ConnProfile *cp,
                    const SafetyPolicy *policy, const char *sql,
-                   StrBuf *err_msg) {
+                   ValidatorErr *err) {
   (void)policy; // read-only enforced at session level for now
 
-  if (!db || !cp || !sql || !err_msg) return ERR;
+  if (!db || !cp || !sql || !err) return ERR;
+  ValidatorCtx ctx = {.db = db, .cp = cp, .err = err};
 
   QirQueryHandle h = {0};
   if (db_make_query_ir(db, sql, &h) != OK) {
-    set_err(err_msg, "failed to parse query");
+    set_err(&ctx, VERR_PARSE_FAIL, "failed to parse query");
     return ERR;
   }
 
   QirQuery *q = h.q;
   if (!q || q->status != QIR_OK) {
     const char *reason = (q && q->status_reason) ? q->status_reason : "invalid query";
-    set_err(err_msg, reason);
+    set_err(&ctx, VERR_UNSUPPORTED_QUERY, reason);
+    qir_handle_destroy(&h);
+    return ERR;
+  }
+  if (q->has_star) {
+    set_err(&ctx, VERR_STAR, "SELECT * is not allowed");
     qir_handle_destroy(&h);
     return ERR;
   }
 
   QirTouchReport *tr = qir_extract_touches(q);
   if (!tr) {
-    set_err(err_msg, "unable to analyze query");
+    set_err(&ctx, VERR_ANALYZE_FAIL, "unable to analyze query");
     qir_handle_destroy(&h);
     return ERR;
   }
   if (tr->has_unsupported) {
-    set_err(err_msg, "unsupported query structure");
+    set_err(&ctx, VERR_UNSUPPORTED_QUERY, "unsupported query structure");
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     return ERR;
   }
 
   // Touch report to decide if Sensitive Mode is needed
-  int sensitive_mode = should_enable_sensitive_mode(q, cp, tr);
-  if (sensitive_mode == ERR) {
-    set_err(err_msg, "unable to analyze query");
+  // TODO: this may take err in input so when we can't resolve an alias we log a clearer error.
+  bool sensitive_mode = false;
+  int rc = validate_sensitive_touches_scope(&ctx, tr, &sensitive_mode);
+  if (rc != YES) {
+    if (rc == ERR && err->code == VERR_NONE) {
+      set_err(&ctx, VERR_ANALYZE_FAIL, "unable to analyze columns referenced inside query");
+    }
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     return ERR;
   }
-  if (sensitive_mode == YES && vault_is_opened() != YES) {
-    set_err(err_msg, "vault is closed");
+  if (sensitive_mode == true && vault_is_opened() != YES) {
+    set_err(&ctx, VERR_VAULT_CLOSED, "vault is closed");
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     return ERR;
@@ -1150,24 +1108,24 @@ int validate_query(DbBackend *db, const ConnProfile *cp,
 
   // Touch report to ensure sensitive touches never appear outside the main
   // query
-  int rc = validate_sensitive_touches_scope(tr, cp, q, err_msg);
-  if (rc != YES) {
-    qir_touch_report_destroy(tr);
-    qir_handle_destroy(&h);
-    return ERR;
-  }
 
   // Pass A/Pass B design. Read the start of validator.c for doc.
-  rc = validate_query_pass_a(db, cp, q, err_msg);
+  rc = validate_query_pass_a(&ctx, q);
   if (rc != YES) {
+    if (rc == ERR && err->code == VERR_NONE) {
+      set_err(&ctx, VERR_ANALYZE_FAIL, "unable to start query analysis");
+    }
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     return ERR;
   }
 
   if (sensitive_mode == YES) {
-    rc = validate_query_pass_b(db, cp, q, err_msg);
+    rc = validate_query_pass_b(&ctx, q);
     if (rc != YES) {
+      if (rc == ERR && err->code == VERR_NONE) {
+        set_err(&ctx, VERR_ANALYZE_FAIL, "unable to analyze sensitive query");
+      }
       qir_touch_report_destroy(tr);
       qir_handle_destroy(&h);
       return ERR;

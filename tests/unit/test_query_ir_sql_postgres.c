@@ -70,7 +70,7 @@ static void assert_touch_has(
 #define ASSERT_TOUCH(tr, scope, kind, qual, col) \
     assert_touch_has((tr), (scope), (kind), (qual), (col), __FILE__, __LINE__)
 
-/* A1. AND + comparisons + params. */
+/* 1. AND + comparisons + params. */
 static void test_pg_params_predicates(void) {
     const char *sql =
         "SELECT p.id AS pid "
@@ -100,7 +100,7 @@ static void test_pg_params_predicates(void) {
     qir_handle_destroy(&h);
 }
 
-/* A2. IN list with params. */
+/* 2. IN list with params. */
 static void test_pg_in_list_params(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -124,7 +124,7 @@ static void test_pg_in_list_params(void) {
     qir_handle_destroy(&h);
 }
 
-/* A3. DISTINCT ON. */
+/* 3. DISTINCT ON. */
 static void test_pg_distinct_on(void) {
     const char *sql =
         "SELECT DISTINCT ON (p.region) p.region AS region, p.name AS name "
@@ -143,7 +143,7 @@ static void test_pg_distinct_on(void) {
     qir_handle_destroy(&h);
 }
 
-/* A4. Casts. */
+/* 4. Casts. */
 static void test_pg_casts(void) {
     const char *sql =
         "SELECT p.age::text AS age_txt "
@@ -161,7 +161,7 @@ static void test_pg_casts(void) {
     qir_handle_destroy(&h);
 }
 
-/* B1. COPY should be rejected. */
+/* 5. COPY should be rejected. */
 static void test_pg_copy_rejected(void) {
     const char *sql =
         "COPY (SELECT p.name FROM private.people AS p) TO PROGRAM 'cat /etc/passwd';";
@@ -173,7 +173,7 @@ static void test_pg_copy_rejected(void) {
     qir_handle_destroy(&h);
 }
 
-/* B2. DO block should be rejected. */
+/* 6. DO block should be rejected. */
 static void test_pg_do_rejected(void) {
     const char *sql = "DO $$ BEGIN PERFORM pg_sleep(1); END $$;";
 
@@ -184,7 +184,7 @@ static void test_pg_do_rejected(void) {
     qir_handle_destroy(&h);
 }
 
-/* B3. SET should be rejected. */
+/* 7. SET should be rejected. */
 static void test_pg_set_rejected(void) {
     const char *sql = "SET statement_timeout = 0;";
 
@@ -195,7 +195,7 @@ static void test_pg_set_rejected(void) {
     qir_handle_destroy(&h);
 }
 
-/* B4. Recursive CTE should be rejected. */
+/* 8. Recursive CTE should be rejected. */
 static void test_pg_recursive_cte_rejected(void) {
     const char *sql =
         "WITH RECURSIVE t(n) AS ("
@@ -212,7 +212,7 @@ static void test_pg_recursive_cte_rejected(void) {
     qir_handle_destroy(&h);
 }
 
-/* C1. Quoted identifiers should be normalized. */
+/* 9. Quoted identifiers should be normalized. */
 static void test_pg_quoted_identifiers(void) {
     const char *sql =
         "SELECT p.\"NaMe\" AS \"outName\" "
@@ -233,7 +233,7 @@ static void test_pg_quoted_identifiers(void) {
     qir_handle_destroy(&h);
 }
 
-/* C2. ANY/ALL array comparisons should map to IN. */
+/* 10. ANY/ALL array comparisons should map to IN. */
 static void test_pg_any_all_as_in(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -255,7 +255,7 @@ static void test_pg_any_all_as_in(void) {
     qir_handle_destroy(&h);
 }
 
-/* C3. Row comparison should be rejected. */
+/* 11. Row comparison should be rejected. */
 static void test_pg_row_comparison_rejected(void) {
     const char *sql =
         "SELECT p.name AS name "
@@ -270,7 +270,7 @@ static void test_pg_row_comparison_rejected(void) {
     qir_handle_destroy(&h);
 }
 
-/* C4. LATERAL should be rejected. */
+/* 12. LATERAL should be rejected. */
 static void test_pg_lateral_rejected(void) {
     const char *sql =
         "SELECT p.id AS pid, x.v AS v "
@@ -285,7 +285,7 @@ static void test_pg_lateral_rejected(void) {
     qir_handle_destroy(&h);
 }
 
-/* C5. Set-returning function in FROM should be rejected. */
+/* 13. Set-returning function in FROM should be rejected. */
 static void test_pg_set_returning_rejected(void) {
     const char *sql =
         "SELECT x.val AS val "
@@ -299,7 +299,7 @@ static void test_pg_set_returning_rejected(void) {
     qir_handle_destroy(&h);
 }
 
-/* C6. JSON operators should preserve base column touch. */
+/* 14. JSON operators should preserve base column touch. */
 static void test_pg_json_operator_touch(void) {
     const char *sql =
         "SELECT p.profile->>'ssn' AS ssn "
@@ -319,7 +319,7 @@ static void test_pg_json_operator_touch(void) {
     qir_handle_destroy(&h);
 }
 
-/* C7. Cast chains. */
+/* 15. Cast chains. */
 static void test_pg_cast_chains(void) {
     const char *sql =
         "SELECT (p.age::text)::varchar AS age_txt "
@@ -334,6 +334,50 @@ static void test_pg_cast_chains(void) {
     ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_CAST);
     ASSERT_TRUE(h.q->select_items[0]->value->u.cast.expr != NULL);
 
+    qir_handle_destroy(&h);
+}
+
+/*------------ CURRENTLY NOT SUPPORTED BUT WE MAY IN THE FUTURE --------------*/
+
+static void test_pg_interval_literal_rejected(void) {
+    const char *sql =
+        "SELECT p.id AS pid "
+        "FROM private.people AS p "
+        "WHERE p.updated_at > NOW() - INTERVAL '1 DAY';";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+    qir_handle_destroy(&h);
+}
+
+static void test_pg_array_literal_rejected(void) {
+    const char *sql =
+        "SELECT p.id AS pid "
+        "FROM private.people AS p "
+        "WHERE p.id = ANY(ARRAY[1,2,3]);";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+    qir_handle_destroy(&h);
+}
+
+static void test_pg_bitwise_op_rejected(void) {
+    const char *sql =
+        "SELECT p.flags AS flags "
+        "FROM private.people AS p "
+        "WHERE (p.flags & 4) = 4;";
+
+    QirQueryHandle h = {0};
+    parse_sql_postgres(sql, &h);
+
+    ASSERT_TRUE(h.q != NULL);
+    ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
     qir_handle_destroy(&h);
 }
 
@@ -353,6 +397,9 @@ int main(void) {
     test_pg_set_returning_rejected();
     test_pg_json_operator_touch();
     test_pg_cast_chains();
+    test_pg_interval_literal_rejected();
+    test_pg_array_literal_rejected();
+    test_pg_bitwise_op_rejected();
     fprintf(stderr, "OK: test_query_ir_sql_postgres\n");
     return 0;
 }

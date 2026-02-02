@@ -200,6 +200,7 @@ static int qir_touch_report_add(
     QirScope scope,
     QirTouchKind kind,
     const QirColRef *col,
+    const QirQuery *source_query,
     PtrVec *touches
 ) {
   if (!tr || !col) return -1;
@@ -210,6 +211,7 @@ static int qir_touch_report_add(
   t->scope = scope;
   t->kind = kind;
   t->col = *col; // shallow copy; identifiers are owned by QueryIR
+  t->source_query = source_query;
   // Keep a temporary pointer vector and flatten it once at the end.
   if (ptrvec_push(touches, t) != OK) return -1;
   tr->ntouches++;
@@ -249,7 +251,8 @@ static void qir_extract_from_expr_rec(
         // Star touches cannot be mapped to a specific column, so treat them as unknown.
         kind = QIR_TOUCH_UNKNOWN;
       }
-      if (qir_touch_report_add(tr, scope, kind, &e->u.colref, touches) != 0) {
+      if (qir_touch_report_add(tr, scope, kind, &e->u.colref, owner_query,
+                               touches) != 0) {
         tr->has_unsupported = true; // allocation failure treated as "cannot safely proceed"
       }
       break;

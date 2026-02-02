@@ -325,6 +325,7 @@ typedef struct QirTouch {
   QirScope scope;         // where the qualifier.column is being used 
   QirTouchKind kind;      // what the qualifier is
   QirColRef col;          // qualifier.column as written
+  const QirQuery *source_query; // query block that owns this touch
 } QirTouch;
 
 // A minimal touch report. Extractor should include touches from:
