@@ -19,7 +19,6 @@ typedef enum ValidatorErrCode {
   VERR_PARAM_OUTSIDE_WHERE,   /* params used outside WHERE */
   VERR_PARAM_NON_SENSITIVE,   /* params compared to non-sensitive column */
   VERR_SENSITIVE_SELECT_EXPR, /* sensitive col not simple colref in SELECT */
-  VERR_SENSITIVE_FUNC,        /* sensitive col used in func/cast */
   VERR_SENSITIVE_LOC,         /* sensitive col in disallowed clause */
   VERR_SENSITIVE_CMP,         /* sensitive col compared with non =/IN or non-param */
   VERR_WHERE_NOT_CONJ,        /* WHERE not AND-only */

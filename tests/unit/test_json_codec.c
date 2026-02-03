@@ -417,16 +417,19 @@ static void test_jsget_null_and_overflow(void) {
 }
 
 static void test_jsget_u32_and_bool(void) {
-    const char *json = "{\"id\":7,\"ok\":true}";
+    const char *json = "{\"id\":7,\"ok\":true,\"err\":false}";
     JsonGetter jg;
     uint32_t id = 0;
     int ok = 0;
+    int err = 10;
 
     ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
     ASSERT_TRUE(jsget_u32(&jg, "id", &id) == YES);
     ASSERT_TRUE(id == 7);
     ASSERT_TRUE(jsget_bool01(&jg, "ok", &ok) == YES);
     ASSERT_TRUE(ok == 1);
+    ASSERT_TRUE(jsget_bool01(&jg, "err", &err) == YES);
+    ASSERT_TRUE(err == 0);
 }
 
 static void test_jsget_f64(void) {

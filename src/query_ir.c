@@ -471,3 +471,122 @@ QirTouchReport *qir_extract_touches(const QirQuery *q) {
 
   return tr;
 }
+
+/* Renders a FROM item into 'out' and returns out->data (or "" on error).
+ * Ownership: caller owns 'out' and controls its lifetime.
+ * Side effects: resets and writes into 'out'. */
+const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out) {
+  if (!out) return "";
+  sb_reset(out);
+
+  if (!fi) {
+    (void)sb_append_bytes(out, "<null>", 6);
+    return out->data ? out->data : "";
+  }
+
+  switch (fi->kind) {
+    case QIR_FROM_BASE_REL: {
+      const char *schema = fi->u.rel.schema.name;
+      const char *table = fi->u.rel.name.name;
+      if (schema && schema[0] != '\0') {
+        (void)sb_append_bytes(out, schema, strlen(schema));
+        (void)sb_append_bytes(out, ".", 1);
+      }
+      if (table && table[0] != '\0') {
+        (void)sb_append_bytes(out, table, strlen(table));
+      } else {
+        (void)sb_append_bytes(out, "<unknown>", 9);
+      }
+      break;
+    }
+    case QIR_FROM_SUBQUERY:
+      (void)sb_append_bytes(out, "subquery", 8);
+      break;
+    case QIR_FROM_CTE_REF: {
+      (void)sb_append_bytes(out, "cte(", 4);
+      if (fi->u.cte_name.name && fi->u.cte_name.name[0] != '\0') {
+        (void)sb_append_bytes(out, fi->u.cte_name.name, strlen(fi->u.cte_name.name));
+      } else {
+        (void)sb_append_bytes(out, "<unknown>", 9);
+      }
+      (void)sb_append_bytes(out, ")", 1);
+      break;
+    }
+    case QIR_FROM_VALUES:
+      (void)sb_append_bytes(out, "values", 6);
+      break;
+    case QIR_FROM_UNSUPPORTED:
+    default:
+      (void)sb_append_bytes(out, "unsupported", 11);
+      break;
+  }
+
+  if (fi->alias.name && fi->alias.name[0] != '\0') {
+    (void)sb_append_bytes(out, " AS ", 4);
+    (void)sb_append_bytes(out, fi->alias.name, strlen(fi->alias.name));
+  }
+
+  /* Ensure the buffer is NUL-terminated for %s usage. */
+  if (sb_append_bytes(out, "\0", 1) == OK) return out->data;
+  return "";
+}
+
+/* Renders a column reference into 'out' and returns out->data (or "" on error).
+ * Ownership: caller owns 'out' and controls its lifetime.
+ * Side effects: resets and writes into 'out'. */
+const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out) {
+  if (!out) return "";
+  sb_reset(out);
+
+  if (!cr) {
+    (void)sb_append_bytes(out, "<null>", 6);
+    return out->data ? out->data : "";
+  }
+
+  if (cr->qualifier.name && cr->qualifier.name[0] != '\0') {
+    (void)sb_append_bytes(out, cr->qualifier.name, strlen(cr->qualifier.name));
+    (void)sb_append_bytes(out, ".", 1);
+  } else {
+    (void)sb_append_bytes(out, "<unknown>", 9);
+    (void)sb_append_bytes(out, ".", 1);
+  }
+
+  if (cr->column.name && cr->column.name[0] != '\0') {
+    (void)sb_append_bytes(out, cr->column.name, strlen(cr->column.name));
+  } else {
+    (void)sb_append_bytes(out, "<unknown>", 9);
+  }
+
+  /* Ensure the buffer is NUL-terminated for %s usage. */
+  if (sb_append_bytes(out, "\0", 1) == OK) return out->data;
+  return "";
+}
+
+/* Renders a function call into 'out' and returns out->data (or "" on error).
+ * Ownership: caller owns 'out' and controls its lifetime.
+ * Side effects: resets and writes into 'out'. */
+const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out) {
+  if (!out) return "";
+  sb_reset(out);
+
+  if (!fn) {
+    (void)sb_append_bytes(out, "<null>", 6);
+    return out->data ? out->data : "";
+  }
+
+  if (fn->schema.name && fn->schema.name[0] != '\0') {
+    (void)sb_append_bytes(out, fn->schema.name, strlen(fn->schema.name));
+    (void)sb_append_bytes(out, ".", 1);
+  }
+
+  if (fn->name.name && fn->name.name[0] != '\0') {
+    (void)sb_append_bytes(out, fn->name.name, strlen(fn->name.name));
+  } else {
+    (void)sb_append_bytes(out, "<unknown>", 9);
+  }
+
+  (void)sb_append_bytes(out, "()", 2);
+  /* Ensure the buffer is NUL-terminated for %s usage. */
+  if (sb_append_bytes(out, "\0", 1) == OK) return out->data;
+  return "";
+}

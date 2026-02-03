@@ -57,9 +57,6 @@ void sb_zero_clean(StrBuf *sb) {
     sb_clean(sb);
 }
 
-// TODO: think about the max size of the output of a QueryResult. Right now it 
-// may have 1k columns all of 10k char.
-
 /* Makes sure 'sb' has enough space for 'add' more bytes. Returns OK on success,
  * ERR on bad input or overflow. */
 int sb_reserve(StrBuf *sb, size_t add) {

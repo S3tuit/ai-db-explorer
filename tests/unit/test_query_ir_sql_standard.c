@@ -222,7 +222,7 @@ static void test_sql_standard_or(void) {
     const char *sql =
         "SELECT p.name AS name "
         "FROM private.people AS p "
-        "WHERE p.region = 'a' OR p.region = 'b';";
+        "WHERE p.region = 'a' OR p.status = false;";
 
     QirQueryHandle h = {0};
     parse_sql_postgres(sql, &h);
@@ -231,6 +231,7 @@ static void test_sql_standard_or(void) {
     ASSERT_TRUE(h.q->status == QIR_OK);
     ASSERT_TRUE(h.q->where != NULL);
     ASSERT_TRUE(h.q->where->kind == QIR_EXPR_OR);
+    ASSERT_TRUE(h.q->where->u.bin.l->u.bin.r->u.lit.kind = QIR_LIT_BOOL);
 
     const QirExpr *lhs = h.q->where->u.bin.l;
     const QirExpr *rhs = h.q->where->u.bin.r;

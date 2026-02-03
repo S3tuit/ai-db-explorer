@@ -28,6 +28,8 @@ APP_SRC  := $(filter-out $(APP_MAIN),$(wildcard src/*.c))
 APP_OBJ := $(APP_SRC:src/%.c=build/%.o) build/main.o
 BIN := build/ai-db-explorer
 ASAN_BIN := build/ai-db-explorer-asan
+PG_DUMP_AST_BIN := build/pg_dump_ast
+PG_DUMP_AST_SRC := py_utils/pg_dump_ast.c
 
 # Unit tests: each tests/unit/test_foo.c -> build/tests/unit/test_foo
 UNIT_TEST_SRC := $(wildcard tests/unit/test_*.c)
@@ -37,7 +39,7 @@ UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
 INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(INTEGRATION_TEST_SRC))
 
-.PHONY: all clean run test test-unit test-integration test-postgres test-build asan clean-testobj
+.PHONY: all clean run test test-unit test-integration test-postgres test-build asan clean-testobj pg-dump-ast
 
 all: $(BIN)
 
@@ -57,6 +59,13 @@ $(BIN): $(APP_OBJ) $(LIBPG_QUERY_LIB)
 
 run: $(BIN)
 	./$(BIN) $(RUN_ARGS)
+
+# Build AST dumper used by py_utils/pg_dump_ast.py
+$(PG_DUMP_AST_BIN): $(PG_DUMP_AST_SRC) $(LIBPG_QUERY_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LIBPG_QUERY_INC) $< -o $@ $(LIBPG_QUERY_LIB)
+
+pg-dump-ast: $(PG_DUMP_AST_BIN)
 
 # ASAN-instrumented app binary for debugging, used inside integration tests.
 ASAN_CFLAGS = $(TCFLAGS) $(TSAN)

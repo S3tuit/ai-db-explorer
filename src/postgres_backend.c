@@ -256,6 +256,11 @@ static QirExpr *pg_parse_literal(const JsonGetter *jg, PlArena *a, QirQuery *q) 
                 e->u.lit.v.b = (b01 != 0);
                 return e;
             }
+            // maybe it's a bug but sometimes 'false' gets encoded as a "boolval"
+            // empty object
+            e->u.lit.kind = QIR_LIT_BOOL;
+            e->u.lit.v.b = false;
+            return e;
         }
 
         JsonGetter ijg2 = {0};

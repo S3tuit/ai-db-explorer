@@ -891,8 +891,9 @@ int connp_is_func_safe(const ConnProfile *cp, const char *schema,
 
   const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
   if (!schema_norm) {
-    // Unqualified SQL matches any schema-scoped rule (we do not resolve search_path).
-    return (r->n_schemas > 0) ? YES : NO;
+    // Unqualified functions only match global rules; schema-scoped rules are
+    // not considered.
+    return NO;
   }
 
   // Schemas are few, so a linear scan is simpler and fast.

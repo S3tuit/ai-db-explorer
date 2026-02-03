@@ -539,7 +539,7 @@ static void test_connp_is_sensitive(void) {
 
   ASSERT_TRUE(connp_is_func_safe(cp, "", "md1") == YES);
   ASSERT_TRUE(connp_is_func_safe(cp, "public", "md1") == YES);
-  ASSERT_TRUE(connp_is_func_safe(cp, "", "md2") == YES);
+  ASSERT_TRUE(connp_is_func_safe(cp, "", "md2") == NO);
   ASSERT_TRUE(connp_is_func_safe(cp, "private", "md2") == YES);
   ASSERT_TRUE(connp_is_func_safe(cp, "public", "md2") == NO);
   ASSERT_TRUE(connp_is_func_safe(cp, "", "unknown") == NO);

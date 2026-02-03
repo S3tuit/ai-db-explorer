@@ -30,9 +30,6 @@ static ssize_t stdio_read_some(ByteChannel *ch, void *buf, size_t cap) {
     for (;;) {
         ssize_t n = read(impl->in_fd, buf, cap);
         if (n >= 0) {
-            if (n == 0) {
-                TLOG("INFO - read EOF on fd=%d", impl->in_fd);
-            }
             return n;
         }
         // PTY slave returns EIO on hangup; treat it as EOF to match file/pipe

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "pl_arena.h"
+#include "string_op.h"
 
 // DB-agnostic IR for a restricted SQL subset.
 // Built by backend-specific parsers (e.g., Postgres via libpg_query AST).
@@ -373,6 +374,21 @@ void qir_touch_report_destroy(QirTouchReport *tr);
  * - The extractor is conservative: if it sees unsupported expressions or cannot
  *   resolve a qualifier, it marks UNKNOWN touches and has_unsupported. */
 QirTouchReport *qir_extract_touches(const QirQuery *q);
+
+/* Renders a FROM item into 'out' and returns out->data (or "" on error).
+ * Ownership: caller owns 'out' and controls its lifetime.
+ * Side effects: resets and writes into 'out'. */
+const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out);
+
+/* Renders a column reference into 'out' and returns out->data (or "" on error).
+ * Ownership: caller owns 'out' and controls its lifetime.
+ * Side effects: resets and writes into 'out'. */
+const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out);
+
+/* Renders a function call into 'out' and returns out->data (or "" on error).
+ * Ownership: caller owns 'out' and controls its lifetime.
+ * Side effects: resets and writes into 'out'. */
+const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out);
 
 /* Sets query status and (optional) reason once; first status wins.
  * Ownership: copies reason into arena when provided.
