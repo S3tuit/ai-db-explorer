@@ -793,6 +793,26 @@ error:
   return ERR;
 }
 
+/* Validates that the top-level "version" key exists and matches the current
+ * catalog schema version. Returns:
+ * - YES: version exists and is supported.
+ * - NO: version missing or unsupported.
+ * - ERR: malformed version value or internal error.
+ */
+static int parse_version(const JsonGetter *jg) {
+  if (!jg)
+    return ERR;
+
+  char *ver = NULL;
+  int rc = jsget_string_decode_alloc(jg, "version", &ver);
+  if (rc != YES)
+    return NO;
+
+  int ok = (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) ? YES : NO;
+  free(ver);
+  return ok;
+}
+
 ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
   char *err_msg = NULL;
   StrBuf sb = {0};
@@ -818,6 +838,16 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
   if (jsget_top_level_validation(&jg, NULL, root_keys, ARRLEN(root_keys)) !=
       YES) {
     err_msg = "ConnCatalog: unknown key at top level.";
+    goto error;
+  }
+
+  int vrc = parse_version(&jg);
+  if (vrc == NO) {
+    err_msg = "ConnCatalog: unsupported or missing \"version\".";
+    goto error;
+  }
+  if (vrc != YES) {
+    err_msg = "ConnCatalog: invalid \"version\".";
     goto error;
   }
 

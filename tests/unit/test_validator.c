@@ -28,6 +28,7 @@ static char *write_tmp_config(const char *json) {
  * Ownership: caller owns the catalog and must destroy it. */
 static ConnCatalog *load_test_catalog(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","

@@ -1,4 +1,6 @@
 {
+  "version": "1.0",
+
   "safetyPolicy": {
     "readOnly": "yes",
     "statementTimeoutMs": 5000,

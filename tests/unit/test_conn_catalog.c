@@ -25,6 +25,7 @@ static char *write_tmp_config(const char *json) {
 /* Ensures missing safetyPolicy falls back to default values. */
 static void test_missing_policy_defaults(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": []"
                      "}";
 
@@ -49,6 +50,7 @@ static void test_missing_policy_defaults(void) {
 /* Ensures missing policy fields fall back to defaults. */
 static void test_policy_missing_fields_defaults(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"No UnSafe\""
                      "  },"
@@ -75,6 +77,7 @@ static void test_policy_missing_fields_defaults(void) {
 /* Ensures maxQueryKiloBytes maps into max_query_bytes. */
 static void test_policy_kilobytes(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"statementTimeoutMs\": 5000,"
@@ -101,6 +104,7 @@ static void test_policy_kilobytes(void) {
 /* Ensures unknown safetyPolicy keys cause an error. */
 static void test_policy_unknown_key_fails(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"unknown\": 1"
@@ -121,6 +125,7 @@ static void test_policy_unknown_key_fails(void) {
 /* Ensures overflowed numeric fields fail validation. */
 static void test_policy_overflow_fails(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"maxQueryKiloBytes\": 4294967295"
@@ -141,6 +146,7 @@ static void test_policy_overflow_fails(void) {
 /* Validates that an empty databases array is accepted. */
 static void test_empty_databases_ok(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"statementTimeoutMs\": 5000,"
@@ -163,6 +169,7 @@ static void test_empty_databases_ok(void) {
 /* Ensures unknown keys inside a database entry reject the catalog. */
 static void test_db_entry_unknown_key_fails(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"statementTimeoutMs\": 5000,"
@@ -194,6 +201,7 @@ static void test_db_entry_unknown_key_fails(void) {
 /* Ensures a valid config maps fields to the right ConnProfile values. */
 static void test_valid_config_maps_fields(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"no\","
                      "    \"statementTimeoutMs\": 1234,"
@@ -242,6 +250,7 @@ static void test_valid_config_maps_fields(void) {
 /* Ensures catalog lowercases identifiers and accepts mixed case. */
 static void test_policies_lowercase(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","
@@ -293,6 +302,7 @@ static void test_policies_lowercase(void) {
 static void test_policies_dedup(void) {
   const char *json =
       "{"
+      "  \"version\": \"1.0\","
       "  \"databases\": ["
       "    {"
       "      \"type\": \"postgres\","
@@ -342,6 +352,7 @@ static void test_policies_dedup(void) {
 /* Ensures global rules win and schema list is preserved. */
 static void test_policies_global_and_schema(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","
@@ -387,6 +398,7 @@ static void test_policies_global_and_schema(void) {
 /* Ensures malformed columnPolicy entries fail catalog load. */
 static void test_column_policy_malformed_fails(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","
@@ -419,6 +431,7 @@ static void test_column_policy_malformed_fails(void) {
 /* Ensures malformed safeFunctions entries fail catalog load. */
 static void test_safe_functions_malformed_fails(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","
@@ -452,6 +465,7 @@ static void test_safe_functions_malformed_fails(void) {
 /* Ensures randomized rules are rejected in v1. */
 static void test_column_policy_randomized_fails(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","
@@ -485,6 +499,7 @@ static void test_column_policy_randomized_fails(void) {
  */
 static void test_connp_is_sensitive(void) {
   const char *json = "{"
+                     "  \"version\": \"1.0\","
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","
