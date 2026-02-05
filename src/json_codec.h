@@ -51,22 +51,25 @@ int json_rpc_begin(StrBuf *sb);
 #define JSON_GETTER_MAX_TOKENS 1024
 
 typedef struct JsonArrIter {
-    int arr_tok;   // token index of the array
-    int idx;       // current element index [0..count)
-    int count;     // number of elements in the array
-    int next_tok;  // next token index to consume (internal cursor)
+  int arr_tok;  // token index of the array
+  int idx;      // current element index [0..count)
+  int count;    // number of elements in the array
+  int next_tok; // next token index to consume (internal cursor)
 } JsonArrIter;
 
 typedef struct JsonGetter {
-    const char *json;
-    size_t json_len;
-    const jsmntok_t *toks;
-    int ntok;
-    int root; // token index of the root object for this view
-    jsmntok_t tok_storage[JSON_GETTER_MAX_TOKENS];
+  const char *json;
+  size_t json_len;
+  const jsmntok_t *toks;
+  int ntok;
+  int root; // token index of the root object for this view
+  jsmntok_t tok_storage[JSON_GETTER_MAX_TOKENS];
 } JsonGetter;
 
-typedef struct { const char *ptr; size_t len; } JsonStrSpan;
+typedef struct {
+  const char *ptr;
+  size_t len;
+} JsonStrSpan;
 
 /*
  * Initializes JsonGetter by tokenizing the entire JSON text.
@@ -131,7 +134,8 @@ int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out);
  * Gets a key path as a decoded (unescaped) NUL-terminated string.
  * Caller owns the returned string and must free it. Return yes/no/err.
  */
-int jsget_string_decode_alloc(const JsonGetter *jg, const char *key, char **out_nul);
+int jsget_string_decode_alloc(const JsonGetter *jg, const char *key,
+                              char **out_nul);
 
 /* Decodes a JSON string span into a newly allocated NUL-terminated string.
  * Ownership: caller owns *out_nul and must free it.
@@ -153,7 +157,8 @@ int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out);
  * Initializes an iterator over an array of JSON strings at key path `key`.
  * Returns yes/no/err.
  */
-int jsget_array_strings_begin(const JsonGetter *jg, const char *key, JsonArrIter *it);
+int jsget_array_strings_begin(const JsonGetter *jg, const char *key,
+                              JsonArrIter *it);
 
 /*
  * Gets next element of the array iterator as a raw JSON string content span.
@@ -163,13 +168,15 @@ int jsget_array_strings_begin(const JsonGetter *jg, const char *key, JsonArrIter
  *  NO  -> no more elements.
  *  ERR -> element type error / token stream error.
  */
-int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it, JsonStrSpan *out_elem);
+int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
+                             JsonStrSpan *out_elem);
 
 /*
  * Initializes an iterator over an array of JSON objects at key path `key`.
  * Returns yes/no/err.
  */
-int jsget_array_objects_begin(const JsonGetter *jg, const char *key, JsonArrIter *it);
+int jsget_array_objects_begin(const JsonGetter *jg, const char *key,
+                              JsonArrIter *it);
 
 /*
  * Gets next element of the object array iterator as a JsonGetter view.
@@ -182,12 +189,13 @@ int jsget_array_objects_begin(const JsonGetter *jg, const char *key, JsonArrIter
  *  NO  -> no more elements.
  *  ERR -> element type error / token stream error.
  */
-int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it, JsonGetter *out_obj);
+int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
+                             JsonGetter *out_obj);
 
 /* Makes sure the json object identified by 'obj_key' only contains the
  * 'allowed' top-level keys. If obj_key is NULL, the root object is used.
  * Returns YES/NO/ERR. */
 int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
-                                const char *const *allowed, size_t n_allowed);
+                               const char *const *allowed, size_t n_allowed);
 
 #endif

@@ -1,10 +1,10 @@
 #include <stdalign.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <stddef.h>
 
-#include "test.h"
 #include "pl_arena.h"
+#include "test.h"
 
 /* These tests validate the arena's public contract:
  * - data is stored and retrieved intact

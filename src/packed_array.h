@@ -1,9 +1,8 @@
 #ifndef PACKED_ARRAY_H
 #define PACKED_ARRAY_H
 
-#include <stddef.h>
 #include <stdbool.h>
-
+#include <stddef.h>
 
 /* A swap-remove packed array. This module is responsible for the ownership of
  * the objects it contains.
@@ -49,7 +48,8 @@ void parr_destroy(PackedArray *a);
  * Note: changing the cleanup function does not retroactively affect already
  * cleaned up objects; it only affects future destroy/drop operations.
  */
-void parr_set_cleanup(PackedArray *a, parr_cleanup_fn cleanup, void *cleanup_ctx);
+void parr_set_cleanup(PackedArray *a, parr_cleanup_fn cleanup,
+                      void *cleanup_ctx);
 
 /* Number of live objects. */
 size_t parr_len(const PackedArray *a);

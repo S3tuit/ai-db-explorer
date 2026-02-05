@@ -11,14 +11,14 @@ typedef struct SecretStore SecretStore;
 typedef struct SecretStoreVTable SecretStoreVTable;
 
 struct SecretStoreVTable {
-    // Writes a NUL-terminated secret into 'out' and returns OK/ERR.
-    int (*get)(SecretStore *store, const char *secret_ref, StrBuf *out);
-    // Destroys the store and releases resources.
-    void (*destroy)(SecretStore *store);
+  // Writes a NUL-terminated secret into 'out' and returns OK/ERR.
+  int (*get)(SecretStore *store, const char *secret_ref, StrBuf *out);
+  // Destroys the store and releases resources.
+  void (*destroy)(SecretStore *store);
 };
 
 struct SecretStore {
-    const SecretStoreVTable *vt;
+  const SecretStoreVTable *vt;
 };
 
 // Create a SecretStore instance.
@@ -44,13 +44,15 @@ int secret_store_get(SecretStore *store, const char *secret_ref, StrBuf *out);
 /* Small helpers */
 static inline int ss_get(SecretStore *store, const char *secret_ref,
                          StrBuf *out) {
-    if (!store || !store->vt || !store->vt->get) return ERR;
-    return store->vt->get(store, secret_ref, out);
+  if (!store || !store->vt || !store->vt->get)
+    return ERR;
+  return store->vt->get(store, secret_ref, out);
 }
 
 static inline void ss_destroy(SecretStore *store) {
-    if (!store || !store->vt || !store->vt->destroy) return;
-    store->vt->destroy(store);
+  if (!store || !store->vt || !store->vt->destroy)
+    return;
+  store->vt->destroy(store);
 }
 
 #endif

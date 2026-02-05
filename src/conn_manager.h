@@ -1,13 +1,12 @@
 #ifndef CONN_MAN_H
 #define CONN_MAN_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "conn_catalog.h"
-#include "secret_store.h"
 #include "db_backend.h"
-
+#include "secret_store.h"
 
 typedef struct ConnManager ConnManager;
 
@@ -27,7 +26,8 @@ ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets);
  * Ownership:
  * - `cat` is owned by ConnManager after creation.
  * - `secrets` is owned by ConnManager after creation.
- * - `factory` is borrowed and must remain valid for the lifetime of ConnManager.
+ * - `factory` is borrowed and must remain valid for the lifetime of
+ * ConnManager.
  *
  * Error semantics: returns NULL on invalid input or allocation failure.
  */

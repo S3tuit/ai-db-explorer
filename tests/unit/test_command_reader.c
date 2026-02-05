@@ -1,10 +1,10 @@
-#include <string.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include "test.h"
 #include "command_reader.h"
 #include "stdio_byte_channel.h"
+#include "test.h"
 
 /* -------------------------------- helpers -------------------------------- */
 
@@ -72,8 +72,8 @@ static void read_two_sql_impl(const char *input, const char *e1, const char *e2,
 
 /* Tests if the reader consumes 'input' and gives back meta command fields. */
 static void read_one_meta_impl(const char *input, const char *expected_cmd,
-                               const char *expected_args,
-                               const char *file, int line) {
+                               const char *expected_args, const char *file,
+                               int line) {
   FILE *f = memfile_impl(input, file, line);
 
   ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(f), -1);
@@ -114,9 +114,11 @@ static void expect_error_impl(const char *input, const char *file, int line) {
 }
 
 // help log the line of the callee
-#define read_one_sql(input, expected) read_one_sql_impl((input), (expected), __FILE__, __LINE__)
-#define read_two_sql(input, e1, e2) read_two_sql_impl((input), (e1), (e2), __FILE__, __LINE__)
-#define read_one_meta(input, cmd, args) \
+#define read_one_sql(input, expected)                                          \
+  read_one_sql_impl((input), (expected), __FILE__, __LINE__)
+#define read_two_sql(input, e1, e2)                                            \
+  read_two_sql_impl((input), (e1), (e2), __FILE__, __LINE__)
+#define read_one_meta(input, cmd, args)                                        \
   read_one_meta_impl((input), (cmd), (args), __FILE__, __LINE__)
 #define expect_error(input) expect_error_impl((input), __FILE__, __LINE__)
 

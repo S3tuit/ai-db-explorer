@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 
-
 /* It stores data in a chain of non-moving blocks. Each object (of n bytes)
  * is prefixed with n in the in-memory layout. The last byte is always 0.
  * Offsets are aligned with 0 padding and refer to the logical concatenation
@@ -16,11 +15,11 @@
  * +---+--------------+---+-----------+
  */
 typedef struct {
-    struct PlArenaBlock *head;   // first block
-    struct PlArenaBlock *tail;   // last block (append target)
-    uint32_t used;        // total bytes used across blocks
-    uint32_t cap;         // hard bytes-cap for total used
-    uint32_t block_sz;    // size of the next block to allocate
+  struct PlArenaBlock *head; // first block
+  struct PlArenaBlock *tail; // last block (append target)
+  uint32_t used;             // total bytes used across blocks
+  uint32_t cap;              // hard bytes-cap for total used
+  uint32_t block_sz;         // size of the next block to allocate
 } PlArena;
 
 /* A small pointer vector used to collect elements before flattening them
@@ -30,9 +29,9 @@ typedef struct {
  * Side effects: ptrvec_push may allocate or reallocate the heap buffer.
  * Error semantics: functions return OK/ERR, or NULL on allocation failure. */
 typedef struct {
-    void **items;
-    uint32_t len;
-    uint32_t cap;
+  void **items;
+  uint32_t len;
+  uint32_t cap;
 } PtrVec;
 
 /* Allocates and returns a PlArena. The first block is 1 KiB when size_p

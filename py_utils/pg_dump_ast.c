@@ -13,11 +13,13 @@ static char *read_all_stdin(size_t *out_len) {
   size_t cap = 4096;
   size_t len = 0;
   char *buf = (char *)malloc(cap + 1);
-  if (!buf) return NULL;
+  if (!buf)
+    return NULL;
 
   while (!feof(stdin)) {
     size_t n = fread(buf + len, 1, cap - len, stdin);
-    if (n == 0) break;
+    if (n == 0)
+      break;
     len += n;
     if (len == cap) {
       size_t new_cap = cap * 2;
@@ -32,7 +34,8 @@ static char *read_all_stdin(size_t *out_len) {
   }
 
   buf[len] = '\0';
-  if (out_len) *out_len = len;
+  if (out_len)
+    *out_len = len;
   return buf;
 }
 
@@ -53,7 +56,8 @@ int main(void) {
 
   PgQueryParseResult result = pg_query_parse(sql);
   if (result.error) {
-    fprintf(stderr, "error: %s at %d\n", result.error->message, result.error->cursorpos);
+    fprintf(stderr, "error: %s at %d\n", result.error->message,
+            result.error->cursorpos);
     pg_query_free_parse_result(result);
     free(sql);
     return 1;

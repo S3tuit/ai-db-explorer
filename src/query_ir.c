@@ -14,11 +14,13 @@
  * Side effects: allocates arena blocks.
  * Returns OK on success, ERR on bad input or allocation failure. */
 int qir_handle_init(QirQueryHandle *h) {
-  if (!h) return ERR;
+  if (!h)
+    return ERR;
 
   uint32_t size = 8192u;
   uint32_t cap = 1048000u; // ~1MB
-  if (pl_arena_init(&h->arena, &size, &cap) != OK) return ERR;
+  if (pl_arena_init(&h->arena, &size, &cap) != OK)
+    return ERR;
 
   QirQuery *q = (QirQuery *)pl_arena_alloc(&h->arena, (uint32_t)sizeof(*q));
   if (!q) {
@@ -39,7 +41,8 @@ int qir_handle_init(QirQueryHandle *h) {
  * Side effects: frees memory.
  * Returns void. */
 void qir_handle_destroy(QirQueryHandle *h) {
-  if (!h) return;
+  if (!h)
+    return;
   pl_arena_clean(&h->arena);
   h->q = NULL;
 }
@@ -53,7 +56,8 @@ void qir_handle_destroy(QirQueryHandle *h) {
  * Side effects: frees memory.
  * Returns void. */
 void qir_touch_report_destroy(QirTouchReport *tr) {
-  if (!tr) return;
+  if (!tr)
+    return;
   pl_arena_clean(&tr->arena);
   free(tr);
 }
@@ -62,14 +66,18 @@ void qir_touch_report_destroy(QirTouchReport *tr) {
  * Ownership: copies reason into arena when provided.
  * Side effects: mutates q->status and q->status_reason.
  * Error semantics: no return value; on invalid input it is a no-op. */
-void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status, const char *reason) {
-  if (!q) return;
-  if (q->status == QIR_OK) q->status = status;
-  if (q->status != status) return;
+void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status,
+                    const char *reason) {
+  if (!q)
+    return;
+  if (q->status == QIR_OK)
+    q->status = status;
+  if (q->status != status)
+    return;
   if (!q->status_reason && reason) {
     if (arena) {
-      q->status_reason = (const char *)pl_arena_add(
-          arena, (void *)reason, (uint32_t)strlen(reason));
+      q->status_reason = (const char *)pl_arena_add(arena, (void *)reason,
+                                                    (uint32_t)strlen(reason));
     } else {
       q->status_reason = reason;
     }
@@ -82,8 +90,10 @@ void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status, const char *r
 
 /* Compares two identifiers for exact equality. */
 static bool qir_ident_eq(const QirIdent *a, const QirIdent *b) {
-  if (!a || !b) return false;
-  if (!a->name || !b->name) return false;
+  if (!a || !b)
+    return false;
+  if (!a->name || !b->name)
+    return false;
   return strcmp(a->name, b->name) == 0;
 }
 
@@ -92,18 +102,22 @@ static bool qir_ident_eq(const QirIdent *a, const QirIdent *b) {
  * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
  * Returns the resolved expression or the original expression if no match. */
 QirExpr *qir_resolve_order_alias(QirQuery *q, PlArena *arena, QirExpr *expr) {
-  if (!q || !expr || expr->kind != QIR_EXPR_COLREF) return expr;
-  if (!expr->u.colref.qualifier.name || expr->u.colref.qualifier.name[0] != '\0') {
+  if (!q || !expr || expr->kind != QIR_EXPR_COLREF)
+    return expr;
+  if (!expr->u.colref.qualifier.name ||
+      expr->u.colref.qualifier.name[0] != '\0') {
     return expr;
   }
 
   const char *name = expr->u.colref.column.name;
-  if (!name || name[0] == '\0') return expr;
+  if (!name || name[0] == '\0')
+    return expr;
 
   QirExpr *resolved = NULL;
   for (uint32_t i = 0; i < q->nselect; i++) {
     QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
-    if (!si || !si->out_alias.name) continue;
+    if (!si || !si->out_alias.name)
+      continue;
     if (strcmp(si->out_alias.name, name) == 0) {
       if (resolved) {
         qir_set_status(q, arena, QIR_UNSUPPORTED, "ambiguous ORDER BY alias");
@@ -117,11 +131,13 @@ QirExpr *qir_resolve_order_alias(QirQuery *q, PlArena *arena, QirExpr *expr) {
 
 /* Checks if a name matches any CTE in scope. */
 static bool qir_is_cte_name(const QirQuery *cte_scope, const QirIdent *name) {
-  if (!cte_scope) return false;
+  if (!cte_scope)
+    return false;
   for (uint32_t i = 0; i < cte_scope->nctes; i++) {
     const QirCte *cte = cte_scope->ctes ? cte_scope->ctes[i] : NULL;
     // qir_ident_eq handles NULL inputs
-    if (qir_ident_eq(&cte->name, name)) return true;
+    if (qir_ident_eq(&cte->name, name))
+      return true;
   }
   return false;
 }
@@ -131,11 +147,9 @@ static bool qir_is_cte_name(const QirQuery *cte_scope, const QirIdent *name) {
  * - a BASE relation (table/view) alias, or
  * - a DERIVED relation alias (subquery or CTE reference), or
  * - UNKNOWN (cannot be resolved safely). */
-static QirTouchKind qir_resolve_qualifier_kind(
-    const QirQuery *q,
-    const QirQuery *cte_scope,
-    const QirIdent *qualifier
-) {
+static QirTouchKind qir_resolve_qualifier_kind(const QirQuery *q,
+                                               const QirQuery *cte_scope,
+                                               const QirIdent *qualifier) {
   if (!q || !qualifier || !qualifier->name || qualifier->name[0] == '\0') {
     return QIR_TOUCH_UNKNOWN;
   }
@@ -143,23 +157,26 @@ static QirTouchKind qir_resolve_qualifier_kind(
   // Search FROM base list
   for (uint32_t i = 0; i < q->nfrom; i++) {
     const QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
-    if (!fi) continue;
-    bool alias_match = fi->alias.name && fi->alias.name[0] != '\0'
-                       && qir_ident_eq(&fi->alias, qualifier);
-    bool rel_match = fi->kind == QIR_FROM_BASE_REL
-                     && fi->u.rel.name.name && fi->u.rel.name.name[0] != '\0'
-                     && qir_ident_eq(&fi->u.rel.name, qualifier);
+    if (!fi)
+      continue;
+    bool alias_match = fi->alias.name && fi->alias.name[0] != '\0' &&
+                       qir_ident_eq(&fi->alias, qualifier);
+    bool rel_match = fi->kind == QIR_FROM_BASE_REL && fi->u.rel.name.name &&
+                     fi->u.rel.name.name[0] != '\0' &&
+                     qir_ident_eq(&fi->u.rel.name, qualifier);
 
     bool rel_is_cte = (fi->kind == QIR_FROM_BASE_REL) &&
                       qir_is_cte_name(cte_scope, &fi->u.rel.name);
 
     if (alias_match || rel_match) {
       if (fi->kind == QIR_FROM_BASE_REL) {
-        if (rel_is_cte) return QIR_TOUCH_DERIVED;
+        if (rel_is_cte)
+          return QIR_TOUCH_DERIVED;
         return QIR_TOUCH_BASE;
       }
       if (fi->kind == QIR_FROM_SUBQUERY || fi->kind == QIR_FROM_CTE_REF ||
-          fi->kind == QIR_FROM_VALUES) return QIR_TOUCH_DERIVED;
+          fi->kind == QIR_FROM_VALUES)
+        return QIR_TOUCH_DERIVED;
       return QIR_TOUCH_UNKNOWN;
     }
   }
@@ -167,25 +184,28 @@ static QirTouchKind qir_resolve_qualifier_kind(
   // Search join RHS aliases too
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirJoin *j = q->joins ? q->joins[i] : NULL;
-    if (!j || !j->rhs) continue;
+    if (!j || !j->rhs)
+      continue;
     const QirFromItem *fi = j->rhs;
 
-    bool alias_match = fi->alias.name && fi->alias.name[0] != '\0'
-                       && qir_ident_eq(&fi->alias, qualifier);
-    bool rel_match = fi->kind == QIR_FROM_BASE_REL
-                     && fi->u.rel.name.name && fi->u.rel.name.name[0] != '\0'
-                     && qir_ident_eq(&fi->u.rel.name, qualifier);
+    bool alias_match = fi->alias.name && fi->alias.name[0] != '\0' &&
+                       qir_ident_eq(&fi->alias, qualifier);
+    bool rel_match = fi->kind == QIR_FROM_BASE_REL && fi->u.rel.name.name &&
+                     fi->u.rel.name.name[0] != '\0' &&
+                     qir_ident_eq(&fi->u.rel.name, qualifier);
 
     bool rel_is_cte = (fi->kind == QIR_FROM_BASE_REL) &&
                       qir_is_cte_name(cte_scope, &fi->u.rel.name);
 
     if (alias_match || rel_match) {
       if (fi->kind == QIR_FROM_BASE_REL) {
-        if (rel_is_cte) return QIR_TOUCH_DERIVED;
+        if (rel_is_cte)
+          return QIR_TOUCH_DERIVED;
         return QIR_TOUCH_BASE;
       }
       if (fi->kind == QIR_FROM_SUBQUERY || fi->kind == QIR_FROM_CTE_REF ||
-          fi->kind == QIR_FROM_VALUES) return QIR_TOUCH_DERIVED;
+          fi->kind == QIR_FROM_VALUES)
+        return QIR_TOUCH_DERIVED;
       return QIR_TOUCH_UNKNOWN;
     }
   }
@@ -193,149 +213,160 @@ static QirTouchKind qir_resolve_qualifier_kind(
   return QIR_TOUCH_UNKNOWN;
 }
 
-
 /* Appends a new touch record to the report. */
-static int qir_touch_report_add(
-    QirTouchReport *tr,
-    QirScope scope,
-    QirTouchKind kind,
-    const QirColRef *col,
-    const QirQuery *source_query,
-    PtrVec *touches
-) {
-  if (!tr || !col) return -1;
+static int qir_touch_report_add(QirTouchReport *tr, QirScope scope,
+                                QirTouchKind kind, const QirColRef *col,
+                                const QirQuery *source_query, PtrVec *touches) {
+  if (!tr || !col)
+    return -1;
 
   QirTouch *t = (QirTouch *)pl_arena_alloc(&tr->arena, (uint32_t)sizeof(*t));
-  if (!t) return -1;
+  if (!t)
+    return -1;
 
   t->scope = scope;
   t->kind = kind;
   t->col = *col; // shallow copy; identifiers are owned by QueryIR
   t->source_query = source_query;
   // Keep a temporary pointer vector and flatten it once at the end.
-  if (ptrvec_push(touches, t) != OK) return -1;
+  if (ptrvec_push(touches, t) != OK)
+    return -1;
   tr->ntouches++;
 
-  if (kind == QIR_TOUCH_UNKNOWN) tr->has_unknown_touches = true;
+  if (kind == QIR_TOUCH_UNKNOWN)
+    tr->has_unknown_touches = true;
   return 0;
 }
 
-// Forward declaration for mutual recursion (expr can contain subquery; query contains expr).
-static void qir_extract_from_query_rec(
-    const QirQuery *q,
-    QirScope scope,
-    QirTouchReport *tr,
-    PtrVec *touches,
-    const QirQuery *cte_scope
-);
+// Forward declaration for mutual recursion (expr can contain subquery; query
+// contains expr).
+static void qir_extract_from_query_rec(const QirQuery *q, QirScope scope,
+                                       QirTouchReport *tr, PtrVec *touches,
+                                       const QirQuery *cte_scope);
 
 /* Walk an expression tree and record every column reference encountered. Adds
  * the columns to 'tr'.
  *
  * The "owner_query" is the query block whose FROM/JOIN aliases define the
  * namespace for resolving qualifiers in this expression. */
-static void qir_extract_from_expr_rec(
-    const QirQuery *owner_query,
-    const QirQuery *cte_scope,
-    const QirExpr *e,
-    QirScope scope,
-    QirTouchReport *tr,
-    PtrVec *touches
-) {
-  if (!e || !tr) return;
+static void qir_extract_from_expr_rec(const QirQuery *owner_query,
+                                      const QirQuery *cte_scope,
+                                      const QirExpr *e, QirScope scope,
+                                      QirTouchReport *tr, PtrVec *touches) {
+  if (!e || !tr)
+    return;
 
   switch (e->kind) {
-    case QIR_EXPR_COLREF: {
-      QirTouchKind kind = qir_resolve_qualifier_kind(owner_query, cte_scope, &e->u.colref.qualifier);
-      if (e->u.colref.column.name && strcmp(e->u.colref.column.name, "*") == 0) {
-        // Star touches cannot be mapped to a specific column, so treat them as unknown.
-        kind = QIR_TOUCH_UNKNOWN;
-      }
-      if (qir_touch_report_add(tr, scope, kind, &e->u.colref, owner_query,
-                               touches) != 0) {
-        tr->has_unsupported = true; // allocation failure treated as "cannot safely proceed"
-      }
-      break;
+  case QIR_EXPR_COLREF: {
+    QirTouchKind kind = qir_resolve_qualifier_kind(owner_query, cte_scope,
+                                                   &e->u.colref.qualifier);
+    if (e->u.colref.column.name && strcmp(e->u.colref.column.name, "*") == 0) {
+      // Star touches cannot be mapped to a specific column, so treat them as
+      // unknown.
+      kind = QIR_TOUCH_UNKNOWN;
     }
+    if (qir_touch_report_add(tr, scope, kind, &e->u.colref, owner_query,
+                             touches) != 0) {
+      tr->has_unsupported =
+          true; // allocation failure treated as "cannot safely proceed"
+    }
+    break;
+  }
 
-    case QIR_EXPR_PARAM:
-    case QIR_EXPR_LITERAL:
-      // Params and literals do not introduce column touches.
-      break;
+  case QIR_EXPR_PARAM:
+  case QIR_EXPR_LITERAL:
+    // Params and literals do not introduce column touches.
+    break;
 
-    case QIR_EXPR_FUNCALL:
-      // Even "safe" function calls can reference columns through their arguments.
-      // Touch extraction must walk arguments regardless of allowlist decisions.
-      for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
-        qir_extract_from_expr_rec(owner_query, cte_scope, e->u.funcall.args[i], scope, tr, touches);
-      }
-      break;
+  case QIR_EXPR_FUNCALL:
+    // Even "safe" function calls can reference columns through their arguments.
+    // Touch extraction must walk arguments regardless of allowlist decisions.
+    for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
+      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.funcall.args[i],
+                                scope, tr, touches);
+    }
+    break;
 
-    case QIR_EXPR_CAST:
-      // Cast touches come from the underlying expression.
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.cast.expr, scope, tr, touches);
-      break;
+  case QIR_EXPR_CAST:
+    // Cast touches come from the underlying expression.
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.cast.expr, scope, tr,
+                              touches);
+    break;
 
-    case QIR_EXPR_EQ:
-    case QIR_EXPR_NE:
-    case QIR_EXPR_GT:
-    case QIR_EXPR_GE:
-    case QIR_EXPR_LT:
-    case QIR_EXPR_LE:
-    case QIR_EXPR_LIKE:
-    case QIR_EXPR_NOT_LIKE:
-    case QIR_EXPR_AND:
-    case QIR_EXPR_OR:
-    case QIR_EXPR_NOT:
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.l, scope, tr, touches);
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.r, scope, tr, touches);
-      break;
+  case QIR_EXPR_EQ:
+  case QIR_EXPR_NE:
+  case QIR_EXPR_GT:
+  case QIR_EXPR_GE:
+  case QIR_EXPR_LT:
+  case QIR_EXPR_LE:
+  case QIR_EXPR_LIKE:
+  case QIR_EXPR_NOT_LIKE:
+  case QIR_EXPR_AND:
+  case QIR_EXPR_OR:
+  case QIR_EXPR_NOT:
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.l, scope, tr,
+                              touches);
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.r, scope, tr,
+                              touches);
+    break;
 
-    case QIR_EXPR_IN:
-      // IN(lhs, items...): touches can appear in lhs and in each item.
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.in_.lhs, scope, tr, touches);
-      for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-        qir_extract_from_expr_rec(owner_query, cte_scope, e->u.in_.items[i], scope, tr, touches);
-      }
-      break;
+  case QIR_EXPR_IN:
+    // IN(lhs, items...): touches can appear in lhs and in each item.
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.in_.lhs, scope, tr,
+                              touches);
+    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
+      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.in_.items[i],
+                                scope, tr, touches);
+    }
+    break;
 
-    case QIR_EXPR_CASE:
-      // CASE may reference columns in arg, WHEN, THEN, and ELSE branches.
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.case_.arg, scope, tr, touches);
-      for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
-        QirCaseWhen *w = e->u.case_.whens[i];
-        if (!w) continue;
-        qir_extract_from_expr_rec(owner_query, cte_scope, w->when_expr, scope, tr, touches);
-        qir_extract_from_expr_rec(owner_query, cte_scope, w->then_expr, scope, tr, touches);
-      }
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.case_.else_expr, scope, tr, touches);
-      break;
+  case QIR_EXPR_CASE:
+    // CASE may reference columns in arg, WHEN, THEN, and ELSE branches.
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.case_.arg, scope, tr,
+                              touches);
+    for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
+      QirCaseWhen *w = e->u.case_.whens[i];
+      if (!w)
+        continue;
+      qir_extract_from_expr_rec(owner_query, cte_scope, w->when_expr, scope, tr,
+                                touches);
+      qir_extract_from_expr_rec(owner_query, cte_scope, w->then_expr, scope, tr,
+                                touches);
+    }
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.case_.else_expr,
+                              scope, tr, touches);
+    break;
 
-    case QIR_EXPR_WINDOWFUNC:
-      // Window functions can reference columns in args and window clauses.
-      for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
-        qir_extract_from_expr_rec(owner_query, cte_scope, e->u.window.func.args[i], scope, tr, touches);
-      }
-      for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
-        qir_extract_from_expr_rec(owner_query, cte_scope, e->u.window.partition_by[i], scope, tr, touches);
-      }
-      for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
-        qir_extract_from_expr_rec(owner_query, cte_scope, e->u.window.order_by[i], scope, tr, touches);
-      }
-      break;
+  case QIR_EXPR_WINDOWFUNC:
+    // Window functions can reference columns in args and window clauses.
+    for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
+      qir_extract_from_expr_rec(owner_query, cte_scope,
+                                e->u.window.func.args[i], scope, tr, touches);
+    }
+    for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
+      qir_extract_from_expr_rec(owner_query, cte_scope,
+                                e->u.window.partition_by[i], scope, tr,
+                                touches);
+    }
+    for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
+      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.window.order_by[i],
+                                scope, tr, touches);
+    }
+    break;
 
-    case QIR_EXPR_SUBQUERY:
-      // Subquery introduces a new scope for alias resolution and also should
-      // be treated as "nested" for Sensitive Mode rules.
-      if (e->u.subquery) {
-        qir_extract_from_query_rec(e->u.subquery, QIR_SCOPE_NESTED, tr, touches, cte_scope);
-      }
-      break;
+  case QIR_EXPR_SUBQUERY:
+    // Subquery introduces a new scope for alias resolution and also should
+    // be treated as "nested" for Sensitive Mode rules.
+    if (e->u.subquery) {
+      qir_extract_from_query_rec(e->u.subquery, QIR_SCOPE_NESTED, tr, touches,
+                                 cte_scope);
+    }
+    break;
 
-    case QIR_EXPR_UNSUPPORTED:
-    default:
-      tr->has_unsupported = true;
-      break;
+  case QIR_EXPR_UNSUPPORTED:
+  default:
+    tr->has_unsupported = true;
+    break;
   }
 }
 
@@ -346,17 +377,15 @@ static void qir_extract_from_expr_rec(
  * - JOIN ON predicates (current query scope)
  * - SELECT list (current query scope)
  * - WHERE (current query scope) */
-static void qir_extract_from_query_rec(
-    const QirQuery *q,
-    QirScope scope,
-    QirTouchReport *tr,
-    PtrVec *touches,
-    const QirQuery *cte_scope
-) {
-  if (!q || !tr) return;
+static void qir_extract_from_query_rec(const QirQuery *q, QirScope scope,
+                                       QirTouchReport *tr, PtrVec *touches,
+                                       const QirQuery *cte_scope) {
+  if (!q || !tr)
+    return;
 
   // If backend has already flagged unsupported constructs, carry it through.
-  if (q->status == QIR_UNSUPPORTED) tr->has_unsupported = true;
+  if (q->status == QIR_UNSUPPORTED)
+    tr->has_unsupported = true;
 
   // Visible CTEs for this scope: use local CTEs if present, otherwise inherit.
   const QirQuery *scope_cte = (q->nctes > 0) ? q : cte_scope;
@@ -364,26 +393,32 @@ static void qir_extract_from_query_rec(
   // Recurse into CTE bodies (always nested relative to the parent query).
   for (uint32_t i = 0; i < q->nctes; i++) {
     const QirCte *cte = q->ctes ? q->ctes[i] : NULL;
-    if (!cte || !cte->query) continue;
-    qir_extract_from_query_rec(cte->query, QIR_SCOPE_NESTED, tr, touches, scope_cte);
+    if (!cte || !cte->query)
+      continue;
+    qir_extract_from_query_rec(cte->query, QIR_SCOPE_NESTED, tr, touches,
+                               scope_cte);
   }
 
   // Recurse into FROM subqueries (nested)
   for (uint32_t i = 0; i < q->nfrom; i++) {
     const QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
-    if (!fi) continue;
+    if (!fi)
+      continue;
     if (fi->kind == QIR_FROM_SUBQUERY && fi->u.subquery) {
-      qir_extract_from_query_rec(fi->u.subquery, QIR_SCOPE_NESTED, tr, touches, scope_cte);
+      qir_extract_from_query_rec(fi->u.subquery, QIR_SCOPE_NESTED, tr, touches,
+                                 scope_cte);
     }
   }
 
   // Recurse into JOIN RHS subqueries and JOIN ON expressions
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirJoin *j = q->joins ? q->joins[i] : NULL;
-    if (!j) continue;
+    if (!j)
+      continue;
 
     if (j->rhs && j->rhs->kind == QIR_FROM_SUBQUERY && j->rhs->u.subquery) {
-      qir_extract_from_query_rec(j->rhs->u.subquery, QIR_SCOPE_NESTED, tr, touches, scope_cte);
+      qir_extract_from_query_rec(j->rhs->u.subquery, QIR_SCOPE_NESTED, tr,
+                                 touches, scope_cte);
     }
 
     if (j->on) {
@@ -394,7 +429,8 @@ static void qir_extract_from_query_rec(
   // SELECT list touches (expressions can reference columns).
   for (uint32_t i = 0; i < q->nselect; i++) {
     const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
-    if (!si) continue;
+    if (!si)
+      continue;
 
     if (!si->value) {
       tr->has_unsupported = true;
@@ -438,15 +474,18 @@ static void qir_extract_from_query_rec(
  *
  * The function:
  * - Collects all column references reachable in the IR (main + nested queries).
- * - Classifies each touch as BASE/DERIVED/UNKNOWN, based on qualifier resolution
- *   against the owning query block's aliases.
+ * - Classifies each touch as BASE/DERIVED/UNKNOWN, based on qualifier
+ * resolution against the owning query block's aliases.
  * - Sets has_unknown_touches when a qualifier cannot be resolved.
- * - Sets has_unsupported when IR contains UNSUPPORTED nodes or allocation fails. */
+ * - Sets has_unsupported when IR contains UNSUPPORTED nodes or allocation
+ * fails. */
 QirTouchReport *qir_extract_touches(const QirQuery *q) {
-  if (!q) return NULL;
+  if (!q)
+    return NULL;
 
   QirTouchReport *tr = (QirTouchReport *)xcalloc(1, sizeof(*tr));
-  if (!tr) return NULL;
+  if (!tr)
+    return NULL;
   if (pl_arena_init(&tr->arena, NULL, NULL) != OK) {
     free(tr);
     return NULL;
@@ -461,13 +500,15 @@ QirTouchReport *qir_extract_touches(const QirQuery *q) {
   // traversal by validators. The array is arena-owned.
   if (tr->ntouches > 0) {
     tr->touches = (QirTouch **)ptrvec_flatten(&touches, &tr->arena);
-    if (!tr->touches) tr->has_unsupported = true;
+    if (!tr->touches)
+      tr->has_unsupported = true;
   }
   ptrvec_clean(&touches);
 
   // If we saw unknown touches or unsupported constructs, caller may reject.
   // Treat any non-OK status as unsupported for validation gating.
-  if (q->status != QIR_OK) tr->has_unsupported = true;
+  if (q->status != QIR_OK)
+    tr->has_unsupported = true;
 
   return tr;
 }
@@ -476,7 +517,8 @@ QirTouchReport *qir_extract_touches(const QirQuery *q) {
  * Ownership: caller owns 'out' and controls its lifetime.
  * Side effects: resets and writes into 'out'. */
 const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out) {
-  if (!out) return "";
+  if (!out)
+    return "";
   sb_reset(out);
 
   if (!fi) {
@@ -485,40 +527,41 @@ const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out) {
   }
 
   switch (fi->kind) {
-    case QIR_FROM_BASE_REL: {
-      const char *schema = fi->u.rel.schema.name;
-      const char *table = fi->u.rel.name.name;
-      if (schema && schema[0] != '\0') {
-        (void)sb_append_bytes(out, schema, strlen(schema));
-        (void)sb_append_bytes(out, ".", 1);
-      }
-      if (table && table[0] != '\0') {
-        (void)sb_append_bytes(out, table, strlen(table));
-      } else {
-        (void)sb_append_bytes(out, "<unknown>", 9);
-      }
-      break;
+  case QIR_FROM_BASE_REL: {
+    const char *schema = fi->u.rel.schema.name;
+    const char *table = fi->u.rel.name.name;
+    if (schema && schema[0] != '\0') {
+      (void)sb_append_bytes(out, schema, strlen(schema));
+      (void)sb_append_bytes(out, ".", 1);
     }
-    case QIR_FROM_SUBQUERY:
-      (void)sb_append_bytes(out, "subquery", 8);
-      break;
-    case QIR_FROM_CTE_REF: {
-      (void)sb_append_bytes(out, "cte(", 4);
-      if (fi->u.cte_name.name && fi->u.cte_name.name[0] != '\0') {
-        (void)sb_append_bytes(out, fi->u.cte_name.name, strlen(fi->u.cte_name.name));
-      } else {
-        (void)sb_append_bytes(out, "<unknown>", 9);
-      }
-      (void)sb_append_bytes(out, ")", 1);
-      break;
+    if (table && table[0] != '\0') {
+      (void)sb_append_bytes(out, table, strlen(table));
+    } else {
+      (void)sb_append_bytes(out, "<unknown>", 9);
     }
-    case QIR_FROM_VALUES:
-      (void)sb_append_bytes(out, "values", 6);
-      break;
-    case QIR_FROM_UNSUPPORTED:
-    default:
-      (void)sb_append_bytes(out, "unsupported", 11);
-      break;
+    break;
+  }
+  case QIR_FROM_SUBQUERY:
+    (void)sb_append_bytes(out, "subquery", 8);
+    break;
+  case QIR_FROM_CTE_REF: {
+    (void)sb_append_bytes(out, "cte(", 4);
+    if (fi->u.cte_name.name && fi->u.cte_name.name[0] != '\0') {
+      (void)sb_append_bytes(out, fi->u.cte_name.name,
+                            strlen(fi->u.cte_name.name));
+    } else {
+      (void)sb_append_bytes(out, "<unknown>", 9);
+    }
+    (void)sb_append_bytes(out, ")", 1);
+    break;
+  }
+  case QIR_FROM_VALUES:
+    (void)sb_append_bytes(out, "values", 6);
+    break;
+  case QIR_FROM_UNSUPPORTED:
+  default:
+    (void)sb_append_bytes(out, "unsupported", 11);
+    break;
   }
 
   if (fi->alias.name && fi->alias.name[0] != '\0') {
@@ -527,7 +570,8 @@ const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out) {
   }
 
   /* Ensure the buffer is NUL-terminated for %s usage. */
-  if (sb_append_bytes(out, "\0", 1) == OK) return out->data;
+  if (sb_append_bytes(out, "\0", 1) == OK)
+    return out->data;
   return "";
 }
 
@@ -535,7 +579,8 @@ const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out) {
  * Ownership: caller owns 'out' and controls its lifetime.
  * Side effects: resets and writes into 'out'. */
 const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out) {
-  if (!out) return "";
+  if (!out)
+    return "";
   sb_reset(out);
 
   if (!cr) {
@@ -558,7 +603,8 @@ const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out) {
   }
 
   /* Ensure the buffer is NUL-terminated for %s usage. */
-  if (sb_append_bytes(out, "\0", 1) == OK) return out->data;
+  if (sb_append_bytes(out, "\0", 1) == OK)
+    return out->data;
   return "";
 }
 
@@ -566,7 +612,8 @@ const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out) {
  * Ownership: caller owns 'out' and controls its lifetime.
  * Side effects: resets and writes into 'out'. */
 const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out) {
-  if (!out) return "";
+  if (!out)
+    return "";
   sb_reset(out);
 
   if (!fn) {
@@ -587,6 +634,7 @@ const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out) {
 
   (void)sb_append_bytes(out, "()", 2);
   /* Ensure the buffer is NUL-terminated for %s usage. */
-  if (sb_append_bytes(out, "\0", 1) == OK) return out->data;
+  if (sb_append_bytes(out, "\0", 1) == OK)
+    return out->data;
   return "";
 }

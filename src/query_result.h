@@ -1,48 +1,45 @@
 #ifndef QUERY_RESULT_H
 #define QUERY_RESULT_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "mcp_id.h"
 
 typedef struct QRColumn {
-    char *name;
-    char *type;     // type name in text format like "int4", "text", "date"
+  char *name;
+  char *type; // type name in text format like "int4", "text", "date"
 } QRColumn;
 
-typedef enum QRStatus {
-    QR_OK = 0,
-    QR_ERROR = 1
-} QRStatus;
+typedef enum QRStatus { QR_OK = 0, QR_ERROR = 1 } QRStatus;
 
 /* It's a materialized, DB-agnostic query result. It owns cols and cells. */
 typedef struct QueryResult {
-    McpId id;           // id of the request
-    QRStatus status;
-    uint64_t exec_ms;   // execution time in ms for both OK and ERROR
+  McpId id; // id of the request
+  QRStatus status;
+  uint64_t exec_ms; // execution time in ms for both OK and ERROR
 
-    union {
-        // valid if QR_OK
-        struct {
-            uint32_t ncols;
-            QRColumn *cols;     // malloc'd array of ncols length
+  union {
+    // valid if QR_OK
+    struct {
+      uint32_t ncols;
+      QRColumn *cols; // malloc'd array of ncols length
 
-            uint32_t nrows;
-            uint32_t nrows_alloc; // allocated rows for cells storage
-            char **cells;       // length (nrows_alloc * ncols). To access an
-                                // element: cells[row*ncols + col];
-            uint8_t result_truncated;  // 1 if output row count is lower than the
-                                       // row count of the query executed
-            uint64_t max_query_bytes;  // 0 = unlimited
-            uint64_t used_query_bytes; // bytes stored across all non-NULL cells
-        };
-
-        // valid if QR_ERROR
-        char *err_msg;
+      uint32_t nrows;
+      uint32_t nrows_alloc;      // allocated rows for cells storage
+      char **cells;              // length (nrows_alloc * ncols). To access an
+                                 // element: cells[row*ncols + col];
+      uint8_t result_truncated;  // 1 if output row count is lower than the
+                                 // row count of the query executed
+      uint64_t max_query_bytes;  // 0 = unlimited
+      uint64_t used_query_bytes; // bytes stored across all non-NULL cells
     };
 
     // valid if QR_ERROR
+    char *err_msg;
+  };
+
+  // valid if QR_ERROR
 
 } QueryResult;
 
@@ -67,7 +64,7 @@ void qr_destroy(QueryResult *qr);
  * 'col'. If type is NULL it's stored as "unknown". Returns OK on success, ERR
  * on bad input or out-of-bounds. */
 int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
-        const char *type);
+               const char *type);
 
 /* Returns the QRColumn at 'col' inside 'qr'. Returns NULL on bad input or if
  * that column is unset. */

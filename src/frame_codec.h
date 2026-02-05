@@ -1,8 +1,8 @@
 #ifndef FRAME_CODEC_H
 #define FRAME_CODEC_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "bufio.h"
 #include "string_op.h"
@@ -21,7 +21,8 @@ int frame_read_len(BufChannel *bc, StrBuf *out_payload);
 int frame_write_cl(BufChannel *bc, const void *payload, size_t n);
 
 /* Reads Content-Length framed payload into out_payload.
- * Returns YES on success, NO on clean EOF before header, ERR on framing error. */
+ * Returns YES on success, NO on clean EOF before header, ERR on framing error.
+ */
 int frame_read_cl(BufChannel *bc, StrBuf *out_payload);
 
 #endif

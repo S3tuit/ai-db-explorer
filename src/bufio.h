@@ -7,7 +7,6 @@
 #include "byte_channel.h"
 #include "string_op.h"
 
-
 /* Buffered I/O on top of a ByteChannel. This layer is protocol-agnostic.
  *
  * Ownership: BufChannel always owns its ByteChannel and will destroy it.
@@ -20,10 +19,10 @@
  */
 
 typedef struct BufChannel {
-    ByteChannel *ch;   // owned; destroyed in bufch_destroy
-    StrBuf buf;        // read buffer
-    size_t rpos;       // read position within buf.data [0..buf.len]
-    int eof;           // sticky EOF flag (seen 0 from read_some)
+  ByteChannel *ch; // owned; destroyed in bufch_destroy
+  StrBuf buf;      // read buffer
+  size_t rpos;     // read position within buf.data [0..buf.len]
+  int eof;         // sticky EOF flag (seen 0 from read_some)
 } BufChannel;
 
 /* Initializes a BufChannel without allocating it. */
@@ -53,7 +52,8 @@ int bufch_read_n(BufChannel *bc, void *dst, size_t n);
 
 // Finds a byte pattern in the buffered data. Returns index (offset from current
 // read position) if found, else -1. This is not efficient for long patterns.
-ssize_t bufch_find_buffered(const BufChannel *bc, const void *needle, size_t needle_len);
+ssize_t bufch_find_buffered(const BufChannel *bc, const void *needle,
+                            size_t needle_len);
 // Finds a byte pattern within a bounded window and reads as needed to decide.
 // Returns index if found, -1 if not found within the window or error.
 ssize_t bufch_findn(BufChannel *bc, const void *needle, size_t needle_len,
@@ -63,8 +63,7 @@ ssize_t bufch_findn(BufChannel *bc, const void *needle, size_t needle_len,
 int bufch_write_all(BufChannel *bc, const void *src, size_t n);
 
 /* Writes header + payload with a vector fast path when available. */
-int bufch_write2v(BufChannel *bc,
-                    const void *h, size_t hlen,
-                    const void *p, size_t plen);
+int bufch_write2v(BufChannel *bc, const void *h, size_t hlen, const void *p,
+                  size_t plen);
 
 #endif

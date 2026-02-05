@@ -4,11 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "byte_channel.h"
 #include "bufio.h"
-#include "db_backend.h"
+#include "byte_channel.h"
 #include "conn_manager.h"
-
+#include "db_backend.h"
 
 #define SOCK_PATH "./build/aidbexplorer.sock"
 
@@ -18,8 +17,8 @@ typedef struct Broker Broker;
 
 /* This entity stores the usefull data to communicate with each Client. */
 typedef struct BrokerMcpSession {
-    BufChannel bc;
-    int fd;              // connection identity (owned by bc)
+  BufChannel bc;
+  int fd; // connection identity (owned by bc)
 } BrokerMcpSession;
 
 /* Run broker event loop (blocking).

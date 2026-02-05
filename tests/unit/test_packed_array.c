@@ -1,6 +1,6 @@
-#include <stdio.h>
-#include <stdint.h>
 #include <stdalign.h>
+#include <stdint.h>
+#include <stdio.h>
 
 #include "packed_array.h"
 #include "string_op.h"
@@ -49,9 +49,12 @@ static void test_basic_emplace_and_at(void) {
 static void test_drop_swap(void) {
   PackedArray *a = parr_create(sizeof(Item));
   Item *p = NULL;
-  parr_emplace(a, (void **)&p); p->id = 1;
-  parr_emplace(a, (void **)&p); p->id = 2;
-  parr_emplace(a, (void **)&p); p->id = 3;
+  parr_emplace(a, (void **)&p);
+  p->id = 1;
+  parr_emplace(a, (void **)&p);
+  p->id = 2;
+  parr_emplace(a, (void **)&p);
+  p->id = 3;
   ASSERT_TRUE(parr_len(a) == 3);
 
   parr_drop_swap(a, 1);
@@ -71,9 +74,12 @@ static void test_cleanup_drop_and_destroy(void) {
   parr_set_cleanup(a, cleanup_item, &ctx);
 
   Item *p = NULL;
-  parr_emplace(a, (void **)&p); p->id = 4;
-  parr_emplace(a, (void **)&p); p->id = 5;
-  parr_emplace(a, (void **)&p); p->id = 6;
+  parr_emplace(a, (void **)&p);
+  p->id = 4;
+  parr_emplace(a, (void **)&p);
+  p->id = 5;
+  parr_emplace(a, (void **)&p);
+  p->id = 6;
 
   parr_drop_swap(a, 0); // cleanup should see id=4
   ASSERT_TRUE(ctx.count == 1);
@@ -120,7 +126,8 @@ static void test_emplace_failure(void) {
   size_t i = 0;
   for (;;) {
     idx = parr_emplace(a, (void **)&p);
-    if (idx == SIZE_MAX) break;
+    if (idx == SIZE_MAX)
+      break;
     p->id = (int)i;
     i++;
   }

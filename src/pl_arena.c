@@ -1,7 +1,7 @@
-#include <stdlib.h>
-#include <string.h>
 #include <stdalign.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "pl_arena.h"
 #include "utils.h"
@@ -39,17 +39,20 @@ static PlArenaBlock *pl_arena_block_create(uint32_t cap) {
  * Side effects: allocates the first block.
  * Returns OK on success, ERR on bad input or allocation failure. */
 int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
-  if (!ar) return ERR;
+  if (!ar)
+    return ERR;
 
   // resolve defaults
   uint32_t size = (size_p == NULL || *size_p == 0) ? 1024u : *size_p; // ~1KB
-  uint32_t cap  = (cap_p  == NULL || *cap_p  == 0) ? 1048000u : *cap_p; // ~1MB
+  uint32_t cap = (cap_p == NULL || *cap_p == 0) ? 1048000u : *cap_p;  // ~1MB
 
   // Validate alignment
-  if (!pl_is_power_of_two_u32((uint32_t)alignof(max_align_t))) return ERR;
+  if (!pl_is_power_of_two_u32((uint32_t)alignof(max_align_t)))
+    return ERR;
 
   // defensive
-  if (size > cap) size = cap;
+  if (size > cap)
+    size = cap;
 
   ar->head = pl_arena_block_create(size);
   ar->tail = ar->head;
@@ -79,7 +82,8 @@ PlArena *pl_arena_create(uint32_t *size_p, uint32_t *cap_p) {
  * Side effects: frees memory.
  * Returns void. */
 void pl_arena_destroy(PlArena *ar) {
-  if (!ar) return;
+  if (!ar)
+    return;
   pl_arena_clean(ar);
   free(ar);
 }
@@ -89,7 +93,8 @@ void pl_arena_destroy(PlArena *ar) {
  * Side effects: frees memory.
  * Returns void. */
 void pl_arena_clean(PlArena *ar) {
-  if (!ar) return;
+  if (!ar)
+    return;
   PlArenaBlock *b = ar->head;
   while (b) {
     PlArenaBlock *next = b->next;
@@ -110,31 +115,41 @@ void pl_arena_clean(PlArena *ar) {
  * Side effects: may allocate a new block.
  * Returns OK on success, ERR on cap/overflow. */
 int pl_arena_ensure(PlArena *ar, uint32_t extra) {
-  if (!ar) return ERR;
+  if (!ar)
+    return ERR;
 
   // overflow guard: used + extra
-  if (extra > UINT32_MAX - ar->used) return ERR;
+  if (extra > UINT32_MAX - ar->used)
+    return ERR;
 
   uint32_t needed = ar->used + extra;
-  if (needed > ar->cap) return ERR;
+  if (needed > ar->cap)
+    return ERR;
 
   // If the current block has space, we're done.
-  if (ar->tail && (ar->tail->cap - ar->tail->used) >= extra) return OK;
+  if (ar->tail && (ar->tail->cap - ar->tail->used) >= extra)
+    return OK;
 
   uint32_t remaining = ar->cap - ar->used;
-  if (remaining < extra) return ERR;
-  
+  if (remaining < extra)
+    return ERR;
+
   // Blocks keep doubling in size each time one is added
   uint32_t new_sz = ar->block_sz;
-  if (new_sz > UINT32_MAX / 2u) return ERR;
+  if (new_sz > UINT32_MAX / 2u)
+    return ERR;
   new_sz *= 2u;
   while (new_sz < extra && new_sz < remaining) {
-    if (new_sz > UINT32_MAX / 2u) break;
+    if (new_sz > UINT32_MAX / 2u)
+      break;
     new_sz *= 2u;
   }
-  if (new_sz < extra) new_sz = extra;
-  if (new_sz > remaining) new_sz = remaining;
-  if (new_sz < extra) return ERR;
+  if (new_sz < extra)
+    new_sz = extra;
+  if (new_sz > remaining)
+    new_sz = remaining;
+  if (new_sz < extra)
+    return ERR;
 
   PlArenaBlock *nb = pl_arena_block_create(new_sz);
   ar->tail->next = nb;
@@ -150,20 +165,23 @@ int pl_arena_ensure(PlArena *ar, uint32_t extra) {
  * Side effects: allocates arena memory.
  * Returns NULL on error. */
 void *pl_arena_alloc(PlArena *ar, uint32_t len) {
-  if (!ar) return NULL;
+  if (!ar)
+    return NULL;
 
   // entry layout: [u32 len][align pad][payload len bytes][0][padding...]
   // padding aligns *next* entry start
-  const uint32_t header_sz = pl_align_up_u32(
-      (uint32_t)sizeof(uint32_t), (uint32_t)alignof(max_align_t));
+  const uint32_t header_sz = pl_align_up_u32((uint32_t)sizeof(uint32_t),
+                                             (uint32_t)alignof(max_align_t));
   const uint32_t data_sz = len + 1u;
   const uint32_t raw_entry_sz = header_sz + data_sz;
 
   // Align entry size to PL_ARENA_ALIGNMENT
-  const uint32_t entry_sz = pl_align_up_u32(raw_entry_sz, (uint32_t)alignof(max_align_t));
+  const uint32_t entry_sz =
+      pl_align_up_u32(raw_entry_sz, (uint32_t)alignof(max_align_t));
   const uint32_t padding = entry_sz - raw_entry_sz;
 
-  if (pl_arena_ensure(ar, entry_sz) != OK) return NULL;
+  if (pl_arena_ensure(ar, entry_sz) != OK)
+    return NULL;
 
   uint8_t *p = ar->tail->data + ar->tail->used;
 
@@ -177,12 +195,14 @@ void *pl_arena_alloc(PlArena *ar, uint32_t len) {
 
   uint8_t *payload = p;
   // write payload
-  if (len != 0) memset(payload, 0, len);
+  if (len != 0)
+    memset(payload, 0, len);
   payload[len] = 0; // terminator
   p = payload + data_sz;
 
   // zero padding
-  if (padding) memset(p, 0, padding);
+  if (padding)
+    memset(p, 0, padding);
 
   ar->tail->used += entry_sz;
   ar->used += entry_sz;
@@ -196,12 +216,16 @@ void *pl_arena_alloc(PlArena *ar, uint32_t len) {
  * Side effects: allocates arena memory.
  * Returns NULL on error. */
 void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
-  if (!ar) return NULL;
-  if (!start_v && len != 0) return NULL;
+  if (!ar)
+    return NULL;
+  if (!start_v && len != 0)
+    return NULL;
 
   uint8_t *payload = (uint8_t *)pl_arena_alloc(ar, len);
-  if (!payload) return NULL;
-  if (len != 0) memcpy(payload, start_v, len);
+  if (!payload)
+    return NULL;
+  if (len != 0)
+    memcpy(payload, start_v, len);
   return payload;
 }
 
@@ -211,7 +235,8 @@ void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
  * Side effects: none.
  * Returns the byte count. */
 uint32_t pl_arena_get_used(PlArena *ar) {
-  if (!ar) return 0u;
+  if (!ar)
+    return 0u;
   return ar->used;
 }
 
@@ -220,11 +245,14 @@ uint32_t pl_arena_get_used(PlArena *ar) {
  * Side effects: may realloc on heap.
  * Returns OK/ERR. */
 int ptrvec_push(PtrVec *v, void *ptr) {
-  if (!v) return ERR;
+  if (!v)
+    return ERR;
   if (v->len + 1 > v->cap) {
     uint32_t new_cap = v->cap ? v->cap * 2u : 8u;
-    void **new_items = (void **)xrealloc(v->items, new_cap * sizeof(*new_items));
-    if (!new_items) return ERR;
+    void **new_items =
+        (void **)xrealloc(v->items, new_cap * sizeof(*new_items));
+    if (!new_items)
+      return ERR;
     v->items = new_items;
     v->cap = new_cap;
   }
@@ -237,9 +265,11 @@ int ptrvec_push(PtrVec *v, void *ptr) {
  * Side effects: allocates arena memory.
  * Returns NULL on error or when v->len == 0. */
 void **ptrvec_flatten(PtrVec *v, PlArena *a) {
-  if (!v || !a || v->len == 0) return NULL;
+  if (!v || !a || v->len == 0)
+    return NULL;
   void **arr = (void **)pl_arena_alloc(a, (uint32_t)(v->len * sizeof(*arr)));
-  if (!arr) return NULL;
+  if (!arr)
+    return NULL;
   memcpy(arr, v->items, v->len * sizeof(*arr));
   return arr;
 }
@@ -249,7 +279,8 @@ void **ptrvec_flatten(PtrVec *v, PlArena *a) {
  * Side effects: frees heap memory.
  * Returns void. */
 void ptrvec_clean(PtrVec *v) {
-  if (!v) return;
+  if (!v)
+    return;
   free(v->items);
   v->items = NULL;
   v->len = 0;

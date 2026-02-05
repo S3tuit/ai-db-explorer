@@ -8,22 +8,22 @@
 
 /* This entity reads statements from a buffered byte stream. */
 typedef struct CommandReader {
-    BufChannel *bc;  // owned
-    StrBuf stash;   // unconsumed bytes from previous reads (after ';')
+  BufChannel *bc; // owned
+  StrBuf stash;   // unconsumed bytes from previous reads (after ';')
 } CommandReader;
 
 typedef enum {
-    CMD_SQL = 1,        // user wants to run a query
-    CMD_META = 2        // user wants to run one of our internal commands
+  CMD_SQL = 1, // user wants to run a query
+  CMD_META = 2 // user wants to run one of our internal commands
 } CommandType;
 
 // Entity that will be sent to the Broker to do something
 typedef struct {
-    CommandType type;
-    // Owned by this entity.
-    char *raw_sql;      // Valid if CMD_SQL. Statement without trailing ';'.
-    char *cmd;          // Valid if CMD_META. Name of the internal command.
-    char *args;         // Valid if CMD_META. Raw arguments (may be NULL).
+  CommandType type;
+  // Owned by this entity.
+  char *raw_sql; // Valid if CMD_SQL. Statement without trailing ';'.
+  char *cmd;     // Valid if CMD_META. Name of the internal command.
+  char *args;    // Valid if CMD_META. Raw arguments (may be NULL).
 } Command;
 
 /* Creates the reader and takes ownership of 'ch' (via BufChannel). */

@@ -4,18 +4,18 @@
 #include <stdint.h>
 
 typedef enum {
-    MCP_ID_INT = 0,
-    MCP_ID_STR = 1,
+  MCP_ID_INT = 0,
+  MCP_ID_STR = 1,
 } McpIdKind;
 
 /* MCP request id. If kind is MCP_ID_STR, the string is owned and must be
  * freed with mcp_id_clean(). */
 typedef struct McpId {
-    McpIdKind kind;
-    union {
-        uint32_t u32;
-        char *str;
-    };
+  McpIdKind kind;
+  union {
+    uint32_t u32;
+    char *str;
+  };
 } McpId;
 
 /* Initializes an integer id. Ownership: no allocations. */

@@ -4,17 +4,16 @@
 // Dummy implementation that returns secrets based on hard-coded references.
 // This is used for integration tests only
 
+#include "log.h"
 #include "secret_store.h"
 #include "utils.h"
-#include "log.h"
 
-#include <string.h>
 #include <stdio.h>
-
+#include <string.h>
 
 typedef struct {
-    const char *ref;
-    const char *secret;
+  const char *ref;
+  const char *secret;
 } SecretPair;
 
 // Update this table to change hard-coded secrets for the dummy store.
@@ -29,36 +28,37 @@ static const SecretPair DUMMY_SECRETS[] = {
  * Error semantics: ERR on bad input, missing ref, or allocation failure. */
 static int secret_store_dummy_get(SecretStore *store, const char *secret_ref,
                                   StrBuf *out) {
-    (void)store;
-    if (!secret_ref || !out) return ERR;
+  (void)store;
+  if (!secret_ref || !out)
+    return ERR;
 
-    sb_zero_clean(out);
-    out->len = 0;
+  sb_zero_clean(out);
+  out->len = 0;
 
-    const char *secret = NULL;
-    for (size_t i = 0; i < ARRLEN(DUMMY_SECRETS); i++) {
-        if (strcmp(DUMMY_SECRETS[i].ref, secret_ref) == 0) {
-            secret = DUMMY_SECRETS[i].secret;
-            break;
-        }
+  const char *secret = NULL;
+  for (size_t i = 0; i < ARRLEN(DUMMY_SECRETS); i++) {
+    if (strcmp(DUMMY_SECRETS[i].ref, secret_ref) == 0) {
+      secret = DUMMY_SECRETS[i].secret;
+      break;
     }
-    if (!secret) return ERR;
+  }
+  if (!secret)
+    return ERR;
 
-    size_t n = strlen(secret);
+  size_t n = strlen(secret);
 
-    char *dst = NULL;
-    if (sb_prepare_for_write(out, n + 1, &dst) != OK) return ERR;
-    memcpy(dst, secret, n + 1);
-    return OK;
+  char *dst = NULL;
+  if (sb_prepare_for_write(out, n + 1, &dst) != OK)
+    return ERR;
+  memcpy(dst, secret, n + 1);
+  return OK;
 }
 
 /* Destroys the dummy store.
  * Ownership: consumes the store pointer.
  * Side effects: none.
  * Error semantics: no return value. */
-static void secret_store_dummy_destroy(SecretStore *store) {
-    free(store);
-}
+static void secret_store_dummy_destroy(SecretStore *store) { free(store); }
 
 static const SecretStoreVTable SECRET_STORE_DUMMY_VT = {
     .get = secret_store_dummy_get,
@@ -70,11 +70,12 @@ static const SecretStoreVTable SECRET_STORE_DUMMY_VT = {
  * Side effects: logs a warning to stderr.
  * Error semantics: returns NULL on allocation failure. */
 SecretStore *secret_store_create(void) {
-    SecretStore *store = xmalloc(sizeof(*store));
-    store->vt = &SECRET_STORE_DUMMY_VT;
-    TLOG("INFO - using dummy secret store");
-    fprintf(stderr, "WARNING: using dummy secret store (DUMMY_SECRET_STORE_WARNING).\n");
-    return store;
+  SecretStore *store = xmalloc(sizeof(*store));
+  store->vt = &SECRET_STORE_DUMMY_VT;
+  TLOG("INFO - using dummy secret store");
+  fprintf(stderr,
+          "WARNING: using dummy secret store (DUMMY_SECRET_STORE_WARNING).\n");
+  return store;
 }
 
 /* Destroys the SecretStore using its vtable.
@@ -82,8 +83,9 @@ SecretStore *secret_store_create(void) {
  * Side effects: none.
  * Error semantics: no return value. */
 void secret_store_destroy(SecretStore *store) {
-    if (!store || !store->vt || !store->vt->destroy) return;
-    store->vt->destroy(store);
+  if (!store || !store->vt || !store->vt->destroy)
+    return;
+  store->vt->destroy(store);
 }
 
 /* Writes the secret into 'out' as a NUL-terminated string.
@@ -91,7 +93,8 @@ void secret_store_destroy(SecretStore *store) {
  * Side effects: none for dummy; real impl may access OS stores.
  * Error semantics: OK on success, ERR on failure. */
 int secret_store_get(SecretStore *store, const char *secret_ref, StrBuf *out) {
-    if (!store || !store->vt || !store->vt->get) return ERR;
-    return store->vt->get(store, secret_ref, out);
+  if (!store || !store->vt || !store->vt->get)
+    return ERR;
+  return store->vt->get(store, secret_ref, out);
 }
 #endif

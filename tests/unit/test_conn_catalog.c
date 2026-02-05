@@ -3,9 +3,9 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "test.h"
 #include "conn_catalog.h"
 #include "safety_policy.h"
+#include "test.h"
 
 /* Writes JSON content to a temp file and returns its path.
  * Caller owns the returned path string and must unlink it. */
@@ -24,10 +24,9 @@ static char *write_tmp_config(const char *json) {
 
 /* Ensures missing safetyPolicy falls back to default values. */
 static void test_missing_policy_defaults(void) {
-  const char *json =
-    "{"
-    "  \"databases\": []"
-    "}";
+  const char *json = "{"
+                     "  \"databases\": []"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -49,13 +48,12 @@ static void test_missing_policy_defaults(void) {
 
 /* Ensures missing policy fields fall back to defaults. */
 static void test_policy_missing_fields_defaults(void) {
-  const char *json =
-    "{"
-    "  \"safetyPolicy\": {"
-    "    \"readOnly\": \"No UnSafe\""
-    "  },"
-    "  \"databases\": []"
-    "}";
+  const char *json = "{"
+                     "  \"safetyPolicy\": {"
+                     "    \"readOnly\": \"No UnSafe\""
+                     "  },"
+                     "  \"databases\": []"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -76,16 +74,15 @@ static void test_policy_missing_fields_defaults(void) {
 
 /* Ensures maxQueryKiloBytes maps into max_query_bytes. */
 static void test_policy_kilobytes(void) {
-  const char *json =
-    "{"
-    "  \"safetyPolicy\": {"
-    "    \"readOnly\": \"yes\","
-    "    \"statementTimeoutMs\": 5000,"
-    "    \"maxRowReturned\": 200,"
-    "    \"maxQueryKiloBytes\": 1"
-    "  },"
-    "  \"databases\": []"
-    "}";
+  const char *json = "{"
+                     "  \"safetyPolicy\": {"
+                     "    \"readOnly\": \"yes\","
+                     "    \"statementTimeoutMs\": 5000,"
+                     "    \"maxRowReturned\": 200,"
+                     "    \"maxQueryKiloBytes\": 1"
+                     "  },"
+                     "  \"databases\": []"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -103,14 +100,13 @@ static void test_policy_kilobytes(void) {
 
 /* Ensures unknown safetyPolicy keys cause an error. */
 static void test_policy_unknown_key_fails(void) {
-  const char *json =
-    "{"
-    "  \"safetyPolicy\": {"
-    "    \"readOnly\": \"yes\","
-    "    \"unknown\": 1"
-    "  },"
-    "  \"databases\": []"
-    "}";
+  const char *json = "{"
+                     "  \"safetyPolicy\": {"
+                     "    \"readOnly\": \"yes\","
+                     "    \"unknown\": 1"
+                     "  },"
+                     "  \"databases\": []"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -124,14 +120,13 @@ static void test_policy_unknown_key_fails(void) {
 
 /* Ensures overflowed numeric fields fail validation. */
 static void test_policy_overflow_fails(void) {
-  const char *json =
-    "{"
-    "  \"safetyPolicy\": {"
-    "    \"readOnly\": \"yes\","
-    "    \"maxQueryKiloBytes\": 4294967295"
-    "  },"
-    "  \"databases\": []"
-    "}";
+  const char *json = "{"
+                     "  \"safetyPolicy\": {"
+                     "    \"readOnly\": \"yes\","
+                     "    \"maxQueryKiloBytes\": 4294967295"
+                     "  },"
+                     "  \"databases\": []"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -145,15 +140,14 @@ static void test_policy_overflow_fails(void) {
 
 /* Validates that an empty databases array is accepted. */
 static void test_empty_databases_ok(void) {
-  const char *json =
-    "{"
-    "  \"safetyPolicy\": {"
-    "    \"readOnly\": \"yes\","
-    "    \"statementTimeoutMs\": 5000,"
-    "    \"maxRowReturned\": 200"
-    "  },"
-    "  \"databases\": []"
-    "}";
+  const char *json = "{"
+                     "  \"safetyPolicy\": {"
+                     "    \"readOnly\": \"yes\","
+                     "    \"statementTimeoutMs\": 5000,"
+                     "    \"maxRowReturned\": 200"
+                     "  },"
+                     "  \"databases\": []"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -168,25 +162,24 @@ static void test_empty_databases_ok(void) {
 
 /* Ensures unknown keys inside a database entry reject the catalog. */
 static void test_db_entry_unknown_key_fails(void) {
-  const char *json =
-    "{"
-    "  \"safetyPolicy\": {"
-    "    \"readOnly\": \"yes\","
-    "    \"statementTimeoutMs\": 5000,"
-    "    \"maxRowReturned\": 200"
-    "  },"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"unknownKey\": \"oops\""
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"safetyPolicy\": {"
+                     "    \"readOnly\": \"yes\","
+                     "    \"statementTimeoutMs\": 5000,"
+                     "    \"maxRowReturned\": 200"
+                     "  },"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"127.0.0.1\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"user\","
+                     "      \"database\": \"db\","
+                     "      \"unknownKey\": \"oops\""
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -200,25 +193,24 @@ static void test_db_entry_unknown_key_fails(void) {
 
 /* Ensures a valid config maps fields to the right ConnProfile values. */
 static void test_valid_config_maps_fields(void) {
-  const char *json =
-    "{"
-    "  \"safetyPolicy\": {"
-    "    \"readOnly\": \"no\","
-    "    \"statementTimeoutMs\": 1234,"
-    "    \"maxRowReturned\": 99"
-    "  },"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"db.example\","
-    "      \"port\": 5432,"
-    "      \"username\": \"alice\","
-    "      \"database\": \"mydb\","
-    "      \"options\": \"sslmode=disable\""
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"safetyPolicy\": {"
+                     "    \"readOnly\": \"no\","
+                     "    \"statementTimeoutMs\": 1234,"
+                     "    \"maxRowReturned\": 99"
+                     "  },"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"db.example\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"alice\","
+                     "      \"database\": \"mydb\","
+                     "      \"options\": \"sslmode=disable\""
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -249,28 +241,27 @@ static void test_valid_config_maps_fields(void) {
 
 /* Ensures catalog lowercases identifiers and accepts mixed case. */
 static void test_policies_lowercase(void) {
-  const char *json =
-    "{"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"safeFunctions\": [\"mD1\", \"PrivaTe.Md2\"],"
-    "      \"columnPolicy\": {"
-    "        \"pseudonymize\": {"
-    "          \"deterministic\": ["
-    "            \"Users.Email\","
-    "            \"Private.Users.Phone\""
-    "          ]"
-    "        }"
-    "      }"
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"127.0.0.1\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"user\","
+                     "      \"database\": \"db\","
+                     "      \"safeFunctions\": [\"mD1\", \"PrivaTe.Md2\"],"
+                     "      \"columnPolicy\": {"
+                     "        \"pseudonymize\": {"
+                     "          \"deterministic\": ["
+                     "            \"Users.Email\","
+                     "            \"Private.Users.Phone\""
+                     "          ]"
+                     "        }"
+                     "      }"
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -301,28 +292,28 @@ static void test_policies_lowercase(void) {
 /* Ensures duplicated entries inside the policies are de-duplicated. */
 static void test_policies_dedup(void) {
   const char *json =
-    "{"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"safeFunctions\": [\"md1\", \"MD1\", \"public.md2\"],"
-    "      \"columnPolicy\": {"
-    "        \"pseudonymize\": {"
-    "          \"deterministic\": ["
-    "            \"users.email\","
-    "            \"USERS.EMAIL\","
-    "            \"users.email\""
-    "          ]"
-    "        }"
-    "      }"
-    "    }"
-    "  ]"
-    "}";
+      "{"
+      "  \"databases\": ["
+      "    {"
+      "      \"type\": \"postgres\","
+      "      \"connectionName\": \"MyPostgres\","
+      "      \"host\": \"127.0.0.1\","
+      "      \"port\": 5432,"
+      "      \"username\": \"user\","
+      "      \"database\": \"db\","
+      "      \"safeFunctions\": [\"md1\", \"MD1\", \"public.md2\"],"
+      "      \"columnPolicy\": {"
+      "        \"pseudonymize\": {"
+      "          \"deterministic\": ["
+      "            \"users.email\","
+      "            \"USERS.EMAIL\","
+      "            \"users.email\""
+      "          ]"
+      "        }"
+      "      }"
+      "    }"
+      "  ]"
+      "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -350,28 +341,27 @@ static void test_policies_dedup(void) {
 
 /* Ensures global rules win and schema list is preserved. */
 static void test_policies_global_and_schema(void) {
-  const char *json =
-    "{"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"safeFunctions\": [\"md1\", \"private.md1\"],"
-    "      \"columnPolicy\": {"
-    "        \"pseudonymize\": {"
-    "          \"deterministic\": ["
-    "            \"users.email\","
-    "            \"private.users.email\""
-    "          ]"
-    "        }"
-    "      }"
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"127.0.0.1\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"user\","
+                     "      \"database\": \"db\","
+                     "      \"safeFunctions\": [\"md1\", \"private.md1\"],"
+                     "      \"columnPolicy\": {"
+                     "        \"pseudonymize\": {"
+                     "          \"deterministic\": ["
+                     "            \"users.email\","
+                     "            \"private.users.email\""
+                     "          ]"
+                     "        }"
+                     "      }"
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -396,26 +386,25 @@ static void test_policies_global_and_schema(void) {
 
 /* Ensures malformed columnPolicy entries fail catalog load. */
 static void test_column_policy_malformed_fails(void) {
-  const char *json =
-    "{"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"columnPolicy\": {"
-    "        \"pseudonymize\": {"
-    "          \"deterministic\": ["
-    "            \"justcolumn\""
-    "          ]"
-    "        }"
-    "      }"
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"127.0.0.1\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"user\","
+                     "      \"database\": \"db\","
+                     "      \"columnPolicy\": {"
+                     "        \"pseudonymize\": {"
+                     "          \"deterministic\": ["
+                     "            \"justcolumn\""
+                     "          ]"
+                     "        }"
+                     "      }"
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -429,27 +418,26 @@ static void test_column_policy_malformed_fails(void) {
 
 /* Ensures malformed safeFunctions entries fail catalog load. */
 static void test_safe_functions_malformed_fails(void) {
-  const char *json =
-    "{"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"safeFunctions\": [\"md1\", \"bad.\"],"
-    "      \"columnPolicy\": {"
-    "        \"pseudonymize\": {"
-    "          \"deterministic\": ["
-    "            \"users.email\""
-    "          ]"
-    "        }"
-    "      }"
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"127.0.0.1\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"user\","
+                     "      \"database\": \"db\","
+                     "      \"safeFunctions\": [\"md1\", \"bad.\"],"
+                     "      \"columnPolicy\": {"
+                     "        \"pseudonymize\": {"
+                     "          \"deterministic\": ["
+                     "            \"users.email\""
+                     "          ]"
+                     "        }"
+                     "      }"
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -463,26 +451,25 @@ static void test_safe_functions_malformed_fails(void) {
 
 /* Ensures randomized rules are rejected in v1. */
 static void test_column_policy_randomized_fails(void) {
-  const char *json =
-    "{"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"columnPolicy\": {"
-    "        \"pseudonymize\": {"
-    "          \"randomizedd\": ["
-    "            \"cards.number\""
-    "          ]"
-    "        }"
-    "      }"
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"127.0.0.1\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"user\","
+                     "      \"database\": \"db\","
+                     "      \"columnPolicy\": {"
+                     "        \"pseudonymize\": {"
+                     "          \"randomizedd\": ["
+                     "            \"cards.number\""
+                     "          ]"
+                     "        }"
+                     "      }"
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;
@@ -494,30 +481,30 @@ static void test_column_policy_randomized_fails(void) {
   free(path);
 }
 
-/* Validates connp_is_*_sensitive behavior for global and schema-scoped rules. */
+/* Validates connp_is_*_sensitive behavior for global and schema-scoped rules.
+ */
 static void test_connp_is_sensitive(void) {
-  const char *json =
-    "{"
-    "  \"databases\": ["
-    "    {"
-    "      \"type\": \"postgres\","
-    "      \"connectionName\": \"MyPostgres\","
-    "      \"host\": \"127.0.0.1\","
-    "      \"port\": 5432,"
-    "      \"username\": \"user\","
-    "      \"database\": \"db\","
-    "      \"safeFunctions\": [\"md1\", \"private.md2\"],"
-    "      \"columnPolicy\": {"
-    "        \"pseudonymize\": {"
-    "          \"deterministic\": ["
-    "            \"users.email\","
-    "            \"private.users.name\""
-    "          ]"
-    "        }"
-    "      }"
-    "    }"
-    "  ]"
-    "}";
+  const char *json = "{"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"MyPostgres\","
+                     "      \"host\": \"127.0.0.1\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"user\","
+                     "      \"database\": \"db\","
+                     "      \"safeFunctions\": [\"md1\", \"private.md2\"],"
+                     "      \"columnPolicy\": {"
+                     "        \"pseudonymize\": {"
+                     "          \"deterministic\": ["
+                     "            \"users.email\","
+                     "            \"private.users.name\""
+                     "          ]"
+                     "        }"
+                     "      }"
+                     "    }"
+                     "  ]"
+                     "}";
 
   char *path = write_tmp_config(json);
   char *err = NULL;

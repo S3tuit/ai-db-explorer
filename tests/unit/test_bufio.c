@@ -24,9 +24,11 @@ typedef struct PartialByteChannelImpl {
 // Grow the write buffer as needed for capturing output.
 static void partial_ensure_cap(PartialByteChannelImpl *impl, size_t add) {
   size_t need = impl->wlen + add;
-  if (need <= impl->wcap) return;
+  if (need <= impl->wcap)
+    return;
   size_t newcap = impl->wcap ? impl->wcap : 64;
-  while (newcap < need) newcap *= 2;
+  while (newcap < need)
+    newcap *= 2;
   impl->wbuf = (unsigned char *)xrealloc(impl->wbuf, newcap);
   impl->wcap = newcap;
 }
@@ -34,13 +36,17 @@ static void partial_ensure_cap(PartialByteChannelImpl *impl, size_t add) {
 // Return at most read_chunk bytes to simulate partial reads.
 static ssize_t partial_read_some(ByteChannel *ch, void *buf, size_t cap) {
   PartialByteChannelImpl *impl = (PartialByteChannelImpl *)ch->impl;
-  if (!impl || !buf) return -1;
-  if (cap == 0) return 0;
-  if (impl->rpos >= impl->rlen) return 0;
+  if (!impl || !buf)
+    return -1;
+  if (cap == 0)
+    return 0;
+  if (impl->rpos >= impl->rlen)
+    return 0;
 
   size_t remaining = impl->rlen - impl->rpos;
   size_t n = remaining < cap ? remaining : cap;
-  if (impl->read_chunk > 0 && n > impl->read_chunk) n = impl->read_chunk;
+  if (impl->read_chunk > 0 && n > impl->read_chunk)
+    n = impl->read_chunk;
 
   memcpy(buf, impl->rbuf + impl->rpos, n);
   impl->rpos += n;
@@ -49,13 +55,17 @@ static ssize_t partial_read_some(ByteChannel *ch, void *buf, size_t cap) {
 }
 
 // Accept at most 'ch'->write_chunk bytes to simulate partial writes.
-static ssize_t partial_write_some(ByteChannel *ch, const void *buf, size_t len) {
+static ssize_t partial_write_some(ByteChannel *ch, const void *buf,
+                                  size_t len) {
   PartialByteChannelImpl *impl = (PartialByteChannelImpl *)ch->impl;
-  if (!impl || !buf) return -1;
-  if (len == 0) return 0;
+  if (!impl || !buf)
+    return -1;
+  if (len == 0)
+    return 0;
 
   size_t n = len;
-  if (impl->write_chunk > 0 && n > impl->write_chunk) n = impl->write_chunk;
+  if (impl->write_chunk > 0 && n > impl->write_chunk)
+    n = impl->write_chunk;
   partial_ensure_cap(impl, n);
   memcpy(impl->wbuf + impl->wlen, buf, n);
   impl->wlen += n;
@@ -65,14 +75,16 @@ static ssize_t partial_write_some(ByteChannel *ch, const void *buf, size_t len) 
 
 // Accepts at most 'ch'->write_chunk bytes and call writev. Simulates partial
 // writev
-static ssize_t partial_writev_some(ByteChannel *ch,
-                                   const ByteChannelVec *vecs, int vcnt) {
+static ssize_t partial_writev_some(ByteChannel *ch, const ByteChannelVec *vecs,
+                                   int vcnt) {
   PartialByteChannelImpl *impl = (PartialByteChannelImpl *)ch->impl;
-  if (!impl || !vecs || vcnt <= 0) return -1;
+  if (!impl || !vecs || vcnt <= 0)
+    return -1;
 
   size_t total = 0;
   for (int i = 0; i < vcnt; i++) {
-    if (!vecs[i].base && vecs[i].len != 0) return -1;
+    if (!vecs[i].base && vecs[i].len != 0)
+      return -1;
     total += vecs[i].len;
   }
   if (total == 0) {
@@ -81,14 +93,18 @@ static ssize_t partial_writev_some(ByteChannel *ch,
   }
 
   size_t limit = total;
-  if (impl->write_chunk > 0 && limit > impl->write_chunk) limit = impl->write_chunk;
+  if (impl->write_chunk > 0 && limit > impl->write_chunk)
+    limit = impl->write_chunk;
   partial_ensure_cap(impl, limit);
   size_t remaining = limit;
   for (int i = 0; i < vcnt; i++) {
-    if (remaining == 0) break;
-    if (vecs[i].len == 0) continue;
+    if (remaining == 0)
+      break;
+    if (vecs[i].len == 0)
+      continue;
     size_t n = vecs[i].len;
-    if (n > remaining) n = remaining;
+    if (n > remaining)
+      n = remaining;
     memcpy(impl->wbuf + impl->wlen, vecs[i].base, n);
     impl->wlen += n;
     remaining -= n;
@@ -115,7 +131,8 @@ static BytePollable partial_get_pollable(const ByteChannel *ch) {
 }
 
 static void partial_destroy(ByteChannel *ch) {
-  if (!ch) return;
+  if (!ch)
+    return;
   PartialByteChannelImpl *impl = (PartialByteChannelImpl *)ch->impl;
   if (impl) {
     free(impl->wbuf);
@@ -125,28 +142,30 @@ static void partial_destroy(ByteChannel *ch) {
 }
 
 static const ByteChannelVTable PARTIAL_VT = {
-  .read_some = partial_read_some,
-  .write_some = partial_write_some,
-  .writev_some = partial_writev_some,
-  .flush = partial_flush,
-  .shutdown_write = partial_shutdown_write,
-  .get_pollable = partial_get_pollable,
-  .destroy = partial_destroy
-};
+    .read_some = partial_read_some,
+    .write_some = partial_write_some,
+    .writev_some = partial_writev_some,
+    .flush = partial_flush,
+    .shutdown_write = partial_shutdown_write,
+    .get_pollable = partial_get_pollable,
+    .destroy = partial_destroy};
 
 // Create a partial channel; caller can inspect impl for call counts and output.
-static ByteChannel *partial_bytechannel_create(const unsigned char *rbuf, size_t rlen,
-                                               size_t read_chunk, size_t write_chunk,
-                                               PartialByteChannelImpl **out_impl) {
+static ByteChannel *
+partial_bytechannel_create(const unsigned char *rbuf, size_t rlen,
+                           size_t read_chunk, size_t write_chunk,
+                           PartialByteChannelImpl **out_impl) {
   ByteChannel *ch = (ByteChannel *)xmalloc(sizeof(ByteChannel));
-  PartialByteChannelImpl *impl = (PartialByteChannelImpl *)xcalloc(1, sizeof(*impl));
+  PartialByteChannelImpl *impl =
+      (PartialByteChannelImpl *)xcalloc(1, sizeof(*impl));
   impl->rbuf = rbuf;
   impl->rlen = rlen;
   impl->read_chunk = read_chunk;
   impl->write_chunk = write_chunk;
   ch->vt = &PARTIAL_VT;
   ch->impl = impl;
-  if (out_impl) *out_impl = impl;
+  if (out_impl)
+    *out_impl = impl;
   return ch;
 }
 
@@ -186,7 +205,8 @@ static void test_bufch_peek_find_and_read(void) {
 static void test_bufch_partial_reads(void) {
   const char *msg = "hello world";
   PartialByteChannelImpl *impl = NULL;
-  ByteChannel *ch = partial_bytechannel_create((const unsigned char *)msg, 11, 2, 0, &impl);
+  ByteChannel *ch =
+      partial_bytechannel_create((const unsigned char *)msg, 11, 2, 0, &impl);
   BufChannel *bc = bufch_create(ch);
   ASSERT_TRUE(bc != NULL);
   ASSERT_TRUE(impl != NULL);

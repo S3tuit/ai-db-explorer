@@ -16,12 +16,11 @@ char *dupn_or_null_pretty(const char *s, size_t cap);
  * result. */
 char *dup_or_null(const char *s);
 
-
 /* ------------------------- small growable buffer ------------------------- */
 typedef struct StrBuf {
-    char  *data;
-    size_t len;
-    size_t cap;
+  char *data;
+  size_t len;
+  size_t cap;
 } StrBuf;
 
 // TODO: make this configurable via compile-time flags.

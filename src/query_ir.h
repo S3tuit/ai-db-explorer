@@ -20,7 +20,6 @@
 // Status / diagnostics
 // ----------------------------
 
-
 // set by QueryValidator
 typedef enum QirStatus {
   QIR_OK = 0,
@@ -28,17 +27,14 @@ typedef enum QirStatus {
   QIR_UNSUPPORTED
 } QirStatus;
 
-
 typedef enum QirStmtKind {
-  QIR_STMT_SELECT = 1   // only SELECT supported for now
+  QIR_STMT_SELECT = 1 // only SELECT supported for now
 } QirStmtKind;
 
 // Used by validators/touch-extractors to distinguish top-level query scope
-// from any nested query (CTE body, subquery in FROM, scalar subquery, EXISTS, etc.).
-typedef enum QirScope {
-  QIR_SCOPE_MAIN = 0,
-  QIR_SCOPE_NESTED = 1
-} QirScope;
+// from any nested query (CTE body, subquery in FROM, scalar subquery, EXISTS,
+// etc.).
+typedef enum QirScope { QIR_SCOPE_MAIN = 0, QIR_SCOPE_NESTED = 1 } QirScope;
 
 // Identifiers are stored as normalized strings by the backend parser.
 // For v1, the backend must lower-case identifiers so validator matching is
@@ -75,31 +71,32 @@ typedef struct QirCaseWhen QirCaseWhen;
 typedef struct QirCaseExpr QirCaseExpr;
 
 typedef enum QirExprKind {
-  QIR_EXPR_COLREF = 1,     // alias.column
-  QIR_EXPR_PARAM,          // $n
-  QIR_EXPR_LITERAL,        // backend may produce; validator may reject depending on policy
-  QIR_EXPR_FUNCALL,        // f(args...)
-  QIR_EXPR_CAST,           // expr::type
-                           
-  QIR_EXPR_EQ,             // lhs = rhs
-  QIR_EXPR_NE,             // lhs != rhs
+  QIR_EXPR_COLREF = 1, // alias.column
+  QIR_EXPR_PARAM,      // $n
+  QIR_EXPR_LITERAL,    // backend may produce; validator may reject depending on
+                       // policy
+  QIR_EXPR_FUNCALL,    // f(args...)
+  QIR_EXPR_CAST,       // expr::type
+
+  QIR_EXPR_EQ, // lhs = rhs
+  QIR_EXPR_NE, // lhs != rhs
   QIR_EXPR_GT,
   QIR_EXPR_GE,
   QIR_EXPR_LT,
   QIR_EXPR_LE,
-  QIR_EXPR_LIKE,           // lhs LIKE rhs
-  QIR_EXPR_NOT_LIKE,       // lhs NOT LIKE rhs
+  QIR_EXPR_LIKE,     // lhs LIKE rhs
+  QIR_EXPR_NOT_LIKE, // lhs NOT LIKE rhs
 
-  QIR_EXPR_IN,             // lhs IN (item, item, ...)
+  QIR_EXPR_IN, // lhs IN (item, item, ...)
 
-  QIR_EXPR_AND,            // lhs AND rhs
+  QIR_EXPR_AND, // lhs AND rhs
   QIR_EXPR_OR,
   QIR_EXPR_NOT,
 
-  QIR_EXPR_CASE,           // CASE [arg] WHEN cond THEN expr ... [ELSE expr] END
-  QIR_EXPR_WINDOWFUNC,     // func(...) OVER (...)
-  QIR_EXPR_SUBQUERY,       // scalar subquery, EXISTS, IN (SELECT...), etc.
-  QIR_EXPR_UNSUPPORTED     // anything not modeled safely
+  QIR_EXPR_CASE,       // CASE [arg] WHEN cond THEN expr ... [ELSE expr] END
+  QIR_EXPR_WINDOWFUNC, // func(...) OVER (...)
+  QIR_EXPR_SUBQUERY,   // scalar subquery, EXISTS, IN (SELECT...), etc.
+  QIR_EXPR_UNSUPPORTED // anything not modeled safely
 } QirExprKind;
 
 typedef enum QirLiteralKind {
@@ -145,7 +142,7 @@ typedef struct QirWindowFunc {
 // representing a QirQuery
 typedef struct QirInExpr {
   QirExpr *lhs;
-  QirExpr **items;    // items inside IN(...)
+  QirExpr **items; // items inside IN(...)
   uint32_t nitems;
 } QirInExpr;
 
@@ -157,10 +154,10 @@ typedef struct QirCaseWhen {
 
 // CASE expression with optional argument and ELSE clause.
 typedef struct QirCaseExpr {
-  QirExpr *arg;           // NULL for "CASE WHEN ..." form
-  QirCaseWhen **whens;    // ordered WHEN/THEN clauses
+  QirExpr *arg;        // NULL for "CASE WHEN ..." form
+  QirCaseWhen **whens; // ordered WHEN/THEN clauses
   uint32_t nwhens;
-  QirExpr *else_expr;     // NULL if ELSE is absent
+  QirExpr *else_expr; // NULL if ELSE is absent
 } QirCaseExpr;
 
 // Example: 'l' = 'r'
@@ -175,19 +172,19 @@ typedef struct QirBinExpr {
 struct QirExpr {
   QirExprKind kind;
   union {
-    QirColRef colref;      // QIR_EXPR_COLREF
-    int param_index;       // QIR_EXPR_PARAM (n in $n), >=1
-    QirLiteral lit;        // QIR_EXPR_LITERAL
-    QirFuncCall funcall;   // QIR_EXPR_FUNCALL
+    QirColRef colref;    // QIR_EXPR_COLREF
+    int param_index;     // QIR_EXPR_PARAM (n in $n), >=1
+    QirLiteral lit;      // QIR_EXPR_LITERAL
+    QirFuncCall funcall; // QIR_EXPR_FUNCALL
     struct {
       QirExpr *expr;
       QirTypeRef type;
-    } cast;                // QIR_EXPR_CAST
-    QirBinExpr bin;        // EQ, AND
-    QirInExpr in_;         // IN
-    QirCaseExpr case_;     // CASE
-    QirWindowFunc window;  // WINDOWFUNC
-    QirQuery *subquery;    // QIR_EXPR_SUBQUERY
+    } cast;               // QIR_EXPR_CAST
+    QirBinExpr bin;       // EQ, AND
+    QirInExpr in_;        // IN
+    QirCaseExpr case_;    // CASE
+    QirWindowFunc window; // WINDOWFUNC
+    QirQuery *subquery;   // QIR_EXPR_SUBQUERY
   } u;
 };
 
@@ -196,17 +193,18 @@ struct QirExpr {
 // ----------------------------
 
 typedef enum QirFromKind {
-  QIR_FROM_BASE_REL = 1,   // table/view reference
-  QIR_FROM_SUBQUERY,       // derived table: FROM (SELECT ...) AS alias
-  QIR_FROM_CTE_REF,        // FROM cte_name AS alias
-  QIR_FROM_VALUES,         // FROM (VALUES ...) AS alias
+  QIR_FROM_BASE_REL = 1, // table/view reference
+  QIR_FROM_SUBQUERY,     // derived table: FROM (SELECT ...) AS alias
+  QIR_FROM_CTE_REF,      // FROM cte_name AS alias
+  QIR_FROM_VALUES,       // FROM (VALUES ...) AS alias
   QIR_FROM_UNSUPPORTED
 } QirFromKind;
 
 typedef struct QirFromItem {
   QirFromKind kind;
 
-  // Policy: every range item must have an alias; references must use that alias.
+  // Policy: every range item must have an alias; references must use that
+  // alias.
   QirIdent alias;
 
   union {
@@ -242,7 +240,7 @@ typedef struct QirJoin {
 
 // Each select item is an expression with a mandatory output alias.
 typedef struct QirSelectItem {
-  QirExpr *value;    // expression (arena-owned)
+  QirExpr *value;     // expression (arena-owned)
   QirIdent out_alias; // mandatory alias
 } QirSelectItem;
 
@@ -266,7 +264,7 @@ struct QirQuery {
   QirStmtKind kind;
 
   // Conservative feature flags (backend sets these).
-  bool has_star;          // SELECT * or table.*
+  bool has_star; // SELECT * or table.*
   bool has_distinct;
   bool has_offset;
 
@@ -308,8 +306,8 @@ struct QirQuery {
 
 // Handle that owns the arena backing a QueryIR.
 typedef struct QirQueryHandle {
-  PlArena arena;   // owns all allocations reachable from q
-  QirQuery *q;     // pointer inside arena
+  PlArena arena; // owns all allocations reachable from q
+  QirQuery *q;   // pointer inside arena
 } QirQueryHandle;
 
 // ----------------------------
@@ -317,15 +315,16 @@ typedef struct QirQueryHandle {
 // ----------------------------
 
 typedef enum QirTouchKind {
-  QIR_TOUCH_BASE = 1,     // qualifier resolves to BASE_REL alias
-  QIR_TOUCH_DERIVED,      // qualifier resolves to SUBQUERY or CTE_REF alias
-  QIR_TOUCH_UNKNOWN       // qualifier didn't resolve (policy violation) or unsupported
+  QIR_TOUCH_BASE = 1, // qualifier resolves to BASE_REL alias
+  QIR_TOUCH_DERIVED,  // qualifier resolves to SUBQUERY or CTE_REF alias
+  QIR_TOUCH_UNKNOWN   // qualifier didn't resolve (policy violation) or
+                      // unsupported
 } QirTouchKind;
 
 typedef struct QirTouch {
-  QirScope scope;         // where the qualifier.column is being used 
-  QirTouchKind kind;      // what the qualifier is
-  QirColRef col;          // qualifier.column as written
+  QirScope scope;               // where the qualifier.column is being used
+  QirTouchKind kind;            // what the qualifier is
+  QirColRef col;                // qualifier.column as written
   const QirQuery *source_query; // query block that owns this touch
 } QirTouch;
 
@@ -335,13 +334,13 @@ typedef struct QirTouch {
 // - join ON expressions (if joins allowed globally)
 // - recursively into nested queries (scope=NESTED)
 typedef struct QirTouchReport {
-  PlArena arena;          // owns touch nodes and arrays
+  PlArena arena; // owns touch nodes and arrays
   QirTouch **touches;
   uint32_t ntouches;
 
   // Convenience flags
-  bool has_unknown_touches;   // true if any touch.kind == UNKNOWN
-  bool has_unsupported;       // true if unsupported exprs encountered
+  bool has_unknown_touches; // true if any touch.kind == UNKNOWN
+  bool has_unsupported;     // true if unsupported exprs encountered
 } QirTouchReport;
 
 // ----------------------------
@@ -394,7 +393,8 @@ const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out);
  * Ownership: copies reason into arena when provided.
  * Side effects: mutates q->status and q->status_reason.
  * Error semantics: no return value; on invalid input it is a no-op. */
-void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status, const char *reason);
+void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status,
+                    const char *reason);
 
 /* Resolves ORDER BY alias references to SELECT item expressions.
  * Ownership: returned pointer is owned by the QueryIR arena.

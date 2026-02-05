@@ -155,7 +155,7 @@ static int jsmn_parse_primitive(jsmn_parser *parser, const char *js,
     case '}':
       goto found;
     default:
-                   /* to quiet a warning from gcc*/
+      /* to quiet a warning from gcc*/
       break;
     }
     if (js[parser->pos] < 32 || js[parser->pos] >= 127) {
@@ -196,10 +196,10 @@ static int jsmn_parse_string(jsmn_parser *parser, const char *js,
   jsmntok_t *token;
 
   int start = parser->pos;
-  
+
   /* Skip starting quote */
   parser->pos++;
-  
+
   for (; parser->pos < len && js[parser->pos] != '\0'; parser->pos++) {
     char c = js[parser->pos];
 

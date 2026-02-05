@@ -7,16 +7,16 @@
 #include "bufio.h"
 
 typedef struct McpServer {
-    BufChannel *in_bc;   // owned, used to read from user
-    BufChannel *brok_bc; // owned, used to communicate with the Broker
-    BufChannel *out_bc;  // owned, used to write to user
-    uint32_t next_id;    // monotonically increasing request id
-    char last_err[256];  // last fatal error (best-effort)
+  BufChannel *in_bc;   // owned, used to read from user
+  BufChannel *brok_bc; // owned, used to communicate with the Broker
+  BufChannel *out_bc;  // owned, used to write to user
+  uint32_t next_id;    // monotonically increasing request id
+  char last_err[256];  // last fatal error (best-effort)
 } McpServer;
 
 /* Initializes the McpServer to read from 'in', write to 'out', and talk to the
- * broker at 'sock_path'. The McpServer doesn't take ownership of 'in' and 'out',
- * so it won't close them. Returns OK/ERR. */
+ * broker at 'sock_path'. The McpServer doesn't take ownership of 'in' and
+ * 'out', so it won't close them. Returns OK/ERR. */
 int mcpser_init(McpServer *s, FILE *in, FILE *out, const char *sock_path);
 
 /* Runs the main loop until EOF. Returns OK on clean EOF, ERR on fatal error.

@@ -2,9 +2,9 @@
 #include <string.h>
 #include <time.h>
 
-#include "test.h"
 #include "conn_manager.h"
 #include "safety_policy.h"
+#include "test.h"
 #include "utils.h"
 
 /* ------------------------------- fakes --------------------------------- */
@@ -22,7 +22,8 @@ static int fake_connect(DbBackend *db, const ConnProfile *profile,
   (void)profile;
   (void)policy;
   (void)pwd;
-  if (!db || !db->impl) return ERR;
+  if (!db || !db->impl)
+    return ERR;
   FakeDbImpl *impl = (FakeDbImpl *)db->impl;
   impl->connected = 1;
   g_connect_calls++;
@@ -30,20 +31,23 @@ static int fake_connect(DbBackend *db, const ConnProfile *profile,
 }
 
 static int fake_is_connected(DbBackend *db) {
-  if (!db || !db->impl) return ERR;
+  if (!db || !db->impl)
+    return ERR;
   FakeDbImpl *impl = (FakeDbImpl *)db->impl;
   return impl->connected ? YES : NO;
 }
 
 static void fake_disconnect(DbBackend *db) {
-  if (!db || !db->impl) return;
+  if (!db || !db->impl)
+    return;
   FakeDbImpl *impl = (FakeDbImpl *)db->impl;
   impl->connected = 0;
   g_disconnect_calls++;
 }
 
 static void fake_destroy(DbBackend *db) {
-  if (!db) return;
+  if (!db)
+    return;
   g_destroy_calls++;
   free(db->impl);
   free(db);
@@ -51,26 +55,26 @@ static void fake_destroy(DbBackend *db) {
 
 static int fake_exec(DbBackend *db, const McpId *request_id, const char *sql,
                      QueryResult **out_qr) {
-    (void)db;
-    (void)request_id;
-    (void)sql;
-    (void)out_qr;
-    return ERR;
+  (void)db;
+  (void)request_id;
+  (void)sql;
+  (void)out_qr;
+  return ERR;
 }
 
 static const DbSafeFuncList *fake_safe_functions(DbBackend *db) {
-    (void)db;
-    static const DbSafeFuncList list = {0};
-    return &list;
+  (void)db;
+  static const DbSafeFuncList list = {0};
+  return &list;
 }
 
 static const DbBackendVTable FAKE_VT = {
-  .connect = fake_connect,
-  .is_connected = fake_is_connected,
-  .disconnect = fake_disconnect,
-  .destroy = fake_destroy,
-  .exec = fake_exec,
-  .safe_functions = fake_safe_functions,
+    .connect = fake_connect,
+    .is_connected = fake_is_connected,
+    .disconnect = fake_disconnect,
+    .destroy = fake_destroy,
+    .exec = fake_exec,
+    .safe_functions = fake_safe_functions,
 };
 
 static DbBackend *fake_backend_create(DbKind kind) {
@@ -94,13 +98,11 @@ static int fake_ss_get(SecretStore *store, const char *ref, StrBuf *out) {
   return sb_append_bytes(out, pwd, strlen(pwd) + 1);
 }
 
-static void fake_ss_destroy(SecretStore *store) {
-  free(store);
-}
+static void fake_ss_destroy(SecretStore *store) { free(store); }
 
 static const SecretStoreVTable FAKE_SS_VT = {
-  .get = fake_ss_get,
-  .destroy = fake_ss_destroy,
+    .get = fake_ss_get,
+    .destroy = fake_ss_destroy,
 };
 
 static SecretStore *fake_secret_store_create(void) {
@@ -141,7 +143,8 @@ static void reset_counters(void) {
 
 /* ------------------------------- tests --------------------------------- */
 
-/* Verifies lazy connection, reuse, and reaping behavior using a fake backend. */
+/* Verifies lazy connection, reuse, and reaping behavior using a fake backend.
+ */
 static void test_conn_manager_lifecycle(void) {
   reset_counters();
 
