@@ -153,11 +153,18 @@ static void test_conn_manager_lifecycle(void) {
   ConnManager *m = connm_create_with_factory(cat, ss, fake_backend_create);
   ASSERT_TRUE(m != NULL);
 
-  DbBackend *b1 = connm_get_backend(m, "db1");
+  ConnView c1 = {0};
+  int rc = connm_get_connection(m, "db1", &c1);
+  ASSERT_TRUE(rc == YES);
+  DbBackend *b1 = c1.db;
   ASSERT_TRUE(b1 != NULL);
+  ASSERT_TRUE(c1.profile != NULL);
   ASSERT_TRUE(g_connect_calls == 1);
 
-  DbBackend *b2 = connm_get_backend(m, "db1");
+  ConnView c2 = {0};
+  rc = connm_get_connection(m, "db1", &c2);
+  ASSERT_TRUE(rc == YES);
+  DbBackend *b2 = c2.db;
   ASSERT_TRUE(b2 != NULL);
   ASSERT_TRUE(b1 == b2);
   ASSERT_TRUE(g_connect_calls == 1);
@@ -169,7 +176,10 @@ static void test_conn_manager_lifecycle(void) {
   ts.tv_nsec = 2 * 1000 * 1000; // 2ms
   nanosleep(&ts, NULL);
 
-  DbBackend *b3 = connm_get_backend(m, "db1");
+  ConnView c3 = {0};
+  rc = connm_get_connection(m, "db1", &c3);
+  ASSERT_TRUE(rc == YES);
+  DbBackend *b3 = c3.db;
   ASSERT_TRUE(b3 == b1);
   ASSERT_TRUE(g_disconnect_calls == 1);
   ASSERT_TRUE(g_connect_calls == 2);

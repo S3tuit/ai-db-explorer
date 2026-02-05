@@ -60,6 +60,7 @@ typedef struct {
   // Optional: extra options, TLS mode, parameters, etc.
   const char *options; // may be NULL
 
+  SafetyPolicy safe_policy;
   // Column sensitivity rules for this connection (may be empty).
   ColumnPolicy col_policy;
 
@@ -67,11 +68,12 @@ typedef struct {
   SafeFunctionPolicy safe_funcs;
 } ConnProfile;
 
-// TODO: use bin search
 typedef struct ConnCatalog {
   ConnProfile *profiles; // owned array
   size_t n_profiles;
 
+  // Global/default policy loaded from config. Copied into each profile's
+  // safe_policy during parsing in v1.
   SafetyPolicy policy;
 } ConnCatalog;
 
@@ -98,18 +100,6 @@ size_t catalog_count(const ConnCatalog *cat);
  * written.
  */
 size_t catalog_list(ConnCatalog *cat, ConnProfile **out, size_t cap_count);
-
-/**
- * Get the global SafetyPolicy. Caller must NOT free the returned policy. May
- * return NULL.
- */
-SafetyPolicy *catalog_get_policy(ConnCatalog *cat);
-
-/**
- * Lookup and return a profile by connection_name. Caller must NOT free the
- * returned value. May return NULL.
- */
-ConnProfile *catalog_get_by_name(ConnCatalog *cat, const char *connection_name);
 
 /**
  * Returns YES if (schema?, table, column) is marked sensitive by the profile.

@@ -20,6 +20,7 @@ typedef struct {
 static const SecretPair DUMMY_SECRETS[] = {
     {"MyPostgres", "my_secret"},
     {"AnotherPostgres", "another_secret"},
+    {"SuperPostgres", "postgres"},
 };
 
 /* Writes a dummy secret for a known reference.

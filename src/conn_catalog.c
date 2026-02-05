@@ -519,11 +519,13 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out) {
     size_t j = i;
     size_t scount = 0;
     int is_global = 0;
+    const char *last_schema = NULL;
     while (j < tmp_len && strcmp(tmp[j].name, name) == 0) {
       if (!tmp[j].schema) {
         is_global = 1;
-      } else {
+      } else if (!last_schema || strcmp(tmp[j].schema, last_schema) != 0) {
         scount++;
+        last_schema = tmp[j].schema;
       }
       j++;
     }
@@ -543,14 +545,18 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out) {
       if (!r->schemas)
         goto error;
       size_t k = 0;
+      const char *prev = NULL;
       for (size_t t = i; t < j; t++) {
         if (!tmp[t].schema)
+          continue;
+        if (prev && strcmp(prev, tmp[t].schema) == 0)
           continue;
         r->schemas[k++] =
             (const char *)pl_arena_add(&out->safe_funcs.arena, tmp[t].schema,
                                        (uint32_t)strlen(tmp[t].schema));
         if (!r->schemas[k - 1])
           goto error;
+        prev = tmp[t].schema;
       }
     }
 
@@ -645,8 +651,9 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out) {
 }
 
 /* Parses one database entry object into 'out'. */
-static int parse_db_entry(const JsonGetter *jg, ConnProfile *out) {
-  if (!jg || !out)
+static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
+                          ConnProfile *out) {
+  if (!cat || !jg || !out)
     return ERR;
 
   const char *const keys[] = {"type",    "connectionName", "host",
@@ -698,6 +705,11 @@ static int parse_db_entry(const JsonGetter *jg, ConnProfile *out) {
   out->db_name = db_name;
   out->user = user;
   out->options = options;
+
+  // TODO: Right now, we allow just for one global SafetyPolicy, allow a
+  // SafetyPolicy per connection that, if present, overwrites the global
+  // SafetyPolicy just for that connection
+  out->safe_policy = cat->policy;
   if (parse_column_policy(jg, out) != OK)
     goto error;
   if (parse_safe_functions(jg, out) != OK)
@@ -711,6 +723,11 @@ error:
   free(user);
   free(db_name);
   free(options);
+  out->connection_name = NULL;
+  out->host = NULL;
+  out->db_name = NULL;
+  out->user = NULL;
+  out->options = NULL;
   pl_arena_clean(&out->col_policy.arena);
   out->col_policy.rules = NULL;
   out->col_policy.n_rules = 0;
@@ -732,13 +749,11 @@ static void profile_free(ConnProfile *p) {
   pl_arena_clean(&p->safe_funcs.arena);
 }
 
-/* Parses the "databases" array and allocates ConnProfile entries. */
-static int parse_databases(const JsonGetter *jg, ConnProfile **out_profiles,
-                           size_t *out_count) {
-  if (!jg || !out_profiles || !out_count)
+/* Parses the "databases" array and allocates ConnProfile entries inside 'cat'.
+ */
+static int parse_databases(const JsonGetter *jg, ConnCatalog *cat) {
+  if (!jg || !cat)
     return ERR;
-  *out_profiles = NULL;
-  *out_count = 0;
 
   JsonArrIter it;
   int rc = jsget_array_objects_begin(jg, "databases", &it);
@@ -764,7 +779,7 @@ static int parse_databases(const JsonGetter *jg, ConnProfile **out_profiles,
     if (rc != YES)
       goto error;
 
-    if (parse_db_entry(&entry, &profiles[idx]) != OK)
+    if (parse_db_entry(cat, &entry, &profiles[idx]) != OK)
       goto error;
 
     // connectionName must be unique
@@ -778,14 +793,15 @@ static int parse_databases(const JsonGetter *jg, ConnProfile **out_profiles,
     idx++;
   }
 
-  *out_profiles = profiles;
-  *out_count = idx;
+  cat->profiles = profiles;
+  cat->n_profiles = idx;
   return OK;
 
 error:
   if (profiles) {
-    // only entries [0..idx) are guaranteed to be initialized
-    for (size_t i = 0; i < idx; i++) {
+    // parse_db_entry can partially initialize profiles[idx] before failing.
+    // Since profiles are zero-initialized, it's safe to clean all entries.
+    for (size_t i = 0; i < n; i++) {
       profile_free(&profiles[i]);
     }
     free(profiles);
@@ -882,7 +898,7 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
     goto error;
   }
 
-  if (parse_databases(&jg, &cat->profiles, &cat->n_profiles) != OK) {
+  if (parse_databases(&jg, cat) != OK) {
     err_msg = "ConnCatalog: invalid \"databases\".";
     goto error;
   }
@@ -928,26 +944,6 @@ size_t catalog_list(ConnCatalog *cat, ConnProfile **out, size_t cap_count) {
     out[i] = &cat->profiles[i];
   }
   return n;
-}
-
-SafetyPolicy *catalog_get_policy(ConnCatalog *cat) {
-  if (!cat)
-    return NULL;
-  return &cat->policy;
-}
-
-ConnProfile *catalog_get_by_name(ConnCatalog *cat,
-                                 const char *connection_name) {
-  if (!cat || !connection_name)
-    return NULL;
-  for (size_t i = 0; i < cat->n_profiles; i++) {
-    ConnProfile *p = &cat->profiles[i];
-    if (p->connection_name &&
-        strcmp(p->connection_name, connection_name) == 0) {
-      return p;
-    }
-  }
-  return NULL;
 }
 
 /* Comparator for ColumnRule array sorting and lookup. */

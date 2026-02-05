@@ -10,13 +10,20 @@
 
 typedef struct ConnManager ConnManager;
 
+/* Borrowed view over a ready-to-use connection managed by ConnManager.
+ * - `db` and `profile` are owned by ConnManager.
+ * - Both pointers are valid only while ConnManager is alive. */
+typedef struct ConnView {
+  DbBackend *db;
+  const ConnProfile *profile;
+} ConnView;
+
 /**
  * Creates and returns a ConnManager.
  *
  * Ownership:
  * - `cat` is owned by ConnManager after creation.
  * - `secrets` is owned by ConnManager after creation.
- * - the policy is borrowed from the catalog and must outlive ConnManager.
  */
 ConnManager *connm_create(ConnCatalog *cat, SecretStore *secrets);
 
@@ -41,16 +48,22 @@ ConnManager *connm_create_with_factory(ConnCatalog *cat, SecretStore *secrets,
 void connm_destroy(ConnManager *m);
 
 /**
- * Get a ready-to-use backend for `connection_name`, or NULL if there is no
- * backend for that 'connection_name' or if error.
+ * Get a ready-to-use connection view for `connection_name`.
  * - Performs lazy connect on first use.
  * - May reconnect if the previous connection is broken.
  * - May reap idle connections before acquiring.
  *
- * The returned DbBackend* is owned by ConnManager and remains valid until:
- * - connm_get_backend or connm_destroy is called.
+ * Ownership:
+ * - `out->db` and `out->profile` are borrowed from ConnManager.
+ * - caller must not free or mutate them.
+ *
+ * Error semantics:
+ * - YES: found and connected, `out` populated with valid pointers.
+ * - NO:  connection_name not found.
+ * - ERR: internal error (e.g. cannot connect).
  */
-DbBackend *connm_get_backend(ConnManager *m, const char *connection_name);
+int connm_get_connection(ConnManager *m, const char *connection_name,
+                         ConnView *out);
 
 /**
  * Marks a connection as "used now" (e.g., call this after exec completes,

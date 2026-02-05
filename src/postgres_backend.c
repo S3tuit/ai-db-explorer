@@ -1456,11 +1456,8 @@ static void pg_resolve_cte_ref(const QirQuery *q, QirFromItem *fi) {
 static void pg_resolve_cte_refs_in_query(const QirQuery *q) {
   if (!q)
     return;
-  for (uint32_t i = 0; i < q->nfrom; i++) {
-    QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
-    if (fi)
-      pg_resolve_cte_ref(q, fi);
-  }
+  if (q->from_root)
+    pg_resolve_cte_ref(q, q->from_root);
   for (uint32_t i = 0; i < q->njoins; i++) {
     QirJoin *j = q->joins ? q->joins[i] : NULL;
     if (j && j->rhs)
@@ -1768,8 +1765,12 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
       qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported FROM clause");
   }
 
-  q->from_items = (QirFromItem **)ptrvec_flatten(&froms, a);
-  q->nfrom = froms.len;
+  if (froms.len > 1) {
+    qir_set_status(q, a, QIR_UNSUPPORTED,
+                   "multiple FROM items are not supported");
+  } else if (froms.len == 1) {
+    q->from_root = (QirFromItem *)froms.items[0];
+  }
   ptrvec_clean(&froms);
 
   q->joins = (QirJoin **)ptrvec_flatten(&joins, a);
@@ -2164,6 +2165,65 @@ static int pg_exec_single_result(PgImpl *p, const char *sql,
   return OK;
 }
 
+/* Verifies that the connected role is safe for read-only usage. This is a
+ * one-time guardrail executed at connect time. Returns:
+ * - OK: role passed the check.
+ * - ERR: query failed, malformed output, or role deemed unsafe.
+ *
+ * Side effects:
+ * - Executes one SQL statement on the active connection.
+ * - Stores human-readable error into PgImpl on failure.
+ */
+static int pg_check_safe_read_only_role(PgImpl *p) {
+  if (!p || !p->conn)
+    return ERR;
+
+  static const char *kSql = "SELECT "
+                            "  NOT r.rolsuper "
+                            "  AND NOT r.rolcreatedb "
+                            "  AND NOT r.rolcreaterole "
+                            "  AND NOT r.rolreplication "
+                            "  AND NOT r.rolbypassrls "
+                            "  AND NOT EXISTS ( "
+                            "    SELECT 1 "
+                            "    FROM pg_catalog.pg_class c "
+                            "    WHERE c.relkind IN ('r','p') "
+                            "      AND ( "
+                            "        has_table_privilege(c.oid, 'INSERT') "
+                            "        OR has_table_privilege(c.oid, 'UPDATE') "
+                            "        OR has_table_privilege(c.oid, 'DELETE') "
+                            "        OR has_table_privilege(c.oid, 'TRUNCATE') "
+                            "      ) "
+                            "  ) AS is_safe_read_only_role "
+                            "FROM pg_catalog.pg_roles r "
+                            "WHERE r.rolname = current_user";
+
+  PGresult *res = NULL;
+  if (pg_exec_single_result(p, kSql, &res) != OK)
+    return ERR;
+
+  int ok = ERR;
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    pg_set_err_pg(p, p->conn, "read-only role check failed");
+    goto done;
+  }
+  if (PQntuples(res) != 1 || PQnfields(res) < 1 || PQgetisnull(res, 0, 0)) {
+    pg_set_err(p, "read-only role check returned unexpected result");
+    goto done;
+  }
+
+  const char *v = PQgetvalue(res, 0, 0);
+  if (!v || (strcmp(v, "t") != 0 && strcmp(v, "true") != 0)) {
+    pg_set_err(p, "connected role is not safe for read-only mode");
+    goto done;
+  }
+
+  ok = OK;
+done:
+  PQclear(res);
+  return ok;
+}
+
 /* --------------------------- DbBackend vtable --------------------------- */
 
 static int pg_connect(DbBackend *db, const ConnProfile *profile,
@@ -2203,6 +2263,16 @@ static int pg_connect(DbBackend *db, const ConnProfile *profile,
     PQfinish(p->conn);
     p->conn = NULL;
     return ERR;
+  }
+
+  /* Enforce a one-time role audit at connection time and fail closed on
+   * mismatch. */
+  if (policy->read_only) {
+    if (pg_check_safe_read_only_role(p) != OK) {
+      PQfinish(p->conn);
+      p->conn = NULL;
+      return ERR;
+    }
   }
 
   p->policy = *policy;
@@ -2309,7 +2379,6 @@ static int pg_exec(DbBackend *db, const McpId *request_id, const char *sql,
 
   // Right now, the agent can't send commands like set, delete...
   // so the status should be PGRES_TUPLES_OK.
-  // TODO: allow agent to run commands if permitted by user
   if (st == PGRES_TUPLES_OK) {
     int ncols = PQnfields(res);
     int ntuples = PQntuples(res);

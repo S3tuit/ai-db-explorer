@@ -9,6 +9,11 @@ CREATE TABLE gym_exercise (
   champion_weight INT  NOT NULL CHECK (champion_weight > 0)
 );
 
+CREATE TABLE gym_bros (
+  nickname  TEXT PRIMARY KEY,
+  real_name TEXT
+);
+
 -- =========================
 -- Seed data
 -- =========================
@@ -24,4 +29,23 @@ INSERT INTO gym_exercise (name, noob_weight, average_weight, pro_weight, champio
   ('Leg Press',     100, 200, 350, 500),
   ('Bicep Curl',     15,  30,  50,  80),
   ('Tricep Extension',20,  40,  70, 100);
+
+INSERT INTO gym_bros (nickname, real_name) VALUES
+  ('Beard man',     'Christian'),
+  ('Black Panther', 'Angelo'),
+  ('The beauty',    'Luca');
+
+CREATE FUNCTION get_weight(a integer, b integer)
+RETURNS integer AS $$
+BEGIN
+    RETURN a + b;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION unsafe_get_weight(a integer, b integer)
+RETURNS integer AS $$
+BEGIN
+    RETURN a + b + 20;
+END;
+$$ LANGUAGE plpgsql;
 

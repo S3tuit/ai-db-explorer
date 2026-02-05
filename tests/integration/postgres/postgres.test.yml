@@ -2,13 +2,17 @@ services:
   db:
     image: postgres:17
     volumes:
-      - ../../data/zfighters.sql:/docker-entrypoint-initdb.d/seed.sql:ro
-      - ../../data/gym.sql:/another-db-seeds/gym.sql:ro
-      - ./init/01-create-another-db.sh:/docker-entrypoint-initdb.d/01-create-another-db.sh:ro
+      - ../../data/zfighters.sql:/seeds/zfighters.sql:ro
+      - ../../data/gym.sql:/seeds/gym.sql:ro
+      - ./init/01-create-my-db.sh:/docker-entrypoint-initdb.d/01-create-my-db.sh:ro
+      - ./init/02-create-another-db.sh:/docker-entrypoint-initdb.d/02-create-another-db.sh:ro
     environment:
-      POSTGRES_PASSWORD: my_secret
-      POSTGRES_USER: my_user
-      POSTGRES_DB: my_db
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      MY_PASSWORD: my_secret
+      MY_USER: my_user
+      MY_DB: my_db
       ANOTHER_USER: another_user
       ANOTHER_PASSWORD: another_secret
       ANOTHER_DB: another_db
@@ -33,4 +37,5 @@ services:
       PGDATABASE: my_db
       PGUSER: my_user
       PGPASSWORD: my_secret
-    command: ["sh", "-lc", "make clean && make test-postgres"]
+    # PIE_LDFLAGS needed for Debian’s default PIE toolchain
+    command: ["sh", "-lc", "make PIE_LDFLAGS=-no-pie test-postgres"]

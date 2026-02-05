@@ -122,6 +122,23 @@ int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst) {
   return OK;
 }
 
+/* Returns a C-string view of the current bytes in sb without changing sb->len.
+ * This is best-effort: if sb can't be grown to fit trailing '\0', returns "". */
+const char *sb_to_cstr(StrBuf *sb) {
+  if (!sb || !sb->data)
+    return "";
+  if (sb->len > sb->cap)
+    return "";
+
+  if (sb->len == sb->cap) {
+    if (sb_reserve(sb, 1) != OK)
+      return "";
+  }
+
+  sb->data[sb->len] = '\0';
+  return sb->data;
+}
+
 void sb_reset(StrBuf *sb) {
   if (!sb)
     return;

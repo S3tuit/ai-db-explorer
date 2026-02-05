@@ -11,6 +11,14 @@
   "databases": [
     {
       "type": "postgres",
+      "connectionName": "SuperPostgres",
+      "host": "db",
+      "port": 5432,
+      "username": "postgres",
+      "database": "postgres"
+    },
+    {
+      "type": "postgres",
       "connectionName": "MyPostgres",
       "host": "db",
       "port": 5432,
@@ -23,7 +31,17 @@
       "host": "db",
       "port": 5432,
       "username": "another_user",
-      "database": "another_db"
+      "database": "another_db",
+      "safeFunctions": [
+        "get_weight"
+      ],
+      "columnPolicy":{
+        "pseudonymize":{
+          "deterministic":[
+            "gym_bros.real_name"
+          ]
+        }
+      }
     }
   ]
 }

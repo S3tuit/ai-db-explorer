@@ -277,9 +277,8 @@ struct QirQuery {
   uint32_t nselect;
 
   // FROM clause
-  // TODO: this should be a single FROM
-  QirFromItem **from_items;
-  uint32_t nfrom;
+  // We only allow a single FROM item in v1.
+  QirFromItem *from_root;
 
   // JOIN (for each FROM item, we represent joins in a flat list)
   QirJoin **joins;
@@ -375,18 +374,18 @@ void qir_touch_report_destroy(QirTouchReport *tr);
 QirTouchReport *qir_extract_touches(const QirQuery *q);
 
 /* Renders a FROM item into 'out' and returns out->data (or "" on error).
- * Ownership: caller owns 'out' and controls its lifetime.
- * Side effects: resets and writes into 'out'. */
+ * Returned string is NUL-term. Ownership: caller owns 'out' and controls its
+ * lifetime. Side effects: resets and writes into 'out'. */
 const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out);
 
 /* Renders a column reference into 'out' and returns out->data (or "" on error).
- * Ownership: caller owns 'out' and controls its lifetime.
- * Side effects: resets and writes into 'out'. */
+ * Returned string is NUL-term. Ownership: caller owns 'out' and controls its
+ * lifetime. Side effects: resets and writes into 'out'. */
 const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out);
 
 /* Renders a function call into 'out' and returns out->data (or "" on error).
- * Ownership: caller owns 'out' and controls its lifetime.
- * Side effects: resets and writes into 'out'. */
+ * Returned string is NUL-term. Ownership: caller owns 'out' and controls its
+ * lifetime. Side effects: resets and writes into 'out'. */
 const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out);
 
 /* Sets query status and (optional) reason once; first status wins.

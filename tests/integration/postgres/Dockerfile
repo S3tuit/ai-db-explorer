@@ -6,7 +6,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
-        libpg-query-dev \
         pkg-config \
         ca-certificates \
         python3 \
@@ -14,8 +13,10 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY . .
+# copy vendored libpg_query first so docker can cache this layer
+COPY third_party/libpg_query third_party/libpg_query
 
-# PIE linking may give error since we don't compile with -fPIE,
-# that why we put "-no-pie"
-CMD ["sh", "-lc", "make PIE_LDFLAGS=-no-pie test-postgres"]
+# Always rebuild libpg_query inside the container toolchain.
+RUN make -C third_party/libpg_query clean && make -C third_party/libpg_query
+
+COPY . .

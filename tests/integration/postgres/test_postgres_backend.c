@@ -59,6 +59,10 @@ static DbBackend *pg_connect_impl(const SafetyPolicy *policy, const char *file,
     profile.db_name = "postgres";
   const char *pwd = env_or_null("PGPASSWORD");
   int rc = db_connect(pg, &profile, policy, pwd);
+  if (rc != OK) {
+    // Avoid leaking pg/impl in assertion-fail paths.
+    db_destroy(pg);
+  }
   ASSERT_TRUE_AT(rc == OK, file, line);
 
   return pg;

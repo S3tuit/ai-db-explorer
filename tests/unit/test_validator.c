@@ -69,14 +69,19 @@ static ConnCatalog *load_test_catalog(void) {
 /* Runs a single validation and checks for accept/reject + error code.
  * Side effects: allocates and frees a validator error buffer. */
 static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
-                               const SafetyPolicy *policy, const char *sql,
-                               int expect_ok, ValidatorErrCode expect_code,
+                               const char *sql, int expect_ok,
+                               ValidatorErrCode expect_code,
                                const char *expect_substr, const char *file,
                                int line) {
   StrBuf msg = {0};
   ValidatorErr err = {.code = VERR_NONE, .msg = &msg};
+  ValidatorRequest req = {
+      .db = db,
+      .profile = cp,
+      .sql = sql,
+  };
 
-  int rc = validate_query(db, cp, policy, sql, &err);
+  int rc = validate_query(&req, &err);
   if (expect_ok) {
     if (rc != OK) {
       fprintf(stderr, "validate_query failed: code=%d msg=", (int)err.code);
@@ -126,21 +131,21 @@ static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
   sb_clean(&msg);
 }
 #define ASSERT_VALIDATE(db, cp, policy, sql, ok, code)                         \
-  assert_validate_at((db), (cp), (policy), (sql), (ok), (code), NULL,          \
-                     __FILE__, __LINE__)
+  assert_validate_at((db), (cp), (sql), (ok), (code), NULL, __FILE__, __LINE__)
 #define ASSERT_VALIDATE_MSG(db, cp, policy, sql, ok, code, substr)             \
-  assert_validate_at((db), (cp), (policy), (sql), (ok), (code), (substr),      \
-                     __FILE__, __LINE__)
+  assert_validate_at((db), (cp), (sql), (ok), (code), (substr), __FILE__,      \
+                     __LINE__)
 
 /* Basic validation cases for the policy rules and error codes. */
 static void test_validator_accepts(void) {
   ConnCatalog *cat = load_test_catalog();
   ASSERT_TRUE(cat != NULL);
 
-  ConnProfile *cp = catalog_get_by_name(cat, "TestDb");
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
   ASSERT_TRUE(cp != NULL);
 
-  SafetyPolicy *policy = catalog_get_policy(cat);
+  SafetyPolicy *policy = &cp->safe_policy;
   ASSERT_TRUE(policy != NULL);
 
   DbBackend *db = postgres_backend_create();
@@ -157,10 +162,11 @@ static void test_validator_rejects_rules(void) {
   ConnCatalog *cat = load_test_catalog();
   ASSERT_TRUE(cat != NULL);
 
-  ConnProfile *cp = catalog_get_by_name(cat, "TestDb");
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
   ASSERT_TRUE(cp != NULL);
 
-  SafetyPolicy *policy = catalog_get_policy(cat);
+  SafetyPolicy *policy = &cp->safe_policy;
   ASSERT_TRUE(policy != NULL);
 
   DbBackend *db = postgres_backend_create();
@@ -204,9 +210,10 @@ static void test_validator_rejects_rules(void) {
 static void test_validator_from_notes(void) {
   ConnCatalog *cat = load_test_catalog();
   ASSERT_TRUE(cat != NULL);
-  ConnProfile *cp = catalog_get_by_name(cat, "TestDb");
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
   ASSERT_TRUE(cp != NULL);
-  SafetyPolicy *policy = catalog_get_policy(cat);
+  SafetyPolicy *policy = &cp->safe_policy;
   ASSERT_TRUE(policy != NULL);
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);

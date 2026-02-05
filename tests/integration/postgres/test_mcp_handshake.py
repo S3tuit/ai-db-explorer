@@ -110,6 +110,11 @@ def test_handshake_ok(broker):
         assert "resources" in resp["result"]["capabilities"]
         assert resp["result"]["serverInfo"]["name"] == "ai-db-explorer"
         assert resp["result"]["serverInfo"]["version"] == "0.0.1"
+        # double handshake should fail
+        resp = do_handshake(server, "second", "2025-11-25")
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "second"
+        assert "error" in resp
     finally:
         stop_proc(server)
 

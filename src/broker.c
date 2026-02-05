@@ -9,6 +9,7 @@
 #include "stdio_byte_channel.h"
 #include "string_op.h"
 #include "utils.h"
+#include "validator.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -185,6 +186,63 @@ void broker_destroy(Broker *b) {
   free(b);
 }
 
+/*-------------------------------- Tools Call -------------------------------*/
+
+/* Executes the SQL inside the arguments of 'jg' and populates 'out_query' with
+ * the result using 'id' as the id. 'out_query' may not be populated.
+ *
+ * Ownership: this borrows all the entities in input.*/
+static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
+                                 QueryResult **out_query) {
+  char *conn_name = NULL;
+  char *query = NULL;
+  if (jsget_string_decode_alloc(jg, "params.arguments.connectionName",
+                                &conn_name) != YES ||
+      jsget_string_decode_alloc(jg, "params.arguments.query", &query) != YES) {
+    free(conn_name);
+    free(query);
+    *out_query = qr_create_err(id, "Invalid tool arguments.");
+    goto free_n_return;
+  }
+
+  TLOG("INFO - preparing for running %s", query);
+  ConnView cv = {0};
+  int rc = connm_get_connection(b->cm, conn_name, &cv);
+  if (rc != YES || !cv.db || !cv.profile) {
+    TLOG("ERROR - unable to connect to %s", conn_name);
+    *out_query =
+        qr_create_err(id, "Unable to connect to the requested database.");
+    goto free_n_return;
+  }
+
+  StrBuf verr_msg = {0};
+  ValidatorErr verr = {.code = VERR_NONE, .msg = &verr_msg};
+  ValidatorRequest vreq = {.db = cv.db, .profile = cv.profile, .sql = query};
+  if (validate_query(&vreq, &verr) != OK) {
+    const char *err_desc = sb_to_cstr(verr.msg);
+    if (err_desc[0] == '\0') {
+      err_desc = "Unknown error while validating the query. Please make sure "
+                 "the query is valid and formatted correctly.";
+    }
+    *out_query = qr_create_err(id, err_desc);
+    sb_clean(&verr_msg);
+    goto free_n_return;
+  }
+  sb_clean(&verr_msg);
+
+  if (db_exec(cv.db, id, query, out_query) != OK) {
+    TLOG("ERROR - error while communicating with %s", conn_name);
+    *out_query = qr_create_err(
+        id, "Something went wrong while communicating with the database.");
+    goto free_n_return;
+  }
+  connm_mark_used(b->cm, conn_name);
+
+free_n_return:
+  free(conn_name);
+  free(query);
+}
+
 /* Core request handler:
  * - 'req' points to the incoming 'req_len' bytes.
  * - 'out_res' will be filled and may represent an error or a result of a query.
@@ -196,9 +254,10 @@ void broker_destroy(Broker *b) {
 static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
                                  const char *req, uint32_t req_len,
                                  QueryResult **out_res) {
-  if (!b || !sess || !req)
+  if (!b || !sess || !req || !out_res)
     return ERR;
   TLOG("INFO - handling a request of %u bytes", req_len);
+  *out_res = NULL;
 
   McpId id = {0};
   JsonGetter jg;
@@ -219,74 +278,45 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
     }
   }
 
-  QueryResult *q_res = NULL;
   int vrc = jsget_simple_rpc_validation(&jg);
   if (vrc != YES) {
-    q_res = qr_create_err(&id, "Invalid JSON-RPC request.");
+    *out_res = qr_create_err(&id, "Invalid JSON-RPC request.");
     goto return_res;
   }
   // exec command
   JsonStrSpan method_sp = {0};
   if (jsget_string_span(&jg, "method", &method_sp) != YES) {
-    q_res = qr_create_err(&id, "Can't find the 'method' object.");
+    *out_res = qr_create_err(&id, "Can't find the 'method' object.");
     goto return_res;
   }
 
   if (!STREQ(method_sp.ptr, method_sp.len, "tools/call")) {
-    q_res = qr_create_err(&id, "Tool not supported.");
+    *out_res = qr_create_err(&id, "Tool not supported.");
     goto return_res;
   }
 
   JsonStrSpan name_sp = {0};
-  if (jsget_string_span(&jg, "params.name", &name_sp) != YES ||
-      name_sp.len != strlen("run_sql_query") ||
-      memcmp(name_sp.ptr, "run_sql_query", name_sp.len) != 0) {
-    q_res = qr_create_err(&id, "Unknown tool.");
+  if (jsget_string_span(&jg, "params.name", &name_sp) != YES) {
+    *out_res = qr_create_err(&id, "Tool call missing params.name.");
     goto return_res;
   }
 
-  char *conn_name = NULL;
-  char *query = NULL;
-  if (jsget_string_decode_alloc(&jg, "params.arguments.connectionName",
-                                &conn_name) != YES ||
-      jsget_string_decode_alloc(&jg, "params.arguments.query", &query) != YES) {
-    free(conn_name);
-    free(query);
-    q_res = qr_create_err(&id, "Invalid tool arguments.");
-    goto return_res;
-  }
+  // Call the different tools
+  if (STREQ(name_sp.ptr, name_sp.len, "run_sql_query")) {
+    broker_run_sql_query(b, &jg, &id, out_res);
 
-  TLOG("INFO - preparing for running %s", query);
-  DbBackend *db = connm_get_backend(b->cm, conn_name);
-  if (!db) {
-    TLOG("ERROR - unable to connect to %s", conn_name);
-    free(conn_name);
-    free(query);
-    q_res = qr_create_err(&id, "Unable to connect to the requested database.");
-    goto return_res;
+    // Unknown tools
+  } else {
+    *out_res = qr_create_err(&id, "Unknown tool.");
   }
-
-  if (db_exec(db, &id, query, &q_res) != OK) {
-    TLOG("ERROR - error while communicating with %s", conn_name);
-    free(conn_name);
-    free(query);
-    q_res = qr_create_err(
-        &id, "Something went wrong while communicating with the database.");
-    goto return_res;
-  }
-  connm_mark_used(b->cm, conn_name);
-  free(conn_name);
-  free(query);
 
 return_res:
   // catastrophic
-  if (!q_res) {
-    *out_res = NULL;
+  if (!*out_res) {
     mcp_id_clean(&id);
     return ERR;
   }
 
-  *out_res = q_res;
   mcp_id_clean(&id);
   return OK;
 }

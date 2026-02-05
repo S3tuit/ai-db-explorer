@@ -34,8 +34,7 @@ static void test_missing_policy_defaults(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat != NULL);
 
-  SafetyPolicy *p = catalog_get_policy(cat);
-  ASSERT_TRUE(p != NULL);
+  SafetyPolicy *p = &cat->policy;
   ASSERT_TRUE(p->read_only == 1);
   ASSERT_TRUE(p->max_rows == 200);
   ASSERT_TRUE(p->max_query_bytes == 65536);
@@ -45,6 +44,21 @@ static void test_missing_policy_defaults(void) {
   catalog_destroy(cat);
   unlink(path);
   free(path);
+}
+
+/* Helper to get a ConnProfile that matches 'connection_name'. */
+static ConnProfile *catalog_get_by_name(ConnCatalog *cat,
+                                        const char *connection_name) {
+  if (!cat || !connection_name)
+    return NULL;
+  for (size_t i = 0; i < cat->n_profiles; i++) {
+    ConnProfile *p = &cat->profiles[i];
+    if (p->connection_name &&
+        strcmp(p->connection_name, connection_name) == 0) {
+      return p;
+    }
+  }
+  return NULL;
 }
 
 /* Ensures missing policy fields fall back to defaults. */
@@ -62,8 +76,7 @@ static void test_policy_missing_fields_defaults(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat != NULL);
 
-  SafetyPolicy *p = catalog_get_policy(cat);
-  ASSERT_TRUE(p != NULL);
+  SafetyPolicy *p = &cat->policy;
   ASSERT_TRUE(p->read_only == 0);
   ASSERT_TRUE(p->max_rows == 200);
   ASSERT_TRUE(p->max_query_bytes == 65536);
@@ -92,8 +105,7 @@ static void test_policy_kilobytes(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat != NULL);
 
-  SafetyPolicy *p = catalog_get_policy(cat);
-  ASSERT_TRUE(p != NULL);
+  SafetyPolicy *p = &cat->policy;
   ASSERT_TRUE(p->max_query_bytes == 1024);
 
   catalog_destroy(cat);
@@ -226,8 +238,7 @@ static void test_valid_config_maps_fields(void) {
   ASSERT_TRUE(cat != NULL);
   ASSERT_TRUE(catalog_count(cat) == 1);
 
-  SafetyPolicy *p = catalog_get_policy(cat);
-  ASSERT_TRUE(p != NULL);
+  SafetyPolicy *p = &cat->policy;
   ASSERT_TRUE(p->read_only == 0);
   ASSERT_TRUE(p->max_rows == 99);
   ASSERT_TRUE(p->statement_timeout_ms == 1234);

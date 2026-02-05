@@ -33,6 +33,11 @@ int sb_append_bytes(StrBuf *sb, const void *src, size_t n);
  * points to the new region at the end of sb and sb->len is advanced. */
 int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst);
 
+/* Returns a NUL-terminated C-string view of sb.
+ * Best-effort: returns "" if sb is NULL, uninitialized, or growth fails.
+ * Does not change sb->len. May increase sb->cap. */
+const char *sb_to_cstr(StrBuf *sb);
+
 /* Zeroes any allocated bytes of 'sb' and frees them.
  * Side effects: overwrites memory to clear sensitive data. */
 void sb_zero_clean(StrBuf *sb);

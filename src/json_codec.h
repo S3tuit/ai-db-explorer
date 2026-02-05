@@ -88,10 +88,6 @@ int jsget_init(JsonGetter *jg, const char *json, size_t json_len);
  * doesn't match the schema, ERR on parse errors. */
 int jsget_simple_rpc_validation(JsonGetter *jg);
 
-// TODO: all these functions that returns a value give a key may take the idx
-// of an object so we scan starting from that object not from root. This
-// improves performace.
-
 /*
  * Gets a key path as a uint32_t (supports dot-delimited paths).
  *

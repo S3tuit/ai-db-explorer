@@ -140,12 +140,11 @@ static void test_sql_standard_predicates_and_limit(void) {
   ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.colref.column, "id");
 
   // FROM
-  ASSERT_TRUE(h.q->nfrom == 1);
-  ASSERT_TRUE(h.q->from_items != NULL);
-  ASSERT_TRUE(h.q->from_items[0]->kind == QIR_FROM_BASE_REL);
-  ASSERT_IDENT_EQ(&h.q->from_items[0]->alias, "p");
-  ASSERT_IDENT_EQ(&h.q->from_items[0]->u.rel.schema, "private");
-  ASSERT_IDENT_EQ(&h.q->from_items[0]->u.rel.name, "people");
+  ASSERT_TRUE(h.q->from_root != NULL);
+  ASSERT_TRUE(h.q->from_root->kind == QIR_FROM_BASE_REL);
+  ASSERT_IDENT_EQ(&h.q->from_root->alias, "p");
+  ASSERT_IDENT_EQ(&h.q->from_root->u.rel.schema, "private");
+  ASSERT_IDENT_EQ(&h.q->from_root->u.rel.name, "people");
 
   // WHERE: p.age >= 25 AND p.region = 'c'
   ASSERT_TRUE(h.q->where != NULL);
@@ -174,6 +173,21 @@ static void test_sql_standard_predicates_and_limit(void) {
   ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "age");
   ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "region");
   qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* A1b. Multiple FROM items are unsupported (normalize to CROSS JOIN not allowed). */
+static void test_sql_standard_multi_from_unsupported(void) {
+  const char *sql = "SELECT a.id AS id "
+                    "FROM users a, users b "
+                    "WHERE a.id = b.id;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
 
   qir_handle_destroy(&h);
 }
@@ -601,9 +615,9 @@ static void test_sql_standard_subquery_from(void) {
 
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
-  ASSERT_TRUE(h.q->nfrom == 1);
-  ASSERT_TRUE(h.q->from_items[0]->kind == QIR_FROM_SUBQUERY);
-  ASSERT_IDENT_EQ(&h.q->from_items[0]->alias, "x");
+  ASSERT_TRUE(h.q->from_root != NULL);
+  ASSERT_TRUE(h.q->from_root->kind == QIR_FROM_SUBQUERY);
+  ASSERT_IDENT_EQ(&h.q->from_root->alias, "x");
 
   QirTouchReport *tr = extract_touches(&h);
   ASSERT_TRUE(tr->has_unknown_touches == false);
@@ -1065,11 +1079,11 @@ static void test_sql_standard_values_from_rejected(void) {
   parse_sql_postgres(sql, &h);
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
-  ASSERT_TRUE(h.q->nfrom == 1);
-  ASSERT_TRUE(h.q->from_items[0]->kind == QIR_FROM_VALUES);
-  ASSERT_IDENT_EQ(&h.q->from_items[0]->alias, "v");
-  ASSERT_TRUE(h.q->from_items[0]->u.values.ncolnames == 1);
-  ASSERT_IDENT_EQ(&h.q->from_items[0]->u.values.colnames[0], "x");
+  ASSERT_TRUE(h.q->from_root != NULL);
+  ASSERT_TRUE(h.q->from_root->kind == QIR_FROM_VALUES);
+  ASSERT_IDENT_EQ(&h.q->from_root->alias, "v");
+  ASSERT_TRUE(h.q->from_root->u.values.ncolnames == 1);
+  ASSERT_IDENT_EQ(&h.q->from_root->u.values.colnames[0], "x");
   qir_handle_destroy(&h);
 }
 
@@ -1137,6 +1151,7 @@ static void test_left_join_base_touches(void) {
 
 int main(void) {
   test_sql_standard_predicates_and_limit();
+  test_sql_standard_multi_from_unsupported();
   test_sql_standard_in_list();
   test_sql_standard_or();
   test_sql_standard_not();

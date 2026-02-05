@@ -36,12 +36,20 @@ typedef struct ValidatorErr {
   StrBuf *msg;
 } ValidatorErr;
 
+/* Input contract for validate_query().
+ * Ownership:
+ * - all pointers are borrowed.
+ * - sql must be a NUL-terminated C string. */
+typedef struct ValidatorRequest {
+  DbBackend *db;
+  const ConnProfile *profile;
+  const char *sql;
+} ValidatorRequest;
+
 /* Validates a SQL query against the global and sensitive-mode policies.
  * Returns OK if the query is valid, else, ERR and allocates a human-readable
  * error message into err->msg (guaranteed).
  */
-int validate_query(DbBackend *db, const ConnProfile *cp,
-                   const SafetyPolicy *policy, const char *sql,
-                   ValidatorErr *err);
+int validate_query(const ValidatorRequest *req, ValidatorErr *err);
 
 #endif

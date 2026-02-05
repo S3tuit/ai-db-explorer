@@ -98,12 +98,67 @@ static void test_sb_append_hard_limit(void) {
   sb_clean(&sb);
 }
 
+static void test_sb_to_cstr_basic(void) {
+  StrBuf sb = {0};
+  ASSERT_TRUE(sb_append_bytes(&sb, "abc", 3) == OK);
+
+  const char *s = sb_to_cstr(&sb);
+  ASSERT_TRUE(s != NULL);
+  ASSERT_STREQ(s, "abc");
+  ASSERT_TRUE(sb.len == 3);
+
+  sb_clean(&sb);
+}
+
+static void test_sb_to_cstr_null_inputs(void) {
+  ASSERT_STREQ(sb_to_cstr(NULL), "");
+
+  StrBuf sb = {0};
+  ASSERT_STREQ(sb_to_cstr(&sb), "");
+}
+
+static void test_sb_to_cstr_len_eq_cap_grow(void) {
+  StrBuf sb = {0};
+  ASSERT_TRUE(sb_append_bytes(&sb, "abc", 3) == OK);
+
+  /* Force len==cap so sb_to_cstr must reserve one more byte. */
+  sb.cap = sb.len;
+  size_t old_len = sb.len;
+  size_t old_cap = sb.cap;
+
+  const char *s = sb_to_cstr(&sb);
+  ASSERT_STREQ(s, "abc");
+  ASSERT_TRUE(sb.len == old_len);
+  ASSERT_TRUE(sb.cap > old_cap);
+
+  sb_clean(&sb);
+}
+
+static void test_sb_to_cstr_hard_limit_cannot_grow(void) {
+  StrBuf sb = {0};
+
+  sb.data = (char *)malloc(1);
+  ASSERT_TRUE(sb.data != NULL);
+  sb.len = STRBUF_MAX_BYTES;
+  sb.cap = STRBUF_MAX_BYTES;
+
+  ASSERT_STREQ(sb_to_cstr(&sb), "");
+  ASSERT_TRUE(sb.len == STRBUF_MAX_BYTES);
+  ASSERT_TRUE(sb.cap == STRBUF_MAX_BYTES);
+
+  sb_clean(&sb);
+}
+
 int main(void) {
   test_dup_functions_basic();
   test_dup_pretty();
   test_sb_append_bytes();
   test_sb_prepare_for_write();
   test_sb_append_hard_limit();
+  test_sb_to_cstr_basic();
+  test_sb_to_cstr_null_inputs();
+  test_sb_to_cstr_len_eq_cap_grow();
+  test_sb_to_cstr_hard_limit_cannot_grow();
 
   fprintf(stderr, "OK: test_string_op\n");
   return 0;

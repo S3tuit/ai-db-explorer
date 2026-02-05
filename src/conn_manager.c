@@ -17,7 +17,6 @@ typedef struct {
 struct ConnManager {
   ConnCatalog *cat;     // owned
   SecretStore *secrets; // owned
-  SafetyPolicy *policy; // cached, not owned
   uint64_t ttl_ms;      // the time after which a backend that has
                         // not been used ( and has no running queries)
                         // may be disconnected.
@@ -30,8 +29,7 @@ struct ConnManager {
 
 /* Returns the ConnEntry identified by connection_name or NULL. Since for now we
  * expect few connection (<50 surely) this is good enough even for O(n) search
- * time.
- * TODO: we should use an hashmap. */
+ * time. */
 static ConnEntry *find_entry(ConnManager *m, const char *connection_name) {
   if (!m || !connection_name)
     return NULL;
@@ -81,7 +79,8 @@ static int ensure_connected(ConnManager *m, ConnEntry *e) {
   }
 
   // Connect
-  int rc = db_connect(e->backend, e->profile, m->policy, pw.data);
+  int rc =
+      db_connect(e->backend, e->profile, &e->profile->safe_policy, pw.data);
   if (rc != OK) {
     TLOG("ERROR - db_connect failed for %s", e->profile->connection_name);
   }
@@ -104,13 +103,6 @@ ConnManager *connm_create_with_factory(ConnCatalog *cat, SecretStore *secrets,
   m->cat = cat;
   m->secrets = secrets;
 
-  m->policy = catalog_get_policy(m->cat);
-  if (!m->policy) {
-    catalog_destroy(m->cat);
-    secret_store_destroy(m->secrets);
-    free(m);
-    return NULL;
-  }
   m->ttl_ms = TTL_CONNECTIONS_MS;
   m->factory = factory ? factory : db_backend_create;
 
@@ -191,9 +183,12 @@ void connm_destroy(ConnManager *m) {
   free(m);
 }
 
-DbBackend *connm_get_backend(ConnManager *m, const char *connection_name) {
-  if (!m || !connection_name)
-    return NULL;
+int connm_get_connection(ConnManager *m, const char *connection_name,
+                         ConnView *out) {
+  if (!m || !connection_name || !out)
+    return ERR;
+  out->db = NULL;
+  out->profile = NULL;
 
   // Reap idle first (v1 simple model)
   connm_disconnect_idle(m);
@@ -201,12 +196,14 @@ DbBackend *connm_get_backend(ConnManager *m, const char *connection_name) {
   ConnEntry *e = find_entry(m, connection_name);
   TLOG("INFO - requested use of connection %s", connection_name);
   if (!e)
-    return NULL;
+    return NO;
 
   if (ensure_connected(m, e) != OK)
-    return NULL;
+    return ERR;
 
-  return e->backend;
+  out->db = e->backend;
+  out->profile = e->profile;
+  return YES;
 }
 
 void connm_mark_used(ConnManager *m, const char *connection_name) {

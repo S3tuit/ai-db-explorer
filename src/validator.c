@@ -102,13 +102,9 @@ static inline const QirFromItem *find_from_alias(const QirQuery *q,
   if (!q || !alias || alias[0] == '\0')
     return NULL;
 
-  for (uint32_t i = 0; i < q->nfrom; i++) {
-    const QirFromItem *fi = q->from_items[i];
-    if (!fi)
-      continue;
-    if (fi->alias.name && strcmp(fi->alias.name, alias) == 0)
-      return fi;
-  }
+  if (q->from_root && q->from_root->alias.name &&
+      strcmp(q->from_root->alias.name, alias) == 0)
+    return q->from_root;
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirJoin *j = q->joins[i];
     if (!j || !j->rhs)
@@ -151,10 +147,9 @@ static int validate_range_aliases(ValidatorCtx *ctx, const QirQuery *q) {
   if (!q)
     return ERR;
 
-  for (uint32_t i = 0; i < q->nfrom; i++) {
-    const QirFromItem *fi = q->from_items[i];
-    if (!fi || !fi->alias.name || fi->alias.name[0] == '\0') {
-      const char *desc = qir_from_to_str(fi, &ctx->scratch);
+  if (q->from_root) {
+    if (!q->from_root->alias.name || q->from_root->alias.name[0] == '\0') {
+      const char *desc = qir_from_to_str(q->from_root, &ctx->scratch);
       set_err(ctx, VERR_NO_TABLE_ALIAS, "Missing alias in FROM item: %s.",
               desc);
       return NO;
@@ -237,8 +232,11 @@ static int validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
     }
     for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
       QirCaseWhen *w = e->u.case_.whens[i];
-      if (!w)
-        continue;
+      if (!w) {
+        set_err(ctx, VERR_ANALYZE_FAIL,
+                "Invalid query structure (NULL CASE WHEN).");
+        return ERR;
+      }
       int rc = validate_expr_subqueries(ctx, w->when_expr, validate_query_fn);
       if (rc != YES)
         return rc;
@@ -482,8 +480,11 @@ static int validate_expr_functions(ValidatorCtx *ctx, const QirExpr *e) {
     }
     for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
       QirCaseWhen *w = e->u.case_.whens[i];
-      if (!w)
-        continue;
+      if (!w) {
+        set_err(ctx, VERR_ANALYZE_FAIL,
+                "Invalid query structure (NULL CASE WHEN).");
+        return ERR;
+      }
       int rc = validate_expr_functions(ctx, w->when_expr);
       if (rc != YES)
         return rc;
@@ -574,7 +575,7 @@ static int expr_has_sensitive(const QirQuery *q, const ConnProfile *cp,
     for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
       QirCaseWhen *w = e->u.case_.whens[i];
       if (!w)
-        continue;
+        return ERR;
       int rc = expr_has_sensitive(q, cp, w->when_expr);
       if (rc != NO)
         return rc;
@@ -671,7 +672,7 @@ static int expr_has_param(const QirExpr *e) {
     for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
       QirCaseWhen *w = e->u.case_.whens[i];
       if (!w)
-        continue;
+        return ERR;
       int rc = expr_has_param(w->when_expr);
       if (rc != NO)
         return rc;
@@ -757,8 +758,11 @@ static int validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
       return ERR;
     for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
       const QirExpr *it = e->u.in_.items[i];
-      if (!it)
-        continue;
+      if (!it) {
+        set_err(ctx, VERR_ANALYZE_FAIL,
+                "Invalid query structure (NULL IN item).");
+        return ERR;
+      }
       if (it->kind == QIR_EXPR_PARAM) {
         if (sens_l != YES) {
           set_err(
@@ -925,13 +929,10 @@ static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q) {
     if (rc != YES)
       return rc;
   }
-  for (uint32_t i = 0; i < q->nfrom; i++) {
-    const QirFromItem *fi = q->from_items[i];
-    if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      rc = validate_query_pass_a(ctx, fi->u.subquery);
-      if (rc != YES)
-        return rc;
-    }
+  if (q->from_root && q->from_root->kind == QIR_FROM_SUBQUERY) {
+    rc = validate_query_pass_a(ctx, q->from_root->u.subquery);
+    if (rc != YES)
+      return rc;
   }
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirFromItem *fi = q->joins[i]->rhs;
@@ -1095,8 +1096,11 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
       // validate each item inside IN()
       for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
         const QirExpr *it = e->u.in_.items[i];
-        if (!it)
-          continue;
+        if (!it) {
+          set_err(ctx, VERR_ANALYZE_FAIL,
+                  "Invalid query structure (NULL IN item).");
+          return ERR;
+        }
         if (sens_l == YES) {
           if (it->kind != QIR_EXPR_PARAM) {
             const char *desc =
@@ -1193,8 +1197,11 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   // JOIN
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirJoin *j = q->joins ? q->joins[i] : NULL;
-    if (!j)
-      continue;
+    if (!j) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL JOIN).");
+      return ERR;
+    }
     if (j->kind != QIR_JOIN_INNER) {
       set_err(ctx, VERR_JOIN_NOT_INNER,
               "Only INNER JOIN is allowed in sensitive mode.");
@@ -1217,9 +1224,11 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   // SELECT
   for (uint32_t i = 0; i < q->nselect; i++) {
     const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
-    if (!si || !si->value)
-      continue; // TODO: maybe this should return error because the QirQuery is
-                // malformatted.
+    if (!si || !si->value) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL SELECT item).");
+      return ERR;
+    }
     int rc = validate_sensitive_expr(ctx, q, si->value, SENS_LOC_SELECT);
     if (rc != YES)
       return rc;
@@ -1231,8 +1240,11 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   // GROUP BY
   for (uint32_t i = 0; i < q->n_group_by; i++) {
     QirExpr *e = q->group_by ? q->group_by[i] : NULL;
-    if (!e)
-      continue;
+    if (!e) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL GROUP BY item).");
+      return ERR;
+    }
     int rc = validate_sensitive_expr(ctx, q, e, SENS_LOC_GROUP_BY);
     if (rc != YES)
       return rc;
@@ -1254,8 +1266,11 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   // ORDER BY
   for (uint32_t i = 0; i < q->n_order_by; i++) {
     QirExpr *e = q->order_by ? q->order_by[i] : NULL;
-    if (!e)
-      continue;
+    if (!e) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL ORDER BY item).");
+      return ERR;
+    }
     int rc = validate_sensitive_expr(ctx, q, e, SENS_LOC_ORDER_BY);
     if (rc != YES)
       return rc;
@@ -1270,13 +1285,10 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
     if (rc != YES)
       return rc;
   }
-  for (uint32_t i = 0; i < q->nfrom; i++) {
-    const QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
-    if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      int rc = validate_query_pass_b(ctx, fi->u.subquery);
-      if (rc != YES)
-        return rc;
-    }
+  if (q->from_root && q->from_root->kind == QIR_FROM_SUBQUERY) {
+    int rc = validate_query_pass_b(ctx, q->from_root->u.subquery);
+    if (rc != YES)
+      return rc;
   }
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirFromItem *fi = q->joins ? q->joins[i]->rhs : NULL;
@@ -1290,17 +1302,17 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   return YES;
 }
 
-int validate_query(DbBackend *db, const ConnProfile *cp,
-                   const SafetyPolicy *policy, const char *sql,
-                   ValidatorErr *err) {
-  (void)policy; // read-only enforced at session level for now
-
-  if (!db || !cp || !sql || !err)
+int validate_query(const ValidatorRequest *req, ValidatorErr *err) {
+  if (!req || !err)
     return ERR;
-  ValidatorCtx ctx = {.db = db, .cp = cp, .err = err, .scratch = {0}};
+  if (!req->db || !req->profile || !req->sql)
+    return ERR;
+
+  ValidatorCtx ctx = {
+      .db = req->db, .cp = req->profile, .err = err, .scratch = {0}};
 
   QirQueryHandle h = {0};
-  if (db_make_query_ir(db, sql, &h) != OK) {
+  if (db_make_query_ir(req->db, req->sql, &h) != OK) {
     set_err(&ctx, VERR_PARSE_FAIL, "Failed to parse query.");
     sb_clean(&ctx.scratch);
     return ERR;
@@ -1340,8 +1352,6 @@ int validate_query(DbBackend *db, const ConnProfile *cp,
   // Touch report to decide if Sensitive Mode is needed and to ensure sensitive
   // touches never appear outside the main query
   bool sensitive_mode = false;
-  // TODO: this may take err in input so when we can't resolve an alias we log a
-  // clearer error.
   int rc = validate_sensitive_touches_scope(&ctx, tr, &sensitive_mode);
   if (rc != YES) {
     if (rc == ERR && err->code == VERR_NONE) {

@@ -27,6 +27,7 @@ int qir_handle_init(QirQueryHandle *h) {
     pl_arena_clean(&h->arena);
     return ERR;
   }
+  memset(q, 0, sizeof(*q));
 
   q->status = QIR_OK;
   q->status_reason = NULL;
@@ -154,11 +155,9 @@ static QirTouchKind qir_resolve_qualifier_kind(const QirQuery *q,
     return QIR_TOUCH_UNKNOWN;
   }
 
-  // Search FROM base list
-  for (uint32_t i = 0; i < q->nfrom; i++) {
-    const QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
-    if (!fi)
-      continue;
+  // Search FROM root
+  const QirFromItem *fi = q->from_root;
+  if (fi) {
     bool alias_match = fi->alias.name && fi->alias.name[0] != '\0' &&
                        qir_ident_eq(&fi->alias, qualifier);
     bool rel_match = fi->kind == QIR_FROM_BASE_REL && fi->u.rel.name.name &&
@@ -399,15 +398,11 @@ static void qir_extract_from_query_rec(const QirQuery *q, QirScope scope,
                                scope_cte);
   }
 
-  // Recurse into FROM subqueries (nested)
-  for (uint32_t i = 0; i < q->nfrom; i++) {
-    const QirFromItem *fi = q->from_items ? q->from_items[i] : NULL;
-    if (!fi)
-      continue;
-    if (fi->kind == QIR_FROM_SUBQUERY && fi->u.subquery) {
-      qir_extract_from_query_rec(fi->u.subquery, QIR_SCOPE_NESTED, tr, touches,
-                                 scope_cte);
-    }
+  // Recurse into FROM subquery (nested)
+  if (q->from_root && q->from_root->kind == QIR_FROM_SUBQUERY &&
+      q->from_root->u.subquery) {
+    qir_extract_from_query_rec(q->from_root->u.subquery, QIR_SCOPE_NESTED, tr,
+                               touches, scope_cte);
   }
 
   // Recurse into JOIN RHS subqueries and JOIN ON expressions
@@ -569,10 +564,7 @@ const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out) {
     (void)sb_append_bytes(out, fi->alias.name, strlen(fi->alias.name));
   }
 
-  /* Ensure the buffer is NUL-terminated for %s usage. */
-  if (sb_append_bytes(out, "\0", 1) == OK)
-    return out->data;
-  return "";
+  return sb_to_cstr(out);
 }
 
 /* Renders a column reference into 'out' and returns out->data (or "" on error).
@@ -602,10 +594,7 @@ const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out) {
     (void)sb_append_bytes(out, "<unknown>", 9);
   }
 
-  /* Ensure the buffer is NUL-terminated for %s usage. */
-  if (sb_append_bytes(out, "\0", 1) == OK)
-    return out->data;
-  return "";
+  return sb_to_cstr(out);
 }
 
 /* Renders a function call into 'out' and returns out->data (or "" on error).
@@ -633,8 +622,5 @@ const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out) {
   }
 
   (void)sb_append_bytes(out, "()", 2);
-  /* Ensure the buffer is NUL-terminated for %s usage. */
-  if (sb_append_bytes(out, "\0", 1) == OK)
-    return out->data;
-  return "";
+  return sb_to_cstr(out);
 }

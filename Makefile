@@ -2,6 +2,9 @@ CC      := gcc
 PKG_CONFIG ?= pkg-config
 LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
 LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
+
+# Third party flags, these are built separately to allow docker cache in
+# integration tests
 LIBPG_QUERY_DIR := third_party/libpg_query
 LIBPG_QUERY_LIB := $(LIBPG_QUERY_DIR)/libpg_query.a
 LIBPG_QUERY_INC := -I$(LIBPG_QUERY_DIR)
@@ -39,7 +42,7 @@ UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
 INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(INTEGRATION_TEST_SRC))
 
-.PHONY: all clean run test test-unit test-integration test-postgres test-build asan clean-testobj pg-dump-ast
+.PHONY: all clean run test test-unit test-integration test-integration-cached test-postgres test-build asan clean-testobj pg-dump-ast
 
 all: $(BIN)
 
@@ -109,11 +112,22 @@ test-unit: $(UNIT_TEST_BINS)
 	done; \
 	echo "ALL TESTS PASSED"
 
-# Run integration tests (docker)
+# Integration compose file used by docker targets.
+DOCKER_POSTGRES_COMPOSE := tests/integration/postgres/postgres.test.yml
+
+# Run integration tests (docker) and always rebuild the image.
+# This ensures the container sees the current working tree state.
 test-integration:
 	@set -e; \
-	docker compose -f tests/integration/postgres/postgres.test.yml up --build --abort-on-container-exit --exit-code-from test; \
-	docker compose -f tests/integration/postgres/postgres.test.yml down -v
+	trap 'docker compose -f $(DOCKER_POSTGRES_COMPOSE) down -v' EXIT; \
+	docker compose -f $(DOCKER_POSTGRES_COMPOSE) up --build --abort-on-container-exit --exit-code-from test
+
+# Run integration tests (docker) using cached images (no rebuild).
+# Use this only when you know the image is already up-to-date.
+test-integration-cached:
+	@set -e; \
+	trap 'docker compose -f $(DOCKER_POSTGRES_COMPOSE) down -v' EXIT; \
+	docker compose -f $(DOCKER_POSTGRES_COMPOSE) up --abort-on-container-exit --exit-code-from test
 
 # Run all tests
 test: test-unit test-integration
@@ -141,9 +155,12 @@ test-postgres: clean-testobj $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
 test-build: $(UNIT_TEST_BINS) $(INTEGRATION_TEST_BINS)
 
 clean-testobj:
-	# Force rebuild of secret_store objects when switching test-only flags.
-	rm -f build/testobj/secret_store.o build/testobj/dummy_secret_store.o
-	rm -f build/asan/secret_store.o build/asan/dummy_secret_store.o
+	# Force rebuild of sanitized objects.
+	# We don't generate header dependency files today, so after API/layout
+	# changes in headers (e.g. struct fields), stale .o files can survive and
+	# cause hard-to-debug ASAN crashes from ABI mismatches.
+	rm -f build/testobj/*.o
+	rm -f build/asan/*.o
 
 clean:
 	rm -rf build
