@@ -31,11 +31,15 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
   qr->cols = (QRColumn *)xcalloc(ncols, sizeof(QRColumn));
   qr->cells = (char **)xcalloc(ncells, sizeof(char *));
 
-  if (mcp_id_copy(&qr->id, id) != OK) {
-    free(qr->cells);
-    free(qr->cols);
-    free(qr);
-    return NULL;
+  if (id) {
+    if (mcp_id_copy(&qr->id, id) != OK) {
+      free(qr->cells);
+      free(qr->cols);
+      free(qr);
+      return NULL;
+    }
+  } else {
+    qr->id = (McpId){0};
   }
   qr->status = QR_OK;
   qr->ncols = ncols;
@@ -52,9 +56,13 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
 QueryResult *qr_create_err(const McpId *id, const char *err_msg) {
   QueryResult *qr = xmalloc(sizeof(*qr));
 
-  if (mcp_id_copy(&qr->id, id) != OK) {
-    free(qr);
-    return NULL;
+  if (id) {
+    if (mcp_id_copy(&qr->id, id) != OK) {
+      free(qr);
+      return NULL;
+    }
+  } else {
+    qr->id = (McpId){0};
   }
   qr->status = QR_ERROR;
   qr->exec_ms = 0;

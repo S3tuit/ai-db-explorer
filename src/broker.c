@@ -17,25 +17,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
-// TODO: we should be able to accept more than 1 McpServer with just one Broker.
-// We should make the code async, and use a real connection pool.
-#define MAX_CLIENTS 1
 // Maximum size of a single request payload (bytes). Larger frames are rejected.
 #define MAX_REQ_LEN (8u * 1024u * 1024u)
 
 struct Broker {
-  // TODO: abstract the fd because the Broker should have no knowledge if it's
-  // using a socket/windows pipe
   int listen_fd;   // file descriptor of the socket used to
                    // accept incoming connection requets
   ConnManager *cm; // owned
   char *sock_path; // owned, socket path for the broker
 
-  PackedArray *sessions;
+  PackedArray *active_sessions; // polled for I/O, max MAX_CLIENTS
+  PackedArray *idle_sessions;   // not polled, max MAX_IDLE_SESSIONS
 };
 
 static inline void safe_close_fd(int *fd) {
@@ -47,28 +45,8 @@ static inline void safe_close_fd(int *fd) {
 
 /* --------------------------------- Sessions ------------------------------ */
 
-static int session_init(BrokerMcpSession *sess, int cfd) {
-  if (!sess)
-    return ERR;
-
-  // The BufChannel owns the ByteChannel, which owns the fd.
-  ByteChannel *channel = stdio_bytechannel_open_fd(cfd, cfd);
-  if (!channel) {
-    safe_close_fd(&cfd);
-    return ERR;
-  }
-
-  if (bufch_init(&sess->bc, channel) != OK) {
-    bytech_destroy(channel);
-    return ERR;
-  }
-  sess->fd = cfd;
-  return OK;
-}
-
-/* Callback function to pass to PackedArray to close the BufChannel owned by
- * the BrokerMcpSession 'obj'. */
-static void sessions_cleanup(void *obj, void *ctx) {
+/* Callback for active_sessions: tears down the live BufChannel. */
+static void active_sessions_cleanup(void *obj, void *ctx) {
   (void)ctx;
   BrokerMcpSession *s = (BrokerMcpSession *)obj;
   if (!s)
@@ -77,30 +55,89 @@ static void sessions_cleanup(void *obj, void *ctx) {
   s->fd = -1;
 }
 
+/* Callback for idle_sessions: BufChannel is already torn down, nothing to
+ * close. */
+static void idle_sessions_cleanup(void *obj, void *ctx) {
+  (void)ctx;
+  (void)obj;
+}
+
 /* Adds and initializes a new BrokerMcpSession to 'parr' identified by 'cfd'.
  * A pointer to the new session is assigned to 'out_sess' if not NULL. Returns
  * ok/err.*/
 static int sessions_add(PackedArray *parr, int cfd,
                         BrokerMcpSession **out_sess) {
+  if (!parr || !out_sess)
+    return ERR;
+
   if (out_sess)
     *out_sess = NULL;
-  if (!parr)
-    return ERR;
 
   BrokerMcpSession *sess = NULL;
   size_t idx = parr_emplace(parr, (void **)&sess);
   if (idx == SIZE_MAX || !sess)
     return ERR;
 
-  if (session_init(sess, cfd) != OK) {
-    // delete the session if we failed to init it
-    parr_drop_swap(parr, idx);
-    return ERR;
+  // The BufChannel owns the ByteChannel, which owns the fd.
+  ByteChannel *channel = stdio_bytechannel_open_fd(cfd, cfd);
+  if (!channel) {
+    safe_close_fd(&cfd);
+    goto drop_n_return;
   }
 
-  if (out_sess)
-    *out_sess = sess;
+  if (bufch_init(&sess->bc, channel) != OK) {
+    bytech_destroy(channel);
+    goto drop_n_return;
+  }
+  sess->fd = cfd;
+
+  *out_sess = sess;
   return OK;
+
+drop_n_return:
+  // delete the session if we failed to init it
+  parr_drop_swap(parr, idx);
+  return ERR;
+}
+
+/* Moves the active session at 'active_idx' to 'idle'. Tears down the
+ * BufChannel, sets fd = -1, updates last_active, then removes from 'active'.
+ * If idle is full the oldest idle session is evicted first. */
+static void session_move_to_idle(PackedArray *active, PackedArray *idle,
+                                 size_t active_idx) {
+  BrokerMcpSession *src = parr_at(active, active_idx);
+  if (!src)
+    return;
+
+  /* Save fields we need before the active slot is cleaned/overwritten. */
+  uint8_t token[RESUME_TOKEN_LEN];
+  memcpy(token, src->resume_token, RESUME_TOKEN_LEN);
+  time_t created = src->created_at;
+
+  /* Tear down the live connection. */
+  bufch_clean(&src->bc);
+  src->fd = -1;
+
+  /* Remove from active (cleanup callback is safe — bufch_clean is
+   * idempotent). */
+  parr_drop_swap(active, active_idx);
+
+  /* Evict oldest idle session if at capacity. */
+  if (parr_len(idle) >= MAX_IDLE_SESSIONS) {
+    parr_drop_swap(idle, 0);
+  }
+
+  /* Insert into idle. */
+  BrokerMcpSession *dst = NULL;
+  size_t idx = parr_emplace(idle, (void **)&dst);
+  if (idx == SIZE_MAX || !dst)
+    return;
+
+  memset(dst, 0, sizeof(*dst));
+  dst->fd = -1;
+  memcpy(dst->resume_token, token, RESUME_TOKEN_LEN);
+  dst->created_at = created;
+  dst->last_active = time(NULL);
 }
 
 /* --------------------------------- Broker ------------------------------- */
@@ -130,6 +167,10 @@ static int make_listen_socket(const char *path) {
     safe_close_fd(&fd);
     return -1;
   }
+  if (chmod(path, 0600) != 0) {
+    safe_close_fd(&fd);
+    return -1;
+  }
   if (listen(fd, 16) < 0) {
     safe_close_fd(&fd);
     return -1;
@@ -138,20 +179,20 @@ static int make_listen_socket(const char *path) {
 }
 
 Broker *broker_create(const char *sock_path, ConnManager *cm) {
-  if (!cm)
+  if (!cm || !sock_path)
     return NULL;
   Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
   b->listen_fd = -1;
   b->cm = cm;
 
-  // The PackedArray is responsible for cleaning up the resources of the
-  // sessions
-  b->sessions = parr_create(sizeof(BrokerMcpSession));
-  parr_set_cleanup(b->sessions, sessions_cleanup, NULL);
+  b->active_sessions = parr_create(sizeof(BrokerMcpSession));
+  parr_set_cleanup(b->active_sessions, active_sessions_cleanup, NULL);
 
-  const char *path = sock_path ? sock_path : SOCK_PATH;
-  b->sock_path = dup_or_null(path);
+  b->idle_sessions = parr_create(sizeof(BrokerMcpSession));
+  parr_set_cleanup(b->idle_sessions, idle_sessions_cleanup, NULL);
+
+  b->sock_path = dup_or_null(sock_path);
   if (!b->sock_path) {
     broker_destroy(b);
     return NULL;
@@ -171,19 +212,32 @@ void broker_destroy(Broker *b) {
   if (!b)
     return;
 
-  parr_destroy(b->sessions);
-  b->sessions = NULL;
+  parr_destroy(b->active_sessions);
+  b->active_sessions = NULL;
+
+  parr_destroy(b->idle_sessions);
+  b->idle_sessions = NULL;
 
   if (b->listen_fd >= 0) {
     safe_close_fd(&b->listen_fd);
     b->listen_fd = -1;
   }
 
+  if (b->sock_path)
+    (void)unlink(b->sock_path);
   free(b->sock_path);
   b->sock_path = NULL;
 
   connm_destroy(b->cm);
   free(b);
+}
+
+size_t broker_active_count(const Broker *b) {
+  return b ? parr_len(b->active_sessions) : 0;
+}
+
+size_t broker_idle_count(const Broker *b) {
+  return b ? parr_len(b->idle_sessions) : 0;
 }
 
 /*-------------------------------- Tools Call -------------------------------*/
@@ -230,10 +284,16 @@ static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
   }
   sb_clean(&verr_msg);
 
-  if (db_exec(cv.db, id, query, out_query) != OK) {
+  if (db_exec(cv.db, query, out_query) != OK) {
     TLOG("ERROR - error while communicating with %s", conn_name);
     *out_query = qr_create_err(
         id, "Something went wrong while communicating with the database.");
+    goto free_n_return;
+  }
+  // db_exec leaves the id zeroed; stamp it with the request id
+  if (mcp_id_copy(&(*out_query)->id, id) != OK) {
+    qr_destroy(*out_query);
+    *out_query = NULL;
     goto free_n_return;
   }
   connm_mark_used(b->cm, conn_name);
@@ -321,6 +381,27 @@ return_res:
   return OK;
 }
 
+/*------------------------------ Session Handling ---------------------------*/
+
+/* Returns OK if 'cfd' is a socket with peer credentials equal to the one of
+ * this running process. Else, returns ERR. */
+static int verify_peer_uid(int cfd) {
+  uid_t expected_uid = getuid();
+#ifdef __linux__
+  struct ucred cred;
+  socklen_t len = sizeof(cred);
+  if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
+    return ERR;
+  return (cred.uid == expected_uid) ? OK : ERR;
+#else /* macOS / BSDs */
+  uid_t euid;
+  gid_t egid;
+  if (getpeereid(cfd, &euid, &egid) < 0)
+    return ERR;
+  return (euid == expected_uid) ? OK : ERR;
+#endif
+}
+
 /* Frames 'q_res' and writers it to the Client at 'sess'. Returns OK/ERR. */
 static int broker_write_q_res(BrokerMcpSession *sess,
                               const QueryResult *q_res) {
@@ -350,12 +431,11 @@ int broker_run(Broker *b) {
   if (!b)
     return ERR;
 
-  struct pollfd *pfds =
-      (struct pollfd *)xmalloc((MAX_CLIENTS + 1) * sizeof(*pfds));
+  struct pollfd pfds[MAX_CLIENTS + 1];
 
   for (;;) {
-    // pollfd array: 1 for listen + up to max_clients client fds
-    size_t nsessions = parr_len(b->sessions);
+    // pollfd array: 1 for listen + up to max_clients active fds
+    size_t nsessions = parr_len(b->active_sessions);
     size_t nfds = 1 + nsessions;
 
     // we reset the memory of pfds to be defensive
@@ -366,7 +446,7 @@ int broker_run(Broker *b) {
     pfds[0].events = POLLIN;
 
     for (size_t i = 0; i < nsessions; i++) {
-      BrokerMcpSession *sess = parr_at(b->sessions, i);
+      BrokerMcpSession *sess = parr_at(b->active_sessions, i);
       if (!sess)
         continue;
       pfds[1 + i].fd = sess->fd;
@@ -379,7 +459,6 @@ int broker_run(Broker *b) {
       if (errno == EINTR) {
         continue;
       }
-      free(pfds);
       return -1;
     }
 
@@ -390,21 +469,25 @@ int broker_run(Broker *b) {
         if (cfd < 0) {
           if (errno == EINTR)
             continue;
-          // The socket is marked nonblocking and no connections are
-          // present to be accepted
-          // TODO: when sockets will be nonblocking
-          // if (errno == EAGAIN || errno == EWOULDBLOCK) break;
           // accept error; keep running
           break;
         }
-        if (MAX_CLIENTS > 0 && parr_len(b->sessions) >= MAX_CLIENTS) {
+        if (verify_peer_uid(cfd) != OK) {
+          TLOG("INFO - rejected client fd=%d: peer UID mismatch", cfd);
+          safe_close_fd(&cfd);
+          continue;
+        }
+        if (MAX_CLIENTS > 0 && parr_len(b->active_sessions) >= MAX_CLIENTS) {
           safe_close_fd(&cfd);
           break;
         }
-        if (sessions_add(b->sessions, cfd, NULL) != OK) {
+        BrokerMcpSession *new_sess = NULL;
+        if (sessions_add(b->active_sessions, cfd, &new_sess) != OK) {
           safe_close_fd(&cfd);
           break;
         }
+        new_sess->created_at = time(NULL);
+        new_sess->last_active = new_sess->created_at;
         TLOG("INFO - accepted MCP client fd=%d", cfd);
         break;
         // TODO: For now we accept one at a time; loop accepts multiple
@@ -414,19 +497,19 @@ int broker_run(Broker *b) {
 
     // Handle client I/O for the sessions we polled this iteration.
     for (size_t i = 0; i < nsessions; /* increment inside */) {
+      struct pollfd *pfd = &pfds[1 + i];
+
       // we don't increament 'i' when removing a session because the array
       // squash the next structures and fills the empty slot of the
       // removed session
-      struct pollfd *pfd = &pfds[1 + i];
-
       if (pfd->revents & (POLLHUP | POLLERR | POLLNVAL)) {
-        parr_drop_swap(b->sessions, i);
+        session_move_to_idle(b->active_sessions, b->idle_sessions, i);
         nsessions--;
         continue;
       }
 
       if (pfd->revents & POLLIN) {
-        BrokerMcpSession *sess = parr_at(b->sessions, i);
+        BrokerMcpSession *sess = parr_at(b->active_sessions, i);
 
         StrBuf req = {0};
         QueryResult *q_res = NULL;
@@ -434,12 +517,10 @@ int broker_run(Broker *b) {
         int rr = frame_read_len(&sess->bc, &req);
         if (rr != OK || req.len > MAX_REQ_LEN) {
           // framing error -> drop client
-          fprintf(stderr, "Broker: frame_read_len failed (rc=%d, len=%zu)\n",
-                  rr, req.len);
           TLOG("ERROR - drop client: frame_read_len rc=%d len=%zu", rr,
                req.len);
           sb_clean(&req);
-          parr_drop_swap(b->sessions, i);
+          parr_drop_swap(b->active_sessions, i);
           nsessions--;
           continue;
         }
@@ -451,7 +532,6 @@ int broker_run(Broker *b) {
                    "Error. Broker ignores message longer than %d bytes. "
                    "Please, respect the limit",
                    MAX_REQ_LEN);
-          TLOG("ERROR - reject request: len=%zu exceeds MAX_REQ_LEN", req.len);
           McpId id = {0};
           mcp_id_init_u32(&id, 0);
           q_res = qr_create_err(&id, buf);
@@ -463,9 +543,8 @@ int broker_run(Broker *b) {
         if (hr != OK) {
           // Something bad happend, drop client
           fprintf(stderr, "Broker: request handling failed\n");
-          TLOG("ERROR - drop client: broker_handle_request failed");
           sb_clean(&req);
-          parr_drop_swap(b->sessions, i);
+          parr_drop_swap(b->active_sessions, i);
           nsessions--;
           continue;
         }
@@ -481,7 +560,7 @@ int broker_run(Broker *b) {
           TLOG("ERROR - drop client: failed to write response");
           sb_clean(&req);
           qr_destroy(q_res);
-          parr_drop_swap(b->sessions, i);
+          parr_drop_swap(b->active_sessions, i);
           nsessions--;
           continue;
         }
@@ -493,7 +572,6 @@ int broker_run(Broker *b) {
       i++;
     }
   }
-  free(pfds);
 
   // TODO: create a signal to let Broker gracefully exit
   /* unreachable for now. */

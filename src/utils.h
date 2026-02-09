@@ -28,4 +28,8 @@ void *xrealloc(void *ptr, size_t size);
 /* Returns monotonic time in ms (for duration calculations). */
 uint64_t now_ms_monotonic(void);
 
+/* Fills 'len' bytes of 'buf' with cryptographically secure random bytes.
+ * Returns OK/ERR. */
+int fill_random(uint8_t *buf, size_t len);
+
 #endif

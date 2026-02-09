@@ -2,6 +2,7 @@
 #include "conn_catalog.h"
 #include "log.h"
 #include "mcp_server.h"
+#include "private_dir.h"
 #include "secret_store.h"
 #include "utils.h"
 
@@ -21,7 +22,7 @@ int main(int argc, char **argv) {
   // Ignore SIGPIPE so write failures return -1 instead of terminating the
   // process. This makes test failures observable via error handling/logging.
   (void)signal(SIGPIPE, SIG_IGN);
-  const char *sock_path = SOCK_PATH;
+  const char *sock_path = NULL;
   const char *config_path = "template-config.json";
   int run_client = 1;
 
@@ -49,9 +50,20 @@ int main(int argc, char **argv) {
   }
 
   if (run_client) {
+    PrivDir *pd = NULL;
+    if (!sock_path) {
+      pd = privdir_resolve();
+      if (!pd) {
+        fprintf(stderr, "ERROR: failed to resolve private directory\n");
+        return 1;
+      }
+      sock_path = pd->sock_path;
+    }
+
     McpServer s;
     if (mcpser_init(&s, stdin, stdout, sock_path) != OK) {
       fprintf(stderr, "ERROR: server init failed\n");
+      privdir_free(pd);
       return 1;
     }
 
@@ -61,7 +73,29 @@ int main(int argc, char **argv) {
     if (rc != OK)
       fprintf(stderr, "ERROR: %s\n", mcpser_last_error(&s));
     mcpser_clean(&s);
+    privdir_free(pd);
     return (rc == OK) ? 0 : 1;
+  }
+
+  PrivDir *pd = NULL;
+  if (!sock_path) {
+    pd = privdir_resolve();
+    if (!pd) {
+      fprintf(stderr, "ERROR: failed to resolve private directory\n");
+      return 1;
+    }
+    if (privdir_create_layout(pd) != OK) {
+      fprintf(stderr, "ERROR: failed to create private directory layout\n");
+      privdir_free(pd);
+      return 1;
+    }
+    if (privdir_generate_token(pd) != OK) {
+      fprintf(stderr, "ERROR: failed to generate token\n");
+      privdir_cleanup(pd);
+      privdir_free(pd);
+      return 1;
+    }
+    sock_path = pd->sock_path;
   }
 
   char *cat_err = NULL;
@@ -69,6 +103,10 @@ int main(int argc, char **argv) {
   if (!cat) {
     fprintf(stderr, "ERROR: catalog init failed: %s\n",
             cat_err ? cat_err : "unknown error");
+    if (pd) {
+      privdir_cleanup(pd);
+      privdir_free(pd);
+    }
     return 1;
   }
 
@@ -77,6 +115,10 @@ int main(int argc, char **argv) {
   if (!secrets) {
     catalog_destroy(cat);
     fprintf(stderr, "ERROR: secret store init failed\n");
+    if (pd) {
+      privdir_cleanup(pd);
+      privdir_free(pd);
+    }
     return 1;
   }
 
@@ -86,6 +128,10 @@ int main(int argc, char **argv) {
     catalog_destroy(cat);
     secret_store_destroy(secrets);
     fprintf(stderr, "ERROR: conn manager init failed\n");
+    if (pd) {
+      privdir_cleanup(pd);
+      privdir_free(pd);
+    }
     return 1;
   }
 
@@ -93,6 +139,10 @@ int main(int argc, char **argv) {
   if (!b) {
     connm_destroy(cm);
     fprintf(stderr, "ERROR: broker init failed\n");
+    if (pd) {
+      privdir_cleanup(pd);
+      privdir_free(pd);
+    }
     return 1;
   }
 
@@ -101,5 +151,9 @@ int main(int argc, char **argv) {
   if (rc != OK)
     fprintf(stderr, "ERROR: broker run failed\n");
   broker_destroy(b);
+  if (pd) {
+    privdir_cleanup(pd);
+    privdir_free(pd);
+  }
   return (rc == OK) ? 0 : 1;
 }

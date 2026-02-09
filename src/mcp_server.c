@@ -113,7 +113,6 @@ int mcpser_init(McpServer *s, FILE *in, FILE *out, const char *sock_path) {
   if (!s || !in || !out || !sock_path)
     return ERR;
   memset(s, 0, sizeof(*s));
-  s->next_id = 1;
   s->last_err[0] = '\0';
 
   int in_fd = fileno(in);
@@ -464,7 +463,6 @@ void mcpser_clean(McpServer *s) {
     bufch_destroy(s->out_bc);
     s->out_bc = NULL;
   }
-  s->next_id = 0;
   s->last_err[0] = '\0';
 }
 

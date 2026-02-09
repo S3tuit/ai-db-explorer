@@ -10,7 +10,6 @@ typedef struct McpServer {
   BufChannel *in_bc;   // owned, used to read from user
   BufChannel *brok_bc; // owned, used to communicate with the Broker
   BufChannel *out_bc;  // owned, used to write to user
-  uint32_t next_id;    // monotonically increasing request id
   char last_err[256];  // last fatal error (best-effort)
 } McpServer;
 

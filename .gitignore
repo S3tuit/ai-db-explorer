@@ -64,3 +64,6 @@ __pycache__*
 
 # personal notes
 *notes
+
+# Claude
+.claude*

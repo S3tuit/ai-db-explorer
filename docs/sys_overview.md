@@ -35,7 +35,7 @@ Because the Host/Server side can be manipulated by the agent, it must be
 assumed compromised. That’s why it cannot be trusted with credentials or
 security decisions.
 
-All the database creadentials are kept in a config file that (user's
+All the database credentials are kept in a config file that (user's
 responsibility) should be kept outside agent's touch.
 Still, we try not to keep databases passwords as plaintext. Before the broker
 runs the user has to call an utility (e.g., load-connections); we'll read the
@@ -44,6 +44,10 @@ of the connections (only the new/changed connections). We're going to store
 credentials based on what's available on the environment our system runs:
 1) OS store (optional, best UX)
 2) config file with strict perms (0600) (simple, portable)
+
+### Credential Storage
+
+TBD
 
 ---
 
@@ -74,6 +78,9 @@ only the intended user/processes can reach it.
 On connection, the Broker performs **peer verification** (at minimum UID/GID
 checks).
 
+In v1, for internal communication between the broker and the MCP Server, we use
+length-prefixed format.
+
 ### Broker - MCP Server handshake
 The goal of the handshake is to prevent random local process from connecting to
 the broker. Not because it's unsafe, but to avoid noise and DoS attacks.
@@ -82,16 +89,49 @@ During startup, Broker creates:
 * run/ directory with mode 0700, socket with mode 0600.
 * secret/ directory with mode 0700, token file with 0600.
 
-Then the user mounds the run/ directory into the sanbox with read-write perm,
+Then the user mounts the run/ directory into the sanbox with read-write perm,
 and the secret/ directory with read-only perm. Even if the sandboxed process
 runs as the same UID, a read-only bind mount stops writes, renames, and deletes
 (from inside the sandbox).
 
 Since users may get file permissions wrong (by changing them), we also use a
-cheap SO_PEERCRED cheek; must be same uid (or allowed gids).
+cheap SO_PEERCRED check; must be same uid (or allowed gids).
 
 The token is not meant to protect from the agent; it only reduces accidental
-local noise.
+local noise and.
+
+---
+
+## Session model and continuity (current direction)
+
+### Why “session” is a Broker concept, not an MCP Server PID
+
+Since MCP Hosts may start/stop MCP Servers unpredictably (restarts, crashes,
+tool lifecycle differences), we avoid tying session identity to process IDs.
+
+Instead, session is defined in a way that the **Broker controls** and can
+enforce regardless of how the host behaves.
+
+---
+
+### Resumable identity across MCP Server restarts (proposal)
+
+To preserve usability if the MCP Host restarts the MCP Server often, we are
+considering a resumable identity mechanism where the MCP Server persists a
+client identifier and presents it during handshake. The Broker would attach
+TTL semantics to this identifier so it doesn’t last forever and can expire when
+disconnected.
+
+The flow is:
+1) MCP Server connects.
+2) Broker authenticates peer (UID/GID).
+3) Broker creates a session and returns a token (random secret).
+4) MCP Server persists that resume token in its own sandbox storage.
+5) On restart, MCP Server presents resume token → Broker resumes session if
+token valid + not expired. If the token is expired or not valid, Broker returns
+error.
+
+The token may have an idle TTL of 20 min and absolute TTL 8h.
 
 ---
 
@@ -125,38 +165,6 @@ When the agent submits a query containing a token, the Broker verifies:
 1. the token belongs to the active session scope, and
 2. the token is authorized for the specific table/column context,
 then it resolves the token internally and binds the real value to the SQL parameter.
-
----
-
-## Session model and continuity (current direction)
-
-### Why “session” is a Broker concept, not an MCP Server PID
-
-Since MCP Hosts may start/stop MCP Servers unpredictably (restarts, crashes,
-tool lifecycle differences), we avoid tying session identity to process IDs.
-
-Instead, session is defined in a way that the **Broker controls** and can
-enforce regardless of how the host behaves.
-
----
-
-### Resumable identity across MCP Server restarts (proposal)
-
-To preserve usability if the MCP Host restarts the MCP Server often, we are
-considering a resumable identity mechanism where the MCP Server persists a
-client identifier and presents it during handshake. The Broker would attach
-TTL semantics to this identifier so it doesn’t last forever and can expire when
-disconnected.
-
-The flow is:
-1) MCP Server connects.
-2) Broker authenticates peer (UID/GID + capability token).
-3) Broker creates a session and returns a token (random secret).
-4) MCP Server persists that resume token in its own sandbox storage.
-5) On restart, MCP Server presents resume token → Broker resumes session if
-token valid + not expired.
-
-The token may have an idle TTL of 20 min and absolute TTL 24h.
 
 ---
 

@@ -13,6 +13,17 @@ typedef struct QRColumn {
 
 typedef enum QRStatus { QR_OK = 0, QR_ERROR = 1 } QRStatus;
 
+// indicates errors that may be encountered at the protol layer
+typedef enum {
+  QRERR_INTERNAL = -32603, // unexpected condition encountered
+  QRERR_INPARAM = -32602,  // invalid or malformed parameters
+  QRERR_INREQ = -32600,    // invalid request object
+  QRERR_INMETHOD = -32601, // invalid/not found method
+  QRERR_PARSER = -32700,   // invalid JSON was received
+
+  QRERR_RESOURCE = -30001, // resource (e.g. ConnectionName) not found
+} QrErrorCode;
+
 /* It's a materialized, DB-agnostic query result. It owns cols and cells. */
 typedef struct QueryResult {
   McpId id; // id of the request
@@ -44,17 +55,19 @@ typedef struct QueryResult {
 } QueryResult;
 
 /* Creates a QueryResult with allocated storage for cells (all NULL).
- * Ownership: makes an internal copy of 'id' (string ids are duplicated).
- * Error semantics: returns NULL on allocation failure or invalid id. */
+ * If 'id' is non-NULL, makes an internal copy (string ids are duplicated).
+ * If 'id' is NULL, the id field is zeroed; caller can set it later.
+ * Returns NULL on allocation failure. */
 QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
                           uint8_t result_truncated, uint64_t max_query_bytes);
 
 /* Creates a QueryResult that represents an error. malloc 'err_msg'.
- * Ownership: makes an internal copy of 'id'. Returns NULL on failure. */
+ * If 'id' is NULL, the id field is zeroed. Returns NULL on failure. */
 QueryResult *qr_create_err(const McpId *id, const char *err_msg);
 
 /* Creates a QueryResult with a single text column named "message" and one row.
- * If msg is NULL, stores an empty string. Returns NULL on failure. */
+ * If 'id' is NULL, the id field is zeroed. If msg is NULL, stores an empty
+ * string. Returns NULL on failure. */
 QueryResult *qr_create_msg(const McpId *id, const char *msg);
 
 /* Frees all owned memory, 'qr' itself too. */

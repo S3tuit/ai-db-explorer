@@ -33,12 +33,11 @@ typedef struct DbBackendVTable {
   // Closes the connection of 'db' and frees its allocation
   void (*destroy)(DbBackend *db);
 
-  // Executes 'sql' statement, materializes a QueryResult having 'request_id'
-  // as id. The QueryResult may represent an error or a good response. This
-  // returns OK if it was able to allocate a QueryResult, ERR if it wasn't
-  // able to allocate it.
-  int (*exec)(DbBackend *db, const McpId *request_id, const char *sql,
-              QueryResult **out_qr);
+  // Executes 'sql' statement and materializes a QueryResult. The QueryResult
+  // may represent an error or a good response. The id field of the result is
+  // left zeroed; the caller is responsible for stamping it.
+  // Returns OK if it was able to allocate a QueryResult, ERR otherwise.
+  int (*exec)(DbBackend *db, const char *sql, QueryResult **out_qr);
 
   // Creates a QirQueryHandle starting from 'sql'. The backend owns and
   // populates the handle, and the caller must destroy it via
@@ -80,11 +79,11 @@ static inline void db_destroy(DbBackend *db) {
     return;
   db->vt->destroy(db);
 }
-static inline int db_exec(DbBackend *db, const McpId *request_id,
-                          const char *sql, QueryResult **out_qr) {
+static inline int db_exec(DbBackend *db, const char *sql,
+                          QueryResult **out_qr) {
   if (!db || !db->vt || !db->vt->exec)
     return ERR;
-  return db->vt->exec(db, request_id, sql, out_qr);
+  return db->vt->exec(db, sql, out_qr);
 }
 
 static inline int db_make_query_ir(DbBackend *db, const char *sql,

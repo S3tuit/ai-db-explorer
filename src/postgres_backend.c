@@ -2309,8 +2309,7 @@ static void pg_destroy(DbBackend *db) {
   free(db);
 }
 
-static int pg_exec(DbBackend *db, const McpId *request_id, const char *sql,
-                   QueryResult **out_qr) {
+static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
 
   const char *err_msg;
   QueryResult *qr = NULL;
@@ -2397,7 +2396,7 @@ static int pg_exec(DbBackend *db, const McpId *request_id, const char *sql,
       result_truncated = 1;
     }
 
-    qr = qr_create_ok(request_id, (uint32_t)ncols, out_rows, result_truncated,
+    qr = qr_create_ok(NULL, (uint32_t)ncols, out_rows, result_truncated,
                       p->policy.max_query_bytes);
     if (!qr) {
       pg_set_err(p, "qr_create_ok error");
@@ -2486,7 +2485,7 @@ fail:
     qr_destroy(qr);
 fail_bad_input:
   // if bad input, we can't rely on the buffer for the error of PgImpl
-  *out_qr = qr_create_err(request_id, err_msg);
+  *out_qr = qr_create_err(NULL, err_msg);
   return (*out_qr ? OK : ERR);
 }
 

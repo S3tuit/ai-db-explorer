@@ -67,11 +67,11 @@ Token value should be high-entropy random (e.g. 128 bits).
 ### 4.2 Token storage
 
 Since tokens are session-scoped and we trust that Broker's memory won't be
-peeked, we store tokens in Broker's memory. To avoid unbouded grow we apply
+peeked, we store tokens in Broker's memory. To avoid unbounded grow we apply
 limits:
 
 * A session cannot hold more than 64MB of tokens.
-* A query result canno be bigger than ~5MB (to be defined).
+* A query result cannot be bigger than ~5MB (to be defined).
 
 ### 4.3 Token use in queries
 
