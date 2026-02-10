@@ -8,20 +8,22 @@
 #include "byte_channel.h"
 #include "conn_manager.h"
 #include "db_backend.h"
+#include "token_constants.h"
 
 /*-------------------------------- Handshake --------------------------------*/
 
 #define HANDSHAKE_MAGIC 0x4D435042 /* "MCPB" */
 #define HANDSHAKE_VERSION 1
-#define SECRET_TOKEN_LEN 32 /* 256-bit random token */
-#define RESUME_TOKEN_LEN 32
+#define SECRET_TOKEN_LEN ADBX_SHARED_TOKEN_LEN /* 256-bit random token */
+#define RESUME_TOKEN_LEN ADBX_RESUME_TOKEN_LEN
 
 typedef struct {
   uint32_t magic;
   uint16_t version;
   uint16_t flags;                         /* bit 0: has_resume_token */
-  uint8_t resume_token[RESUME_TOKEN_LEN]; /* zero-filled if new session */
-  uint8_t secret_token[RESUME_TOKEN_LEN]; /* required during handshake */
+  uint8_t resume_token[RESUME_TOKEN_LEN]; /* ignored if has_resume_token is not
+                                             set */
+  uint8_t secret_token[SECRET_TOKEN_LEN]; /* required during handshake */
 } handshake_req_t;
 
 #define HANDSHAKE_FLAG_RESUME (1u << 0)
@@ -33,7 +35,8 @@ typedef enum {
   HS_ERR_TOKEN_EXPIRED = 3,
   HS_ERR_TOKEN_UNKNOWN = 4,
   HS_ERR_FULL = 5, /* MAX_CLIENTS reached */
-  HS_ERR_INTERNAL = 6,
+  HS_ERR_REQ = 6,  /* malformed handshake request */
+  HS_ERR_INTERNAL = 7,
 } handshake_status;
 
 typedef struct {
@@ -76,9 +79,12 @@ typedef struct BrokerMcpSession {
  */
 int broker_run(Broker *b);
 
-/* Creates a Broker. If sock_path is NULL, it uses the default. The Broker
- * takes ownership of 'cm'. */
-Broker *broker_create(const char *sock_path, ConnManager *cm);
+/* Creates a Broker. The Broker takes ownership of 'cm'.
+ * 'secret_token' is copied internally and used for handshake verification.
+ * In test builds (ADBX_TEST_MODE), secret_token may be NULL to skip auth.
+ * In production builds, NULL secret_token causes broker_create to fail. */
+Broker *broker_create(const char *sock_path, ConnManager *cm,
+                      const uint8_t *secret_token);
 
 /* Frees 'b' and its owned entities. */
 void broker_destroy(Broker *b);

@@ -1,102 +1,17 @@
 #include "conn_catalog.h"
-#include "bufio.h"
+#include "file_io.h"
 #include "json_codec.h"
-#include "stdio_byte_channel.h"
 #include "string_op.h"
 #include "utils.h"
 
 #include <ctype.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #define CONFIG_MAX_BYTES (8u * 1024u * 1024u)
 #define CONFIG_MAX_CONNECTIONS 50u
-
-/* Loads the entire file at 'path' into 'sb'.
- * Returns OK/ERR and assigns a static error message to *err_out on failure. */
-static int read_file_to_sb(const char *path, StrBuf *sb, char **err_out) {
-  int fd = -1;
-  char *err_msg = NULL;
-  BufChannel bc;
-  int bc_inited = 0;
-
-  if (!path || !sb) {
-    if (err_out)
-      *err_out = "Can't read file, invalid input.";
-    return ERR;
-  }
-
-  fd = open(path, O_RDONLY);
-  if (fd < 0) {
-    err_msg = "ConnCatalog: unable to open config file.";
-    goto error;
-  }
-
-  ByteChannel *ch = stdio_bytechannel_open_fd(fd, -1);
-  if (!ch) {
-    err_msg = "ConnCatalog: unable to read config file.";
-    goto error;
-  }
-
-  if (bufch_init(&bc, ch) != OK) {
-    bytech_destroy(ch);
-    err_msg = "ConnCatalog: unable to read config file.";
-    goto error;
-  }
-  bc_inited = 1;
-
-  // we have to make sure the file is not too long
-  size_t total = 0;
-  for (;;) {
-    // if there's still one byte to read, we have to read it
-    int rc = bufch_ensure(&bc, 1);
-    if (rc == NO)
-      break;
-    if (rc == ERR) {
-      err_msg = "ConnCatalog: read error.";
-      goto error;
-    }
-
-    // how much the channel has buffered
-    size_t avail = 0;
-    const uint8_t *p = bufch_peek(&bc, &avail);
-    if (!p || avail == 0)
-      continue;
-    if (total + avail > CONFIG_MAX_BYTES) {
-      err_msg = "ConnCatalog: config file exceeds 8 MiB.";
-      goto error;
-    }
-
-    // read
-    char *dst = NULL;
-    if (sb_prepare_for_write(sb, avail, &dst) != OK) {
-      err_msg = "ConnCatalog: out of memory.";
-      goto error;
-    }
-    if (bufch_read_n(&bc, dst, avail) != OK) {
-      err_msg = "ConnCatalog: read error.";
-      goto error;
-    }
-    total += avail;
-  }
-
-  bufch_clean(&bc);
-  return OK;
-
-error:
-  if (err_out)
-    *err_out = err_msg;
-
-  if (fd >= 0 && !bc_inited)
-    close(fd);
-  if (bc_inited)
-    bufch_clean(&bc);
-  return ERR;
-}
 
 /* Lowercases an ASCII string in-place. */
 static inline void str_lower_inplace(char *s) {
@@ -839,7 +754,9 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
     goto error;
   }
 
-  if (read_file_to_sb(path, &sb, &err_msg) != OK) {
+  if (fileio_read_all_limit(path, CONFIG_MAX_BYTES, &sb) != OK) {
+    err_msg = "ConnCatalog: failed to read config file. Check path and ensure "
+              "file size respects configured limits.";
     goto error;
   }
 

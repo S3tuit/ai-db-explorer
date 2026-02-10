@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include "file_io.h"
 #include "private_dir.h"
 #include "utils.h"
 
@@ -75,26 +76,44 @@ static char *resolve_base_path(void) {
     memcpy(base, buf, (size_t)n + 1);
   }
 
-  /* Validate that the full socket path fits in sun_path. */
-  struct sockaddr_un sun_check;
-  size_t sock_full_len =
-      strlen(base) + strlen("run/") + strlen(PRIVDIR_SOCK_FILENAME);
-  if (sock_full_len >= sizeof(sun_check.sun_path)) {
-    free(base);
-    return NULL;
-  }
-
   return base;
 }
 
 /* ------------------------------- Public API ------------------------------- */
 
-PrivDir *privdir_resolve(void) {
-  char *base = resolve_base_path();
-  if (!base)
-    return NULL;
+PrivDir *privdir_resolve(const char *input_base) {
+  char *base; // malloc'd string
 
+  // no base in input, resolve from env vars
+  if (!input_base || input_base[0] != '/') {
+    base = resolve_base_path();
+    if (!base) {
+      return NULL;
+    }
+
+    // validate the path in input
+  } else {
+    size_t len = strlen(input_base);
+
+    /* Ensure trailing slash. */
+    int needs_slash = (len == 0 || input_base[len - 1] != '/');
+    size_t alloc = len + (needs_slash ? 1 : 0) + 1;
+    base = xmalloc(alloc);
+    memcpy(base, input_base, len);
+    if (needs_slash)
+      base[len++] = '/';
+    base[len] = '\0';
+  }
+
+  /* Validate that the full socket path fits in sun_path. */
+  struct sockaddr_un sun_check;
   size_t base_len = strlen(base);
+  size_t sock_full_len =
+      base_len + strlen("run/") + strlen(PRIVDIR_SOCK_FILENAME);
+  if (sock_full_len >= sizeof(sun_check.sun_path)) {
+    free(base);
+    return NULL;
+  }
 
   /* Build all paths relative to base. */
   size_t run_len = base_len + strlen("run/") + 1;
@@ -164,20 +183,25 @@ int privdir_generate_token(const PrivDir *pd) {
   return OK;
 }
 
+/* Reads token_path into a temporary buffer and enforces exact token length.
+ * Ownership: borrows 'pd'; writes token bytes into caller-owned 'out'.
+ * Side effects: performs filesystem I/O and clears temporary token memory.
+ * Error semantics: returns OK when exactly PRIVDIR_TOKEN_LEN bytes are read,
+ * ERR on invalid input, read failure, or invalid token length. */
 int privdir_read_token(const PrivDir *pd, uint8_t *out) {
   if (!pd || !pd->token_path || !out)
     return ERR;
 
-  int fd = open(pd->token_path, O_RDONLY);
-  if (fd < 0)
+  StrBuf sb = {0};
+  if (fileio_read_all_limit(pd->token_path, PRIVDIR_TOKEN_LEN, &sb) != OK)
     return ERR;
-
-  ssize_t n = read(fd, out, PRIVDIR_TOKEN_LEN);
-  close(fd);
-
-  if (n != PRIVDIR_TOKEN_LEN)
+  if (sb.len != PRIVDIR_TOKEN_LEN) {
+    sb_zero_clean(&sb);
     return ERR;
+  }
 
+  memcpy(out, sb.data, PRIVDIR_TOKEN_LEN);
+  sb_zero_clean(&sb);
   return OK;
 }
 

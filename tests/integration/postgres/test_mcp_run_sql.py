@@ -132,9 +132,8 @@ def test_run_sql_sensitive():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 6
-        assert "error" in resp
-        assert "message" in resp["error"]
-        assert "real_name" in resp["error"]["message"]
+        assert resp["result"]["isError"] == True
+        assert "real_name" in resp["result"]["content"][0]["text"]
 
         resp = send_tools_call(
             server,
@@ -166,9 +165,8 @@ def test_run_sql_sensitive():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 9
-        assert "error" in resp
-        assert "message" in resp["error"]
-        assert "unsafe_get_weight" in resp["error"]["message"]
+        assert resp["result"]["isError"] == True
+        assert "unsafe_get_weight" in resp["result"]["content"][0]["text"]
 
     finally:
         stop_proc(server)

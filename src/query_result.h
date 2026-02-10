@@ -11,7 +11,7 @@ typedef struct QRColumn {
   char *type; // type name in text format like "int4", "text", "date"
 } QRColumn;
 
-typedef enum QRStatus { QR_OK = 0, QR_ERROR = 1 } QRStatus;
+typedef enum QRStatus { QR_OK = 0, QR_ERROR = 1, QR_TOOL_ERROR = 2 } QRStatus;
 
 // indicates errors that may be encountered at the protol layer
 typedef enum {
@@ -46,11 +46,12 @@ typedef struct QueryResult {
       uint64_t used_query_bytes; // bytes stored across all non-NULL cells
     };
 
-    // valid if QR_ERROR
-    char *err_msg;
+    // valid if QR_ERROR or QR_TOOL_ERROR
+    struct {
+      char *err_msg;
+      QrErrorCode err_code; // only meaningful for QR_ERROR
+    };
   };
-
-  // valid if QR_ERROR
 
 } QueryResult;
 
@@ -61,9 +62,15 @@ typedef struct QueryResult {
 QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
                           uint8_t result_truncated, uint64_t max_query_bytes);
 
-/* Creates a QueryResult that represents an error. malloc 'err_msg'.
+/* Creates a QueryResult that represents a protocol error (JSON-RPC error).
  * If 'id' is NULL, the id field is zeroed. Returns NULL on failure. */
-QueryResult *qr_create_err(const McpId *id, const char *err_msg);
+QueryResult *qr_create_err(const McpId *id, QrErrorCode code,
+                           const char *err_msg);
+
+/* Creates a QueryResult that represents a tool execution error.
+ * Serialized as a successful JSON-RPC result with isError=true.
+ * If 'id' is NULL, the id field is zeroed. Returns NULL on failure. */
+QueryResult *qr_create_tool_err(const McpId *id, const char *err_msg);
 
 /* Creates a QueryResult with a single text column named "message" and one row.
  * If 'id' is NULL, the id field is zeroed. If msg is NULL, stores an empty

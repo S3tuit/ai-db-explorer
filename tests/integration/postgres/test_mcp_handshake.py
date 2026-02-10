@@ -8,7 +8,8 @@ import time
 # root is not '/', but is the root of our repo copied inside the docker
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 BIN = os.path.join(ROOT, "build", "ai-db-explorer-asan")
-SOCK = os.path.join(ROOT, "build", "aidbexplorer.sock")
+PRIVDIR = os.path.join(ROOT, "build", "privdir")
+SOCK = os.path.join(PRIVDIR, "run", "broker.sock")
 CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
 
 
@@ -51,7 +52,7 @@ def start_broker():
     if os.path.exists(SOCK):
         os.unlink(SOCK)
     proc = subprocess.Popen(
-        [BIN, "-broker", "-sock", SOCK, "-config", CONFIG],
+        [BIN, "-broker", "-privdir", PRIVDIR, "-config", CONFIG],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         # Forward broker logs to the test runner so failures aren't silent.
@@ -67,7 +68,7 @@ def start_broker():
 
 def start_server():
     return subprocess.Popen(
-        [BIN, "-sock", SOCK],
+        [BIN, "-privdir", PRIVDIR],
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

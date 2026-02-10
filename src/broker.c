@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <time.h>
@@ -25,6 +26,7 @@
 
 // Maximum size of a single request payload (bytes). Larger frames are rejected.
 #define MAX_REQ_LEN (8u * 1024u * 1024u)
+#define HANDSHAKE_READ_TIMEOUT_SEC 3
 
 struct Broker {
   int listen_fd;   // file descriptor of the socket used to
@@ -32,10 +34,18 @@ struct Broker {
   ConnManager *cm; // owned
   char *sock_path; // owned, socket path for the broker
 
+  uint8_t secret_token[SECRET_TOKEN_LEN];
+  uint8_t has_secret_token; // 1 if secret_token is set, 0 if NULL was passed
+
   PackedArray *active_sessions; // polled for I/O, max MAX_CLIENTS
   PackedArray *idle_sessions;   // not polled, max MAX_IDLE_SESSIONS
 };
 
+/* Closes '*fd' when it is valid and sets it to -1.
+ * It borrows 'fd' and does not allocate memory.
+ * Side effects: closes a kernel file descriptor.
+ * Error semantics: none (best-effort close; this helper returns void).
+ */
 static inline void safe_close_fd(int *fd) {
   if (fd && *fd >= 0) {
     (void)close(*fd);
@@ -43,9 +53,181 @@ static inline void safe_close_fd(int *fd) {
   }
 }
 
+/* Compares the arrays 'a' and 'b' of 'len' size in constant-time (to avoid
+ * timing attacks). It borrows 'a' and 'b'.
+ * Side effects: none.
+ * Returns YES when arrays are equal, NO when different, ERR on invalid input.
+ */
+static int bytes_equal_ct(const uint8_t *a, const uint8_t *b, size_t len) {
+  if (!a || !b)
+    return ERR;
+
+  // XOR/OR accumulation avoids early-exit timing leaks on first mismatch.
+  uint8_t diff = 0;
+  for (size_t i = 0; i < len; i++) {
+    diff |= (uint8_t)(a[i] ^ b[i]);
+  }
+  return (diff == 0) ? YES : NO;
+}
+
+/* Writes one handshake response frame to a connected session. 'resume_token'
+ * may be NULL.
+ * Side effects: writes one length-prefixed frame to sess->bc.
+ * Returns OK on successful write, ERR on invalid input or I/O failure.
+ */
+static int broker_write_handshake_resp(BrokerMcpSession *sess,
+                                       handshake_status status,
+                                       const uint8_t *resume_token) {
+  if (!sess)
+    return ERR;
+
+  handshake_resp_t resp = {0};
+  resp.magic = HANDSHAKE_MAGIC;
+  resp.version = HANDSHAKE_VERSION;
+  resp.status = status;
+  resp.idle_ttl_secs = IDLE_TTL;
+  resp.abs_ttl_secs = ABSOLUTE_TTL;
+
+  if (resume_token) {
+    memcpy(resp.resume_token, resume_token, RESUME_TOKEN_LEN);
+  }
+
+  return frame_write_len(&sess->bc, &resp, (uint32_t)sizeof(resp));
+}
+
+/* Reads one framed handshake request and decodes it into 'out_req'.
+ * It borrows 'sess' and 'out_req'; temporary frame storage is freed before
+ * return.
+ * Side effects: reads one frame from sess->bc and consumes it.
+ * Returns OK on exact-size, well-formed handshake payload; ERR on framing
+ * failure, timeout, malformed size, or invalid input.
+ */
+static int broker_read_handshake_req(BrokerMcpSession *sess,
+                                     handshake_req_t *out_req) {
+  if (!sess || !out_req)
+    return ERR;
+
+  StrBuf payload = {0};
+  int rc = frame_read_len(&sess->bc, &payload);
+  if (rc != OK) {
+    sb_clean(&payload);
+    return ERR;
+  }
+
+  if (payload.len != sizeof(*out_req)) {
+    sb_clean(&payload);
+    return ERR;
+  }
+
+  memcpy(out_req, payload.data, sizeof(*out_req));
+  sb_clean(&payload);
+  return OK;
+}
+
+/* Sets the receive timeout on a socket file descriptor.
+ * It borrows 'fd'; ownership is unchanged.
+ * Side effects: updates SO_RCVTIMEO kernel state for the socket.
+ * Returns OK on success, ERR on invalid input or setsockopt failure.
+ */
+static int broker_set_rcv_timeout_sec(int fd, int sec) {
+  if (fd < 0 || sec < 0)
+    return ERR;
+
+  struct timeval tv = {.tv_sec = sec, .tv_usec = 0};
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0)
+    return ERR;
+  return OK;
+}
+
+/* Checks whether 'sess' exceeded idle or absolute TTL policy.
+ * It borrows 'sess'; no allocation or ownership transfer.
+ * Returns YES when expired, NO when still valid, ERR on invalid input.
+ */
+static int broker_session_is_expired(const BrokerMcpSession *sess, time_t now) {
+  if (!sess || now < 0 || sess->created_at <= 0 || sess->last_active <= 0)
+    return ERR;
+
+  // Fail closed on backwards clock jumps.
+  if (now < sess->created_at || now < sess->last_active)
+    return YES;
+
+  if ((now - sess->created_at) > ABSOLUTE_TTL)
+    return YES;
+  if ((now - sess->last_active) > IDLE_TTL)
+    return YES;
+  return NO;
+}
+
+/* Reaps one idle session, preferring lower indexes as an "older first"
+ * heuristic.
+ * It borrows 'idle'; removed objects are owned/freed by PackedArray cleanup.
+ * Side effects: may remove one idle session from PackedArray.
+ * Returns OK when one idle session is removed, ERR otherwise.
+ */
+static int broker_reap_one_idle_session(PackedArray *idle) {
+  if (!idle)
+    return ERR;
+
+  size_t n = parr_len(idle);
+  for (size_t i = 0; i < n; i++) {
+    BrokerMcpSession *sess = (BrokerMcpSession *)parr_at(idle, i);
+    if (!sess)
+      continue;
+
+    // Idle sessions are expected to have no live fd.
+    if (sess->fd < 0) {
+      parr_drop_swap(idle, i);
+      return OK;
+    }
+  }
+  return ERR;
+}
+
+/* Finds the first idle session whose resume token matches 'token'. Candidate
+ * comparisons are constant-time to reduce timing side channels.
+ * It borrows 'idle' and 'token'; no allocations.
+ * Returns matching index [0..len) when found, -1 otherwise.
+ */
+static ssize_t broker_find_idle_by_token(const PackedArray *idle,
+                                         const uint8_t *token) {
+  if (!idle || !token)
+    return -1;
+
+  size_t n = parr_len(idle);
+  for (size_t i = 0; i < n; i++) {
+    const BrokerMcpSession *sess = (const BrokerMcpSession *)parr_cat(idle, i);
+    if (!sess)
+      continue;
+    int eq = bytes_equal_ct(token, sess->resume_token, RESUME_TOKEN_LEN);
+    if (eq == YES) {
+      return (ssize_t)i;
+    }
+  }
+
+  return -1;
+}
+
+/* Decides whether handshake secret-token verification must run.
+ * It borrows 'b'; no allocation or ownership transfer.
+ * Returns YES when secret check must run, NO when test-mode bypass applies.
+ */
+static int broker_should_check_secret(const Broker *b) {
+#ifdef ADBX_TEST_MODE
+  if (b && !b->has_secret_token)
+    return NO;
+#else
+  (void)b;
+#endif
+  return YES;
+}
+
 /* --------------------------------- Sessions ------------------------------ */
 
-/* Callback for active_sessions: tears down the live BufChannel. */
+/* Cleanup callback for active session slots.
+ * It borrows 'obj' as a PackedArray-owned slot and does not allocate.
+ * Side effects: closes/destroys the live buffered channel and clears fd.
+ * Error semantics: none (void cleanup callback).
+ */
 static void active_sessions_cleanup(void *obj, void *ctx) {
   (void)ctx;
   BrokerMcpSession *s = (BrokerMcpSession *)obj;
@@ -55,54 +237,82 @@ static void active_sessions_cleanup(void *obj, void *ctx) {
   s->fd = -1;
 }
 
-/* Callback for idle_sessions: BufChannel is already torn down, nothing to
- * close. */
+/* Cleanup callback for idle session slots.
+ * It borrows 'obj'/'ctx' and does not allocate.
+ * Side effects: none (idle slots do not own a live channel at cleanup time).
+ * Error semantics: none (void cleanup callback).
+ */
 static void idle_sessions_cleanup(void *obj, void *ctx) {
   (void)ctx;
   (void)obj;
 }
 
-/* Adds and initializes a new BrokerMcpSession to 'parr' identified by 'cfd'.
- * A pointer to the new session is assigned to 'out_sess' if not NULL. Returns
- * ok/err.*/
-static int sessions_add(PackedArray *parr, int cfd,
-                        BrokerMcpSession **out_sess) {
-  if (!parr || !out_sess)
+/* Initializes a live BrokerMcpSession around an owned socket fd.
+ * It takes ownership of 'cfd' on entry. On failure the fd is closed.
+ * Side effects: allocates ByteChannel state and mutates 'sess'.
+ * Returns OK on success, ERR on invalid input or initialization failure.
+ */
+static int session_init_live(BrokerMcpSession *sess, int cfd) {
+  if (!sess || cfd < 0)
     return ERR;
 
-  if (out_sess)
-    *out_sess = NULL;
-
-  BrokerMcpSession *sess = NULL;
-  size_t idx = parr_emplace(parr, (void **)&sess);
-  if (idx == SIZE_MAX || !sess)
-    return ERR;
+  memset(sess, 0, sizeof(*sess));
+  sess->fd = -1;
 
   // The BufChannel owns the ByteChannel, which owns the fd.
   ByteChannel *channel = stdio_bytechannel_open_fd(cfd, cfd);
   if (!channel) {
     safe_close_fd(&cfd);
-    goto drop_n_return;
+    return ERR;
   }
 
   if (bufch_init(&sess->bc, channel) != OK) {
     bytech_destroy(channel);
-    goto drop_n_return;
+    return ERR;
   }
+
   sess->fd = cfd;
-
-  *out_sess = sess;
   return OK;
-
-drop_n_return:
-  // delete the session if we failed to init it
-  parr_drop_swap(parr, idx);
-  return ERR;
 }
 
-/* Moves the active session at 'active_idx' to 'idle'. Tears down the
- * BufChannel, sets fd = -1, updates last_active, then removes from 'active'.
- * If idle is full the oldest idle session is evicted first. */
+/* Moves ownership of a pending live session into the active session array.
+ * It transfers pending->bc and pending->fd to "active"-owned storage on
+ * success; pending keeps ownership on failure.
+ * Side effects: mutates 'active' and session metadata.
+ * Returns inserted index on success, SIZE_MAX on failure.
+ */
+static size_t sessions_add_from_pending(PackedArray *active,
+                                        BrokerMcpSession *pending,
+                                        BrokerMcpSession **out_sess) {
+  if (!active || !pending)
+    return SIZE_MAX;
+  if (out_sess)
+    *out_sess = NULL;
+
+  BrokerMcpSession *dst = NULL;
+  size_t idx = parr_emplace(active, (void **)&dst);
+  if (idx == SIZE_MAX || !dst)
+    return SIZE_MAX;
+
+  memset(dst, 0, sizeof(*dst));
+  dst->bc = pending->bc;
+  dst->fd = pending->fd;
+
+  // pending no longer owns channel/fd after transfer.
+  pending->fd = -1;
+  memset(&pending->bc, 0, sizeof(pending->bc));
+
+  if (out_sess)
+    *out_sess = dst;
+  return idx;
+}
+
+/* Moves one active session to idle-session storage.
+ * It borrows 'active'/'idle'; session ownership stays in PackedArray
+ * containers and no heap allocation escapes.
+ * Side effects: tears down live I/O channel, mutates both arrays, may reap one
+ * existing idle session, and refreshes last_active timestamp.
+ */
 static void session_move_to_idle(PackedArray *active, PackedArray *idle,
                                  size_t active_idx) {
   BrokerMcpSession *src = parr_at(active, active_idx);
@@ -122,9 +332,10 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
    * idempotent). */
   parr_drop_swap(active, active_idx);
 
-  /* Evict oldest idle session if at capacity. */
-  if (parr_len(idle) >= MAX_IDLE_SESSIONS) {
-    parr_drop_swap(idle, 0);
+  // Evict one idle session if at capacity
+  if (parr_len(idle) >= MAX_IDLE_SESSIONS &&
+      broker_reap_one_idle_session(idle) != OK) {
+    return;
   }
 
   /* Insert into idle. */
@@ -142,8 +353,12 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
 
 /* --------------------------------- Broker ------------------------------- */
 
-/* Creates and return the file descriptor of a socket that can be used incoming
- * connection requests. */
+/* Creates/binds/listens a Unix socket at 'path' for broker clients.
+ * It borrows 'path' and does not allocate long-lived memory.
+ * Side effects: unlinks old path, creates socket inode with mode 0600, and
+ * opens a listening fd.
+ * Returns listening fd on success, -1 on failure.
+ */
 static int make_listen_socket(const char *path) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0)
@@ -178,13 +393,30 @@ static int make_listen_socket(const char *path) {
   return fd;
 }
 
-Broker *broker_create(const char *sock_path, ConnManager *cm) {
+/* Creates and initializes a Broker instance.
+ * Takes ownership of 'cm'. Borrows and copies 'sock_path' and optional
+ * 'secret_token'.
+ * Side effects: allocates Broker/session arrays and creates the listen socket.
+ * Returns a valid Broker* on success, NULL on any initialization failure.
+ */
+Broker *broker_create(const char *sock_path, ConnManager *cm,
+                      const uint8_t *secret_token) {
   if (!cm || !sock_path)
     return NULL;
+#ifndef ADBX_TEST_MODE
+  if (!secret_token)
+    return NULL;
+#endif
+
   Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
   b->listen_fd = -1;
   b->cm = cm;
+
+  if (secret_token) {
+    memcpy(b->secret_token, secret_token, SECRET_TOKEN_LEN);
+    b->has_secret_token = 1;
+  }
 
   b->active_sessions = parr_create(sizeof(BrokerMcpSession));
   parr_set_cleanup(b->active_sessions, active_sessions_cleanup, NULL);
@@ -208,6 +440,11 @@ Broker *broker_create(const char *sock_path, ConnManager *cm) {
   return b;
 }
 
+/* Destroys a Broker and all owned resources.
+ * Owns and frees: session arrays, listen fd, socket path copy, and ConnManager.
+ * Side effects: closes file descriptors and unlinks broker socket path.
+ * Error semantics: none (void destructor; safe on NULL).
+ */
 void broker_destroy(Broker *b) {
   if (!b)
     return;
@@ -232,20 +469,33 @@ void broker_destroy(Broker *b) {
   free(b);
 }
 
+/* Returns number of currently active (connected) sessions.
+ * It borrows 'b' and performs no allocations.
+ * Returns 0 when 'b' is NULL, otherwise current active session count.
+ */
 size_t broker_active_count(const Broker *b) {
   return b ? parr_len(b->active_sessions) : 0;
 }
 
+/* Returns number of currently idle (resumable) sessions.
+ * It borrows 'b' and performs no allocations.
+ * Returns 0 when 'b' is NULL, otherwise current idle session count.
+ */
 size_t broker_idle_count(const Broker *b) {
   return b ? parr_len(b->idle_sessions) : 0;
 }
 
 /*-------------------------------- Tools Call -------------------------------*/
 
-/* Executes the SQL inside the arguments of 'jg' and populates 'out_query' with
- * the result using 'id' as the id. 'out_query' may not be populated.
- *
- * Ownership: this borrows all the entities in input.*/
+/* Executes validated run_sql_query arguments and builds a QueryResult.
+ * It borrows 'b', 'jg', and 'id'. It allocates temporary strings and may
+ * allocate '*out_query'; caller owns/destroys '*out_query'.
+ * Side effects: acquires/uses DB connection through ConnManager and records
+ * connection usage on success.
+ * Error semantics: this helper is fail-soft and returns void; it aims to set
+ * '*out_query' to an error/result object and leaves it NULL only on
+ * catastrophic allocation/copy failures.
+ */
 static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
                                  QueryResult **out_query) {
   char *conn_name = NULL;
@@ -255,7 +505,7 @@ static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
       jsget_string_decode_alloc(jg, "params.arguments.query", &query) != YES) {
     free(conn_name);
     free(query);
-    *out_query = qr_create_err(id, "Invalid tool arguments.");
+    *out_query = qr_create_err(id, QRERR_INPARAM, "Invalid tool arguments.");
     goto free_n_return;
   }
 
@@ -264,8 +514,8 @@ static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
   int rc = connm_get_connection(b->cm, conn_name, &cv);
   if (rc != YES || !cv.db || !cv.profile) {
     TLOG("ERROR - unable to connect to %s", conn_name);
-    *out_query =
-        qr_create_err(id, "Unable to connect to the requested database.");
+    *out_query = qr_create_err(id, QRERR_RESOURCE,
+                               "Unable to connect to the requested database.");
     goto free_n_return;
   }
 
@@ -278,7 +528,7 @@ static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
       err_desc = "Unknown error while validating the query. Please make sure "
                  "the query is valid and formatted correctly.";
     }
-    *out_query = qr_create_err(id, err_desc);
+    *out_query = qr_create_tool_err(id, err_desc);
     sb_clean(&verr_msg);
     goto free_n_return;
   }
@@ -286,7 +536,7 @@ static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
 
   if (db_exec(cv.db, query, out_query) != OK) {
     TLOG("ERROR - error while communicating with %s", conn_name);
-    *out_query = qr_create_err(
+    *out_query = qr_create_tool_err(
         id, "Something went wrong while communicating with the database.");
     goto free_n_return;
   }
@@ -303,13 +553,14 @@ free_n_return:
   free(query);
 }
 
-/* Core request handler:
- * - 'req' points to the incoming 'req_len' bytes.
- * - 'out_res' will be filled and may represent an error or a result of a query.
- *
- * Returns:
- *  OK on success (broker will populate 'out_res'),
- *  ERR on error (broker can't even populate 'out_res').
+/* Handles one framed broker request and produces one QueryResult.
+ * It borrows 'b', 'sess', and request bytes. It may allocate '*out_res'; caller
+ * owns/destroys '*out_res' on success.
+ * Side effects: parses untrusted JSON, dispatches tool logic, and may touch DB
+ * through tool handlers.
+ * Returns OK when '*out_res' is populated with either success or tool/error
+ * payload; returns ERR only for catastrophic parse/allocation/internal
+ * failures.
  */
 static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
                                  const char *req, uint32_t req_len,
@@ -340,24 +591,26 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
 
   int vrc = jsget_simple_rpc_validation(&jg);
   if (vrc != YES) {
-    *out_res = qr_create_err(&id, "Invalid JSON-RPC request.");
+    *out_res = qr_create_err(&id, QRERR_INREQ, "Invalid JSON-RPC request.");
     goto return_res;
   }
   // exec command
   JsonStrSpan method_sp = {0};
   if (jsget_string_span(&jg, "method", &method_sp) != YES) {
-    *out_res = qr_create_err(&id, "Can't find the 'method' object.");
+    *out_res =
+        qr_create_err(&id, QRERR_INREQ, "Can't find the 'method' object.");
     goto return_res;
   }
 
   if (!STREQ(method_sp.ptr, method_sp.len, "tools/call")) {
-    *out_res = qr_create_err(&id, "Tool not supported.");
+    *out_res = qr_create_err(&id, QRERR_INMETHOD, "Tool not supported.");
     goto return_res;
   }
 
   JsonStrSpan name_sp = {0};
   if (jsget_string_span(&jg, "params.name", &name_sp) != YES) {
-    *out_res = qr_create_err(&id, "Tool call missing params.name.");
+    *out_res =
+        qr_create_err(&id, QRERR_INPARAM, "Tool call missing params.name.");
     goto return_res;
   }
 
@@ -367,7 +620,7 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
 
     // Unknown tools
   } else {
-    *out_res = qr_create_err(&id, "Unknown tool.");
+    *out_res = qr_create_err(&id, QRERR_INMETHOD, "Unknown tool.");
   }
 
 return_res:
@@ -383,8 +636,11 @@ return_res:
 
 /*------------------------------ Session Handling ---------------------------*/
 
-/* Returns OK if 'cfd' is a socket with peer credentials equal to the one of
- * this running process. Else, returns ERR. */
+/* Verifies that the connected Unix-socket peer has the current process UID.
+ * It borrows 'cfd' and does not allocate memory.
+ * Side effects: reads peer credential metadata via getsockopt/getpeereid.
+ * Returns OK on UID match, ERR on mismatch or syscall failure.
+ */
 static int verify_peer_uid(int cfd) {
   uid_t expected_uid = getuid();
 #ifdef __linux__
@@ -402,7 +658,185 @@ static int verify_peer_uid(int cfd) {
 #endif
 }
 
-/* Frames 'q_res' and writers it to the Client at 'sess'. Returns OK/ERR. */
+/* Performs broker-side handshake for an accepted + peer-verified socket.
+ * Takes ownership of 'cfd'. On success ownership moves into active_sessions;
+ * on failure the fd/channel are closed before return.
+ * Side effects: reads/writes handshake frames, mutates active/idle session
+ * arrays, may reap idle sessions, and updates per-session timestamps/tokens.
+ * Returns OK only when handshake succeeds and session is active; ERR otherwise.
+ */
+static int broker_accept_after_peer_check(Broker *b, int cfd) {
+  if (!b || cfd < 0) {
+    safe_close_fd(&cfd);
+    return ERR;
+  }
+
+  handshake_status status = HS_ERR_INTERNAL;
+  uint8_t out_token[RESUME_TOKEN_LEN] = {0};
+  BrokerMcpSession pending = {0};
+  BrokerMcpSession *active_sess = NULL;
+  size_t active_idx = SIZE_MAX;
+  int keep_open = NO;
+
+  if (session_init_live(&pending, cfd) != OK) {
+    return ERR;
+  }
+  // session_init_live takes ownership of cfd; do not close it directly now.
+  cfd = -1;
+
+  if (broker_set_rcv_timeout_sec(pending.fd, HANDSHAKE_READ_TIMEOUT_SEC) !=
+      OK) {
+    status = HS_ERR_INTERNAL;
+    goto send_n_close;
+  }
+
+  handshake_req_t req = {0};
+  if (broker_read_handshake_req(&pending, &req) != OK) {
+    status = HS_ERR_REQ;
+    goto send_n_close;
+  }
+
+  if (req.magic != HANDSHAKE_MAGIC) {
+    status = HS_ERR_BAD_MAGIC;
+    goto send_n_close;
+  }
+  if (req.version != HANDSHAKE_VERSION) {
+    status = HS_ERR_BAD_VERSION;
+    goto send_n_close;
+  }
+
+  if (broker_should_check_secret(b) == YES) {
+    int secret_rc =
+        bytes_equal_ct(req.secret_token, b->secret_token, SECRET_TOKEN_LEN);
+    if (secret_rc != YES) {
+      status = HS_ERR_TOKEN_UNKNOWN;
+      goto send_n_close;
+    }
+  }
+
+  time_t now = time(NULL);
+  if (now == (time_t)-1) {
+    status = HS_ERR_INTERNAL;
+    goto send_n_close;
+  }
+
+  // wants to resume a sessions
+  if (req.flags & HANDSHAKE_FLAG_RESUME) {
+    ssize_t idle_idx =
+        broker_find_idle_by_token(b->idle_sessions, req.resume_token);
+    if (idle_idx < 0) {
+      status = HS_ERR_TOKEN_UNKNOWN;
+      goto send_n_close;
+    }
+
+    BrokerMcpSession *idle_sess =
+        (BrokerMcpSession *)parr_at(b->idle_sessions, (size_t)idle_idx);
+    if (!idle_sess) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
+
+    time_t resume_created_at = idle_sess->created_at;
+    int exp = broker_session_is_expired(idle_sess, now);
+    if (exp == YES) {
+      parr_drop_swap(b->idle_sessions, (size_t)idle_idx);
+      status = HS_ERR_TOKEN_EXPIRED;
+      goto send_n_close;
+    }
+    if (exp != NO) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
+
+    if (MAX_CLIENTS > 0 && parr_len(b->active_sessions) >= MAX_CLIENTS) {
+      status = HS_ERR_FULL;
+      goto send_n_close;
+    }
+
+    // we rotate new token on successful resume
+    if (fill_random(out_token, RESUME_TOKEN_LEN) != OK) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
+
+    active_idx =
+        sessions_add_from_pending(b->active_sessions, &pending, &active_sess);
+    if (active_idx == SIZE_MAX || !active_sess) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
+    memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
+    active_sess->created_at = resume_created_at;
+    active_sess->last_active = now;
+
+    // Remove stale idle record.
+    parr_drop_swap(b->idle_sessions, (size_t)idle_idx);
+    status = HS_OK;
+    keep_open = YES;
+  } else {
+    // New session
+    if (MAX_CLIENTS > 0 && parr_len(b->active_sessions) >= MAX_CLIENTS) {
+      status = HS_ERR_FULL;
+      goto send_n_close;
+    }
+
+    if (parr_len(b->idle_sessions) >= MAX_IDLE_SESSIONS &&
+        broker_reap_one_idle_session(b->idle_sessions) != OK) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
+
+    if (fill_random(out_token, RESUME_TOKEN_LEN) != OK) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
+
+    active_idx =
+        sessions_add_from_pending(b->active_sessions, &pending, &active_sess);
+    if (active_idx == SIZE_MAX || !active_sess) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
+    memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
+    active_sess->created_at = now;
+    active_sess->last_active = now;
+    status = HS_OK;
+    keep_open = YES;
+  }
+
+send_n_close: {
+  BrokerMcpSession *resp_sess = keep_open == YES ? active_sess : &pending;
+  const uint8_t *resp_token = (status == HS_OK) ? out_token : NULL;
+  if (broker_write_handshake_resp(resp_sess, status, resp_token) != OK) {
+    // close the new session
+    if (keep_open && active_idx != SIZE_MAX)
+      parr_drop_swap(b->active_sessions, active_idx);
+    bufch_clean(&pending.bc);
+    pending.fd = -1;
+    return ERR;
+  }
+}
+
+  if (status != HS_OK) {
+    bufch_clean(&pending.bc);
+    pending.fd = -1;
+    return ERR;
+  }
+
+  if (broker_set_rcv_timeout_sec(active_sess->fd, 0) != OK) {
+    parr_drop_swap(b->active_sessions, active_idx);
+    return ERR;
+  }
+
+  TLOG("INFO - accepted MCP client fd=%d", active_sess->fd);
+  return OK;
+}
+
+/* Serializes one QueryResult as JSON-RPC and writes one length-prefixed frame.
+ * It borrows 'sess' and 'q_res'.
+ * Side effects: writes to the client channel.
+ * Returns OK on successful encode/write, ERR on invalid input or write failure.
+ */
 static int broker_write_q_res(BrokerMcpSession *sess,
                               const QueryResult *q_res) {
   if (!q_res || !sess)
@@ -427,6 +861,13 @@ clean_n_ret:
   return rc;
 }
 
+/* Runs the broker event loop.
+ * It borrows and mutates Broker-owned session arrays and network descriptors.
+ * Side effects: blocks in poll/accept/read/write, performs handshake
+ * enforcement, and processes client tool requests.
+ * Returns OK on clean stop (not currently reachable), ERR on fatal loop-level
+ * failure.
+ */
 int broker_run(Broker *b) {
   if (!b)
     return ERR;
@@ -477,18 +918,9 @@ int broker_run(Broker *b) {
           safe_close_fd(&cfd);
           continue;
         }
-        if (MAX_CLIENTS > 0 && parr_len(b->active_sessions) >= MAX_CLIENTS) {
-          safe_close_fd(&cfd);
-          break;
+        if (broker_accept_after_peer_check(b, cfd) != OK) {
+          TLOG("INFO - rejected client fd=%d during handshake", cfd);
         }
-        BrokerMcpSession *new_sess = NULL;
-        if (sessions_add(b->active_sessions, cfd, &new_sess) != OK) {
-          safe_close_fd(&cfd);
-          break;
-        }
-        new_sess->created_at = time(NULL);
-        new_sess->last_active = new_sess->created_at;
-        TLOG("INFO - accepted MCP client fd=%d", cfd);
         break;
         // TODO: For now we accept one at a time; loop accepts multiple
         // if queued
@@ -534,7 +966,7 @@ int broker_run(Broker *b) {
                    MAX_REQ_LEN);
           McpId id = {0};
           mcp_id_init_u32(&id, 0);
-          q_res = qr_create_err(&id, buf);
+          q_res = qr_create_err(&id, QRERR_INREQ, buf);
           goto send_q_res;
         }
 

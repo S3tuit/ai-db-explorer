@@ -87,14 +87,15 @@ static void assert_ok_qr(const QueryResult *qr, const char *file, int line) {
   ASSERT_TRUE_AT(qr != NULL, file, line);
   ASSERT_TRUE_AT(qr->status == QR_OK, file, line);
 }
-static void assert_err_qr(const QueryResult *qr, const char *file, int line) {
+static void assert_tool_err_qr(const QueryResult *qr, const char *file,
+                               int line) {
   ASSERT_TRUE_AT(qr != NULL, file, line);
-  ASSERT_TRUE_AT(qr->status == QR_ERROR, file, line);
+  ASSERT_TRUE_AT(qr->status == QR_TOOL_ERROR, file, line);
   ASSERT_TRUE_AT(qr->err_msg != NULL, file, line);
   ASSERT_TRUE_AT(qr->err_msg[0] != '\0', file, line);
 }
 #define ASSERT_OK_QR(qr) assert_ok_qr((qr), __FILE__, __LINE__)
-#define ASSERT_ERR_QR(qr) assert_err_qr((qr), __FILE__, __LINE__)
+#define ASSERT_TOOL_ERR_QR(qr) assert_tool_err_qr((qr), __FILE__, __LINE__)
 
 /* --------------------------------- tests --------------------------------- */
 
@@ -195,7 +196,7 @@ static void test_delete_fails_read_only(void) {
 
   QueryResult *qr = PG_EXEC(pg, "DELETE FROM zfighters WHERE name = 'Goku'");
 
-  ASSERT_ERR_QR(qr);
+  ASSERT_TOOL_ERR_QR(qr);
 
   qr_destroy(qr);
   db_destroy(pg);
@@ -207,11 +208,11 @@ static void test_attempt_disable_readonly_still_cannot_write(void) {
   DbBackend *pg = PG_CONNECT(&p);
 
   QueryResult *qr1 = PG_EXEC(pg, "SET default_transaction_read_only = off");
-  ASSERT_ERR_QR(qr1);
+  ASSERT_TOOL_ERR_QR(qr1);
   qr_destroy(qr1);
 
   QueryResult *qr2 = PG_EXEC(pg, "DELETE FROM zfighters WHERE name = 'Vegeta'");
-  ASSERT_ERR_QR(qr2);
+  ASSERT_TOOL_ERR_QR(qr2);
 
   qr_destroy(qr2);
   db_destroy(pg);
@@ -223,7 +224,7 @@ static void test_long_running_query(void) {
   DbBackend *pg = PG_CONNECT(&p);
 
   QueryResult *qr = PG_EXEC(pg, "SELECT pg_sleep(1);");
-  ASSERT_ERR_QR(qr);
+  ASSERT_TOOL_ERR_QR(qr);
 
   qr_destroy(qr);
   db_destroy(pg);

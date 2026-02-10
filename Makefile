@@ -103,7 +103,7 @@ build/tests/%: build/tests/%.o $(TEST_APP_OBJ) $(LIBPG_QUERY_LIB)
 	$(CC) $^ -o $@ $(TLDFLAGS)
 
 # Run unit tests
-test-unit: EXTRA_TCFLAGS=-DADBX_TESTLOG
+test-unit: EXTRA_TCFLAGS=-DADBX_TEST_MODE
 test-unit: $(UNIT_TEST_BINS)
 	@set -e; \
 	for t in $(UNIT_TEST_BINS); do \
@@ -134,7 +134,7 @@ test: test-unit test-integration
 
 # Run postgres integration tests (used by docker) and run the .py tests.
 # We always use the ASAN binary for tests.
-test-postgres: EXTRA_TCFLAGS=-DADBX_TESTLOG -DDUMMY_SECRET_STORE_WARNING
+test-postgres: EXTRA_TCFLAGS=-DADBX_TEST_MODE -DDUMMY_SECRET_STORE_WARNING
 test-postgres: clean-testobj $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
 # We use a symlink so the integration tests always run the ASAN binary.
 # We use set -e so failures in .py tests stop the target.

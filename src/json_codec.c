@@ -448,13 +448,38 @@ static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
   return OK;
 }
 
+/* Protocol error: {"code":<int>,"message":"..."} */
 static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
   const char *msg = qr->err_msg ? qr->err_msg : "";
   if (json_obj_begin(sb) != OK)
     return ERR;
-  if (json_kv_u64(sb, "exec_ms", qr->exec_ms) != OK)
+  if (json_kv_l(sb, "code", (long)qr->err_code) != OK)
     return ERR;
   if (json_kv_str(sb, "message", msg) != OK)
+    return ERR;
+  if (json_obj_end(sb) != OK)
+    return ERR;
+  return OK;
+}
+
+/* Tool error: {"content":[{"type":"text","text":"..."}],"isError":true} */
+static int json_qr_tool_err(StrBuf *sb, const QueryResult *qr) {
+  const char *msg = qr->err_msg ? qr->err_msg : "";
+  if (json_obj_begin(sb) != OK)
+    return ERR;
+  if (json_kv_arr_begin(sb, "content") != OK)
+    return ERR;
+  if (json_obj_begin(sb) != OK)
+    return ERR;
+  if (json_kv_str(sb, "type", "text") != OK)
+    return ERR;
+  if (json_kv_str(sb, "text", msg) != OK)
+    return ERR;
+  if (json_obj_end(sb) != OK)
+    return ERR;
+  if (json_arr_end(sb) != OK)
+    return ERR;
+  if (json_kv_bool(sb, "isError", 1) != OK)
     return ERR;
   if (json_obj_end(sb) != OK)
     return ERR;
@@ -491,6 +516,13 @@ int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len) {
     if (json_append(&sb, "\"error\":") != OK)
       goto err;
     if (json_qr_err(&sb, qr) != OK)
+      goto err;
+  } else if (qr->status == QR_TOOL_ERROR) {
+    if (json_maybe_comma(&sb) != OK)
+      goto err;
+    if (json_append(&sb, "\"result\":") != OK)
+      goto err;
+    if (json_qr_tool_err(&sb, qr) != OK)
       goto err;
   } else {
     if (json_maybe_comma(&sb) != OK)

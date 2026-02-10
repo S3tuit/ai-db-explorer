@@ -89,10 +89,10 @@ static void test_create_null_args(void) {
   ConnManager *cm = make_empty_cm();
 
   /* NULL sock_path */
-  ASSERT_TRUE(broker_create(NULL, cm) == NULL);
+  ASSERT_TRUE(broker_create(NULL, cm, NULL) == NULL);
 
   /* NULL cm */
-  ASSERT_TRUE(broker_create("/tmp/unused.sock", NULL) == NULL);
+  ASSERT_TRUE(broker_create("/tmp/unused.sock", NULL, NULL) == NULL);
 
   /* cm was not consumed above (broker_create returned NULL), free it. */
   connm_destroy(cm);
@@ -106,7 +106,7 @@ static void test_create_and_destroy(void) {
   char *sock = make_sock_path(tmpdir);
   ConnManager *cm = make_empty_cm();
 
-  Broker *b = broker_create(sock, cm);
+  Broker *b = broker_create(sock, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
   /* Socket file should exist after creation. */
@@ -136,7 +136,7 @@ static void test_client_connect(void) {
 
   char *sock = make_sock_path(tmpdir);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(sock, cm);
+  Broker *b = broker_create(sock, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
   int cfd = connect_client(sock);
@@ -155,7 +155,7 @@ static void test_session_counts_initial(void) {
 
   char *sock = make_sock_path(tmpdir);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(sock, cm);
+  Broker *b = broker_create(sock, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
   /* Fresh broker has zero sessions in both arrays. */
@@ -178,7 +178,7 @@ static void test_disconnect_moves_to_idle(void) {
 
   char *sock = make_sock_path(tmpdir);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(sock, cm);
+  Broker *b = broker_create(sock, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
   /* Start broker_run in a background thread. */
@@ -222,7 +222,7 @@ static void test_multiple_disconnect_cycles(void) {
 
   char *sock = make_sock_path(tmpdir);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(sock, cm);
+  Broker *b = broker_create(sock, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
   pthread_t tid;
@@ -270,7 +270,7 @@ static void test_idle_sessions_cap(void) {
 
   char *sock = make_sock_path(tmpdir);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(sock, cm);
+  Broker *b = broker_create(sock, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
   pthread_t tid;

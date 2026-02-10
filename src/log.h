@@ -1,7 +1,7 @@
 #pragma once
 #include <stdio.h>
 
-#ifdef ADBX_TESTLOG
+#ifdef ADBX_TEST_MODE
 #define TLOG(fmt, ...)                                                         \
   fprintf(stderr, "[TEST] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 #else

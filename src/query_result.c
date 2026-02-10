@@ -53,7 +53,10 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
   return qr;
 }
 
-QueryResult *qr_create_err(const McpId *id, const char *err_msg) {
+/* Shared helper for QR_ERROR and QR_TOOL_ERROR. */
+static QueryResult *qr_create_err_impl(const McpId *id, QRStatus status,
+                                        QrErrorCode code,
+                                        const char *err_msg) {
   QueryResult *qr = xmalloc(sizeof(*qr));
 
   if (id) {
@@ -64,8 +67,9 @@ QueryResult *qr_create_err(const McpId *id, const char *err_msg) {
   } else {
     qr->id = (McpId){0};
   }
-  qr->status = QR_ERROR;
+  qr->status = status;
   qr->exec_ms = 0;
+  qr->err_code = code;
 
   const char *err = err_msg ? err_msg : "";
   size_t len = strlen(err) + 1; // null term
@@ -73,6 +77,15 @@ QueryResult *qr_create_err(const McpId *id, const char *err_msg) {
   memcpy(qr->err_msg, err, len);
 
   return qr;
+}
+
+QueryResult *qr_create_err(const McpId *id, QrErrorCode code,
+                           const char *err_msg) {
+  return qr_create_err_impl(id, QR_ERROR, code, err_msg);
+}
+
+QueryResult *qr_create_tool_err(const McpId *id, const char *err_msg) {
+  return qr_create_err_impl(id, QR_TOOL_ERROR, 0, err_msg);
 }
 
 QueryResult *qr_create_msg(const McpId *id, const char *msg) {
@@ -88,8 +101,8 @@ void qr_destroy(QueryResult *qr) {
 
   mcp_id_clean(&qr->id);
 
-  // if it represent an error
-  if (qr->status == QR_ERROR) {
+  // if it represents an error (protocol or tool)
+  if (qr->status == QR_ERROR || qr->status == QR_TOOL_ERROR) {
     free(qr->err_msg);
     free(qr);
     return;

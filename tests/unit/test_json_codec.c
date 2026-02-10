@@ -197,13 +197,35 @@ static void test_json_empty_result(void) {
 
 static void test_json_error_result(void) {
   McpId id = id_u32(7);
-  QueryResult *qr = qr_create_err(&id, "bad \"x\"");
+  QueryResult *qr = qr_create_err(&id, QRERR_INPARAM, "bad \"x\"");
   ASSERT_TRUE(qr != NULL);
 
   const char *expected = "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{"
-                         "\"exec_ms\":0,"
+                         "\"code\":-32602,"
                          "\"message\":\"bad \\\"x\\\"\""
                          "}}";
+
+  char *json = NULL;
+  size_t json_len = 0;
+  int rc = qr_to_jsonrpc(qr, &json, &json_len);
+
+  ASSERT_TRUE(rc == OK);
+  assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+
+  free(json);
+  qr_destroy(qr);
+}
+
+static void test_json_tool_error_result(void) {
+  McpId id = id_u32(4);
+  QueryResult *qr = qr_create_tool_err(&id, "Query failed.");
+  ASSERT_TRUE(qr != NULL);
+
+  const char *expected =
+      "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{"
+      "\"content\":[{\"type\":\"text\",\"text\":\"Query failed.\"}],"
+      "\"isError\":true"
+      "}}";
 
   char *json = NULL;
   size_t json_len = 0;
@@ -521,6 +543,7 @@ int main(void) {
   test_json_escapes_strings();
   test_json_empty_result();
   test_json_error_result();
+  test_json_tool_error_result();
   test_json_string_id();
   test_json_builder_object();
   test_json_builder_array();

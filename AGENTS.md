@@ -1,91 +1,130 @@
 # AGENTS Guidelines for This Repository
 
 This repository contains a C application named **ai-db-explorer**.
+An overview of the architecture can be found at `./docs/sys_overview.md`.
 
-ai-db-explorer is a lightweight MCP server designed around a **strict threat model**:
-even a malicious, buggy, or overly clever agent **must not** be able to damage
-databases, bypass safety policies, or exfiltrate sensitive data if the system
-is used as intended.
-
-Safety is enforced **at execution time**, not by trusting the agent, the MCP host,
-or the input data.
-
-Agents working on this repository must respect the constraints below.
+Agents working on this repository **must** read this file in full before making
+any changes, and must respect the constraints below.
 
 ---
 
-## 1. Security model (non-negotiable)
+## 1. Security Model (non-negotiable)
 
-The following invariants MUST NOT be violated:
+The following invariants **must not** be violated under any circumstances:
 
 - The **Broker** is the primary security boundary.
 - The **MCP server is untrusted** and must be treated as potentially malicious.
 - Secrets (DB passwords, vault material, decrypted credentials) **must never**
   leave the Broker process.
-- Safety policies are enforced **centrally**, not duplicated or bypassed.
-- Input (JSON, SQL, tokens, parameters) must be treated as **hostile**.
+- Safety policies are enforced **centrally**; they must not be duplicated,
+  weakened, or bypassed.
+- All input (JSON, SQL, tokens, parameters) must be treated as **hostile** and
+  validated before use.
 - No feature may weaken isolation, policy enforcement, or auditing guarantees.
 
-If a proposed change makes these properties unclear, it must be rejected or
-explicitly discussed with the user before implementation.
+If a proposed change makes any of these properties unclear, it must be
+**explicitly discussed with the user** before implementation.
 
 ---
 
-## 2. Simplicity and scope control
+## 2. Simplicity and Scope Control
 
 Prefer:
-- simple, explicit designs
-- deep modules that hide a lot of complexity
-- conservative defaults
+
+- Simple, explicit designs over clever abstractions.
+- Deep modules that hide complexity behind narrow interfaces.
+- Conservative defaults that fail closed.
 
 Avoid:
-- shortcuts that feel more like "hacks"
-- speculative features
-- “temporary” bypasses of validation or policy
-- expanding scope beyond the explicit request
 
-If a change increases complexity or expands trust boundaries, explain why
-and get confirmation before proceeding.
+- Shortcuts that feel more like hacks.
+- Speculative features or premature generalization.
+- "Temporary" bypasses of validation or policy (these are never temporary).
+- Expanding scope beyond the explicit request.
 
----
-
-## 3. No implicit trust
-
-Agents must NOT assume:
-- the MCP server behaves correctly
-- inputs are well-formed
-- callers respect contracts
-- configuration files are safe
-- local IPC peers are friendly
-
-All assumptions must be validated or enforced by code.
+If a change increases complexity or expands trust boundaries, explain **why**
+it is necessary and get confirmation before proceeding.
 
 ---
 
-## 4. Documentation and code style
+## 3. Testing and Verification
 
-Every non-trivial function MUST be preceded by a comment that explains:
+- Every bug fix should include a test or explanation of how the fix was
+  verified.
+- Security-relevant changes (input validation, policy enforcement, secret
+  handling) require **extra scrutiny**: describe the threat the code defends
+  against.
+- If existing tests break, investigate the root cause rather than adjusting
+  assertions to pass.
 
-- **What** the function does (high level)
-- **Ownership rules** (who allocates/frees memory, can be ignored if does not allocate anything)
-- **Side effects** (I/O, global state, security-relevant behavior, can be ignored if no side effects)
-- **Error semantics** (OK / ERR / YES / NO and what they mean)
+---
+
+## 4. Documentation and Code Style
+
+Every non-trivial function **must** be preceded by a comment that explains:
+
+1. **What** the function does (high-level purpose).
+2. **Ownership**: who allocates and frees memory (omit if no allocation).
+3. **Side effects**: I/O, global state, security-relevant behavior (omit if
+   pure).
+4. **Error semantics**: return conventions (`OK` / `ERR` / `YES` / `NO`) and
+   what each means for this function.
+
+These are two examples of well-documented functions:
+
+```c
+/* Compares the arrays 'a' and 'b' of 'len' size in constant-time (to avoid
+ * timing attacks). It borrows 'a' and 'b'.
+ * Returns YES when arrays are equal, NO when different, ERR on invalid input.
+ */
+static int bytes_equal_ct(const uint8_t *a, const uint8_t *b, size_t len) {
+    if (!a || !b)
+        return ERR;
+    // XOR/OR accumulation prevents early-exit timing leaks.
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return (diff == 0) ? YES : NO;
+}
+
+/* Sets the receive timeout on a socket file descriptor. It borrows 'fd'.
+ * Side effects: updates SO_RCVTIMEO kernel state for the socket.
+ * Returns OK on success, ERR on invalid input or setsockopt failure.
+ */
+static int broker_set_rcv_timeout_sec(int fd, int sec) {
+    if (fd < 0 || sec < 0)
+        return ERR;
+
+    struct timeval tv = {.tv_sec = sec, .tv_usec = 0};
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0)
+        return ERR;
+    return OK;
+}
+```
 
 Inside function bodies:
-- comment on **why** decisions are made
-- especially when related to safety, validation, or resource management
 
-Ambiguous ownership or error behavior is considered a bug.
+- Comment on **why** decisions are made, not what the code literally does.
+- Pay special attention to safety, validation, and resource management.
+
+Ambiguous ownership or error behavior is considered a **bug**.
+
+**Code formatting**: agents should not worry about indentation, braces, or
+other stylistic concerns. The user will apply `.clang-format` separately.
 
 ---
 
-## 5. When in doubt
+## 5. Change Discipline
 
-When unsure:
-- choose the safer behavior
-- reject or narrow input
-- return an error rather than guessing
-- prefer explicit failure over silent acceptance
+- Keep changes focused: one logical change per patch.
+- Do not refactor unrelated code alongside a feature or fix.
 
-If uncertainty affects security boundaries, ask the user before implementing.
+---
 
+## 6. When in Doubt
+
+- **Ask the user** before implementing anything ambiguous.
+- Prefer quality and correctness over speed.
+- If a request conflicts with the security model (§1), say so explicitly rather
+  than silently complying.

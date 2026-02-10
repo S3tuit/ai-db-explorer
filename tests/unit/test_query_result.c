@@ -129,13 +129,27 @@ static void test_bounds_and_bad_inputs(void) {
 
 static void test_create_error(void) {
   McpId id = id_u32(3);
-  QueryResult *qr = qr_create_err(&id, "An error.");
+  QueryResult *qr = qr_create_err(&id, QRERR_INREQ, "An error.");
 
   ASSERT_TRUE(qr != NULL);
   ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
   ASSERT_TRUE(qr->id.u32 == 3);
   ASSERT_TRUE(qr->status == QR_ERROR);
+  ASSERT_TRUE(qr->err_code == QRERR_INREQ);
   ASSERT_STREQ(qr->err_msg, "An error.");
+
+  qr_destroy(qr);
+}
+
+static void test_create_tool_error(void) {
+  McpId id = id_u32(4);
+  QueryResult *qr = qr_create_tool_err(&id, "Query failed.");
+
+  ASSERT_TRUE(qr != NULL);
+  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
+  ASSERT_TRUE(qr->id.u32 == 4);
+  ASSERT_TRUE(qr->status == QR_TOOL_ERROR);
+  ASSERT_STREQ(qr->err_msg, "Query failed.");
 
   qr_destroy(qr);
 }
@@ -172,6 +186,7 @@ int main(void) {
   test_deep_copy_outlives_input_buffers();
   test_bounds_and_bad_inputs();
   test_create_error();
+  test_create_tool_error();
   test_create_msg();
 
   fprintf(stderr, "OK: test_query_result\n");

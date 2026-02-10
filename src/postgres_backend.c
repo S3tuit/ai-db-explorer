@@ -2485,7 +2485,7 @@ fail:
     qr_destroy(qr);
 fail_bad_input:
   // if bad input, we can't rely on the buffer for the error of PgImpl
-  *out_qr = qr_create_err(NULL, err_msg);
+  *out_qr = qr_create_tool_err(NULL, err_msg);
   return (*out_qr ? OK : ERR);
 }
 

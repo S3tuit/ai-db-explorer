@@ -52,7 +52,7 @@ static void test_resolve_with_env_var(void) {
   setenv("TMPDIR", tmpdir, 1);
 #endif
 
-  PrivDir *pd = privdir_resolve();
+  PrivDir *pd = privdir_resolve(NULL);
   ASSERT_TRUE(pd != NULL);
 
   /* base should end with /ai-dbexplorer/ */
@@ -72,15 +72,15 @@ static void test_resolve_with_env_var(void) {
 
   /* sock_path should end with broker.sock */
   ASSERT_TRUE(strlen(pd->sock_path) > strlen(PRIVDIR_SOCK_FILENAME));
-  ASSERT_STREQ(
-      pd->sock_path + strlen(pd->sock_path) - strlen(PRIVDIR_SOCK_FILENAME),
-      PRIVDIR_SOCK_FILENAME);
+  ASSERT_STREQ(pd->sock_path + strlen(pd->sock_path) -
+                   strlen(PRIVDIR_SOCK_FILENAME),
+               PRIVDIR_SOCK_FILENAME);
 
   /* token_path should end with token */
   ASSERT_TRUE(strlen(pd->token_path) > strlen(PRIVDIR_TOKEN_FILENAME));
-  ASSERT_STREQ(
-      pd->token_path + strlen(pd->token_path) - strlen(PRIVDIR_TOKEN_FILENAME),
-      PRIVDIR_TOKEN_FILENAME);
+  ASSERT_STREQ(pd->token_path + strlen(pd->token_path) -
+                   strlen(PRIVDIR_TOKEN_FILENAME),
+               PRIVDIR_TOKEN_FILENAME);
 
   privdir_free(pd);
   rm_tmpdir(tmpdir);
@@ -94,7 +94,7 @@ static void test_resolve_fallback(void) {
   unsetenv("TMPDIR");
 #endif
 
-  PrivDir *pd = privdir_resolve();
+  PrivDir *pd = privdir_resolve(NULL);
   ASSERT_TRUE(pd != NULL);
 
   /* base should match /tmp/ai-dbexplorer-<uid>/ */
@@ -113,7 +113,7 @@ static void test_resolve_rejects_relative_path(void) {
   setenv("TMPDIR", "relative/path", 1);
 #endif
 
-  PrivDir *pd = privdir_resolve();
+  PrivDir *pd = privdir_resolve(NULL);
   /* Should fall back to /tmp/ path, not crash. The env is invalid so
    * it uses the fallback. */
   ASSERT_TRUE(pd != NULL);
@@ -141,7 +141,7 @@ static void test_resolve_rejects_overlong_path(void) {
 
   /* The env path is too long, so resolve should fall back to /tmp/ form.
    * But /tmp/ form with uid should be short enough to work. */
-  PrivDir *pd = privdir_resolve();
+  PrivDir *pd = privdir_resolve(NULL);
   if (pd) {
     /* If fallback worked, base should be /tmp/... form */
     ASSERT_TRUE(strncmp(pd->base, "/tmp/", 5) == 0);
@@ -159,7 +159,7 @@ static void test_create_layout_permissions(void) {
   setenv("TMPDIR", tmpdir, 1);
 #endif
 
-  PrivDir *pd = privdir_resolve();
+  PrivDir *pd = privdir_resolve(NULL);
   ASSERT_TRUE(pd != NULL);
 
   int rc = privdir_create_layout(pd);
@@ -198,7 +198,7 @@ static void test_generate_and_read_token(void) {
   setenv("TMPDIR", tmpdir, 1);
 #endif
 
-  PrivDir *pd = privdir_resolve();
+  PrivDir *pd = privdir_resolve(NULL);
   ASSERT_TRUE(pd != NULL);
   ASSERT_TRUE(privdir_create_layout(pd) == OK);
 
@@ -242,7 +242,7 @@ static void test_cleanup(void) {
   setenv("TMPDIR", tmpdir, 1);
 #endif
 
-  PrivDir *pd = privdir_resolve();
+  PrivDir *pd = privdir_resolve(NULL);
   ASSERT_TRUE(pd != NULL);
   ASSERT_TRUE(privdir_create_layout(pd) == OK);
   ASSERT_TRUE(privdir_generate_token(pd) == OK);
