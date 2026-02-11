@@ -87,7 +87,7 @@ static int command_reader_read_stmt(CommandReader *r, StrBuf *acc) {
       }
 
       tmp = (unsigned char *)xmalloc(avail);
-      if (bufch_read_n(r->bc, tmp, avail) != OK) {
+      if (bufch_read_exact(r->bc, tmp, avail) != OK) {
         free(tmp);
         return ERR;
       }

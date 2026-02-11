@@ -28,7 +28,7 @@ int frame_read_len(BufChannel *bc, StrBuf *out_payload) {
 
   // read first 4 bytes
   unsigned char hdr[4];
-  if (bufch_read_n(bc, hdr, sizeof(hdr)) != OK)
+  if (bufch_read_exact(bc, hdr, sizeof(hdr)) != OK)
     return ERR;
 
   // convert to little-endiat
@@ -50,7 +50,7 @@ int frame_read_len(BufChannel *bc, StrBuf *out_payload) {
   if (sb_prepare_for_write(out_payload, (size_t)n, &dst) != OK) {
     return ERR;
   }
-  if (bufch_read_n(bc, (unsigned char *)dst, (size_t)n) != OK)
+  if (bufch_read_exact(bc, (unsigned char *)dst, (size_t)n) != OK)
     return ERR;
   return OK;
 }
@@ -118,7 +118,7 @@ int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
   size_t hdr_len = (size_t)idx + 4;
 
   char *hdr = xmalloc(hdr_len + 1);
-  if (bufch_read_n(bc, hdr, hdr_len) != OK) {
+  if (bufch_read_exact(bc, hdr, hdr_len) != OK) {
     free(hdr);
     return ERR;
   }
@@ -137,7 +137,7 @@ int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
   if (sb_prepare_for_write(out_payload, payload_len, &dst) != OK) {
     return ERR;
   }
-  if (bufch_read_n(bc, dst, payload_len) != OK) {
+  if (bufch_read_exact(bc, dst, payload_len) != OK) {
     sb_clean(out_payload);
     return ERR;
   }

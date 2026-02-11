@@ -70,6 +70,9 @@ Every non-trivial function **must** be preceded by a comment that explains:
 4. **Error semantics**: return conventions (`OK` / `ERR` / `YES` / `NO`) and
    what each means for this function.
 
+Public functions inside .c files should not be preceded by a comment since the
+documentation is already available in the .h file.
+
 These are two examples of well-documented functions:
 
 ```c

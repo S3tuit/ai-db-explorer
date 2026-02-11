@@ -1,6 +1,7 @@
 #include "bufio.h"
 #include "utils.h"
 
+#include <limits.h>
 #include <string.h>
 
 #ifndef BUFIO_READ_CHUNK
@@ -150,12 +151,42 @@ static void bufch_consume(BufChannel *bc, size_t n) {
   }
 }
 
-int bufch_read_n(BufChannel *bc, void *dst, size_t n) {
+int bufch_read_exact(BufChannel *bc, void *dst, size_t n) {
+  if (!bc || (!dst && n != 0))
+    return ERR;
   if (bufch_ensure(bc, n) != YES)
     return ERR;
   memcpy(dst, bc->buf.data + bc->rpos, n);
   bufch_consume(bc, n);
   return OK;
+}
+
+ssize_t bufch_read_until(BufChannel *bc, void *dst, size_t max_n) {
+  if (!bc || (!dst && max_n != 0))
+    return -1;
+  if (max_n > (size_t)SSIZE_MAX)
+    return -1;
+  if (max_n == 0)
+    return 0;
+
+  // Fill before consuming to guarantee that -1 never hides partially consumed
+  // bytes from the caller.
+  while (bc_avail(bc) < max_n) {
+    ssize_t n = bufch_fill(bc);
+    if (n < 0)
+      return -1;
+    if (n == 0)
+      break; // EOF
+  }
+
+  size_t avail = bc_avail(bc);
+  size_t take = max_n;
+  if (take > avail)
+    take = avail;
+
+  memcpy(dst, bc->buf.data + bc->rpos, take);
+  bufch_consume(bc, take);
+  return (ssize_t)take;
 }
 
 ssize_t bufch_findn(BufChannel *bc, const void *needle, size_t needle_len,

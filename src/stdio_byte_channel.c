@@ -1,9 +1,10 @@
 #include "stdio_byte_channel.h"
-#include "log.h"
 #include "utils.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -192,6 +193,62 @@ static ByteChannel *stdio_bytechannel_create_impl(int in_fd, int out_fd,
 
 ByteChannel *stdio_bytechannel_open_fd(int in_fd, int out_fd) {
   return stdio_bytechannel_create_impl(in_fd, out_fd, 1);
+}
+
+ByteChannel *stdio_bytechannel_open_path(const char *in_path,
+                                         const char *out_path) {
+  const char *in = (in_path && in_path[0] != '\0') ? in_path : NULL;
+  const char *out = (out_path && out_path[0] != '\0') ? out_path : NULL;
+  if (!in && !out)
+    return NULL;
+
+  int in_fd = -1;
+  int out_fd = -1;
+
+  if (in && out && strcmp(in, out) == 0) {
+    int flags = O_RDWR;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    int fd = open(in, flags);
+    if (fd < 0)
+      return NULL;
+    ByteChannel *ch = stdio_bytechannel_open_fd(fd, fd);
+    if (!ch)
+      (void)close(fd);
+    return ch;
+  }
+
+  if (in) {
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    in_fd = open(in, flags);
+    if (in_fd < 0)
+      goto err;
+  }
+  if (out) {
+    int flags = O_WRONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    out_fd = open(out, flags);
+    if (out_fd < 0)
+      goto err;
+  }
+
+  return stdio_bytechannel_open_fd(in_fd, out_fd);
+
+err: {
+  int saved = errno;
+  if (in_fd >= 0)
+    (void)close(in_fd);
+  if (out_fd >= 0 && out_fd != in_fd)
+    (void)close(out_fd);
+  errno = saved;
+  return NULL;
+}
 }
 
 ByteChannel *stdio_bytechannel_wrap_fd(int in_fd, int out_fd) {

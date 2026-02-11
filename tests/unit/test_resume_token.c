@@ -1,8 +1,10 @@
 #define _GNU_SOURCE
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "resume_token.h"
@@ -12,7 +14,8 @@
 /* Creates and returns a unique temporary directory path.
  * Ownership: returns heap string owned by caller.
  * Side effects: creates a directory under /tmp.
- * Error semantics: asserts on setup failures and returns non-NULL path. */
+ * Error semantics: asserts on setup failures and returns non-NULL path.
+ */
 static char *make_tmpdir(void) {
   char tmpl[] = "/tmp/test_restok_XXXXXX";
   char *dir = mkdtemp(tmpl);
@@ -20,24 +23,11 @@ static char *make_tmpdir(void) {
   return dup_or_null(dir);
 }
 
-/* Best-effort cleanup of runtime directory used by resume token module.
- * Ownership: borrows 'tmpdir'; no allocations.
- * Side effects: unlinks token files and removes token cache/temp directory.
- * Error semantics: none (best-effort cleanup helper). */
-static void cleanup_runtime_dir(const char *tmpdir) {
-  if (!tmpdir)
-    return;
-
-  char p[512];
-  snprintf(p, sizeof(p), "%s/ai-dbexplorer-mcp", tmpdir);
-  (void)rmdir(p);
-  (void)rmdir(tmpdir);
-}
-
-/* Sets runtime environment variable used by resume token module.
+/* Sets runtime environment variable used by resume token storage directory.
  * Ownership: borrows 'tmpdir'; no allocations.
  * Side effects: mutates process environment.
- * Error semantics: none (asserts on unsupported platform path). */
+ * Error semantics: asserts on unsupported platform or setenv failures.
+ */
 static void set_runtime_env(const char *tmpdir) {
 #ifdef __linux__
   ASSERT_TRUE(setenv("XDG_RUNTIME_DIR", tmpdir, 1) == 0);
@@ -49,90 +39,131 @@ static void set_runtime_env(const char *tmpdir) {
 #endif
 }
 
-/* Verifies loading from empty state returns NO. */
-static void test_load_missing_returns_no(void) {
+/* Best-effort cleanup of temporary runtime directories/files.
+ * Ownership: borrows 'tmpdir' and optional 'store'; no allocations.
+ * Side effects: unlinks token file and removes directories if empty.
+ * Error semantics: none (best-effort cleanup helper).
+ */
+static void cleanup_runtime_dir(const char *tmpdir, ResumeTokenStore *store) {
+  if (store && store->token_path)
+    (void)unlink(store->token_path);
+
+  if (!tmpdir)
+    return;
+
+  char p[512];
+  snprintf(p, sizeof(p), "%s/ai-dbexplorer-mcp", tmpdir);
+  (void)rmdir(p);
+  (void)rmdir(tmpdir);
+}
+
+/* Verifies initialization succeeds and missing token returns NO. */
+static void test_init_and_load_missing(void) {
   char *tmpdir = make_tmpdir();
   set_runtime_env(tmpdir);
 
-  uint8_t out[RESUME_TOKEN_LEN] = {0};
-  ASSERT_TRUE(restok_load("/tmp/sock_a", out) == NO);
+  ResumeTokenStore store = {0};
+  ASSERT_TRUE(restok_init(&store) == YES);
+  ASSERT_TRUE(store.enabled == YES);
 
-  cleanup_runtime_dir(tmpdir);
+  uint8_t out[RESUME_TOKEN_LEN] = {0};
+  ASSERT_TRUE(restok_load(&store, out) == NO);
+
+  cleanup_runtime_dir(tmpdir, &store);
+  restok_clean(&store);
   free(tmpdir);
 }
 
-/* Verifies storing then loading by socket path succeeds. */
+/* Verifies storing then loading raw 32-byte tokens succeeds. */
 static void test_store_then_load_ok(void) {
   char *tmpdir = make_tmpdir();
   set_runtime_env(tmpdir);
 
+  ResumeTokenStore store = {0};
+  ASSERT_TRUE(restok_init(&store) == YES);
+  ASSERT_TRUE(store.enabled == YES);
+
   const uint8_t in[RESUME_TOKEN_LEN] = {
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+      1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
       17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
-  ASSERT_TRUE(restok_store("/tmp/sock_a", in) == OK);
+  ASSERT_TRUE(restok_store(&store, in) == OK);
 
   uint8_t out[RESUME_TOKEN_LEN] = {0};
-  ASSERT_TRUE(restok_load("/tmp/sock_a", out) == YES);
+  ASSERT_TRUE(restok_load(&store, out) == YES);
   ASSERT_TRUE(memcmp(in, out, RESUME_TOKEN_LEN) == 0);
 
-  ASSERT_TRUE(restok_delete("/tmp/sock_a") == OK);
-  cleanup_runtime_dir(tmpdir);
+  ASSERT_TRUE(restok_delete(&store) == OK);
+  ASSERT_TRUE(restok_load(&store, out) == NO);
+
+  cleanup_runtime_dir(tmpdir, &store);
+  restok_clean(&store);
   free(tmpdir);
 }
 
-/* Verifies tokens are isolated by socket path hash partitioning. */
-static void test_sock_path_scoping(void) {
+/* Verifies malformed token files are treated as stale and deleted. */
+static void test_corrupted_file_is_deleted(void) {
   char *tmpdir = make_tmpdir();
   set_runtime_env(tmpdir);
 
-  const uint8_t a[RESUME_TOKEN_LEN] = {
-      10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-      26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41};
-  const uint8_t b[RESUME_TOKEN_LEN] = {
-      90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
-      106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120,
-      121};
-
-  ASSERT_TRUE(restok_store("/tmp/sock_a", a) == OK);
-  ASSERT_TRUE(restok_store("/tmp/sock_b", b) == OK);
-
-  uint8_t out_a[RESUME_TOKEN_LEN] = {0};
-  uint8_t out_b[RESUME_TOKEN_LEN] = {0};
-  ASSERT_TRUE(restok_load("/tmp/sock_a", out_a) == YES);
-  ASSERT_TRUE(restok_load("/tmp/sock_b", out_b) == YES);
-  ASSERT_TRUE(memcmp(a, out_a, RESUME_TOKEN_LEN) == 0);
-  ASSERT_TRUE(memcmp(b, out_b, RESUME_TOKEN_LEN) == 0);
-
-  ASSERT_TRUE(restok_delete("/tmp/sock_a") == OK);
-  ASSERT_TRUE(restok_delete("/tmp/sock_b") == OK);
-  cleanup_runtime_dir(tmpdir);
-  free(tmpdir);
-}
-
-/* Verifies delete is idempotent and load returns NO after deletion. */
-static void test_delete_clears_token(void) {
-  char *tmpdir = make_tmpdir();
-  set_runtime_env(tmpdir);
+  ResumeTokenStore store = {0};
+  ASSERT_TRUE(restok_init(&store) == YES);
+  ASSERT_TRUE(store.enabled == YES);
 
   const uint8_t tok[RESUME_TOKEN_LEN] = {
-      5, 4, 3, 2, 1, 0, 9, 8, 7, 6, 15, 14, 13, 12, 11, 10,
-      25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 31, 30, 29, 28, 27, 26};
-  ASSERT_TRUE(restok_store("/tmp/sock_delete", tok) == OK);
-  ASSERT_TRUE(restok_delete("/tmp/sock_delete") == OK);
-  ASSERT_TRUE(restok_delete("/tmp/sock_delete") == OK);
+      50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65,
+      66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81};
+  ASSERT_TRUE(restok_store(&store, tok) == OK);
+  ASSERT_TRUE(store.token_path != NULL);
+
+  int fd = open(store.token_path, O_WRONLY | O_TRUNC, 0600);
+  ASSERT_TRUE(fd >= 0);
+  const uint8_t bad[7] = {1, 2, 3, 4, 5, 6, 7};
+  ASSERT_TRUE(write(fd, bad, sizeof(bad)) == (ssize_t)sizeof(bad));
+  ASSERT_TRUE(close(fd) == 0);
 
   uint8_t out[RESUME_TOKEN_LEN] = {0};
-  ASSERT_TRUE(restok_load("/tmp/sock_delete", out) == NO);
+  ASSERT_TRUE(restok_load(&store, out) == NO);
 
-  cleanup_runtime_dir(tmpdir);
+  struct stat st;
+  ASSERT_TRUE(stat(store.token_path, &st) != 0);
+
+  cleanup_runtime_dir(tmpdir, &store);
+  restok_clean(&store);
+  free(tmpdir);
+}
+
+/* Verifies permissive directory mode disables resume for this process. */
+static void test_dir_policy_disables_resume(void) {
+  char *tmpdir = make_tmpdir();
+  set_runtime_env(tmpdir);
+
+  ResumeTokenStore store = {0};
+  ASSERT_TRUE(restok_init(&store) == YES);
+  ASSERT_TRUE(store.enabled == YES);
+  ASSERT_TRUE(store.dir_path != NULL);
+
+  ASSERT_TRUE(chmod(store.dir_path, 0755) == 0);
+
+  uint8_t out[RESUME_TOKEN_LEN] = {0};
+  ASSERT_TRUE(restok_load(&store, out) == NO);
+  ASSERT_TRUE(store.enabled == NO);
+
+  // Disabled state is fail-safe no-op for persistence operations.
+  const uint8_t tok[RESUME_TOKEN_LEN] = {0};
+  ASSERT_TRUE(restok_store(&store, tok) == OK);
+  ASSERT_TRUE(restok_delete(&store) == OK);
+
+  ASSERT_TRUE(chmod(store.dir_path, 0700) == 0);
+  cleanup_runtime_dir(tmpdir, &store);
+  restok_clean(&store);
   free(tmpdir);
 }
 
 int main(void) {
-  test_load_missing_returns_no();
+  test_init_and_load_missing();
   test_store_then_load_ok();
-  test_sock_path_scoping();
-  test_delete_clears_token();
+  test_corrupted_file_is_deleted();
+  test_dir_policy_disables_resume();
 
   fprintf(stderr, "OK: test_resume_token\n");
   return 0;

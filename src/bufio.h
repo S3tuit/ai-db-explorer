@@ -47,8 +47,22 @@ int bufch_ensure(BufChannel *bc, size_t need);
 // mean it's EOF, call ensure for that.
 const uint8_t *bufch_peek(const BufChannel *bc, size_t *out_avail);
 
-// Copies exactly 'n' bytes into 'dst', consuming them.
-int bufch_read_n(BufChannel *bc, void *dst, size_t n);
+/* Copies exactly 'n' bytes into 'dst', consuming them.
+ * Ownership: borrows 'bc'; writes into caller-owned 'dst'.
+ * Side effects: may read from underlying channel and advances buffered read
+ * position.
+ * Error semantics: returns OK on success, ERR on invalid input or short read.
+ */
+int bufch_read_exact(BufChannel *bc, void *dst, size_t n);
+
+/* Reads up to 'max_n' bytes into 'dst', stopping at EOF or once max is met.
+ * Ownership: borrows 'bc'; writes into caller-owned 'dst'.
+ * Side effects: may read from underlying channel and advances buffered read
+ * position.
+ * Error semantics: returns -1 on invalid input or read error; otherwise returns
+ * number of bytes copied in [0..max_n].
+ */
+ssize_t bufch_read_until(BufChannel *bc, void *dst, size_t max_n);
 
 // Finds a byte pattern in the buffered data. Returns index (offset from current
 // read position) if found, else -1. This is not efficient for long patterns.
@@ -65,5 +79,12 @@ int bufch_write_all(BufChannel *bc, const void *src, size_t n);
 /* Writes header + payload with a vector fast path when available. */
 int bufch_write2v(BufChannel *bc, const void *h, size_t hlen, const void *p,
                   size_t plen);
+
+/*---------------------------------- Helpers --------------------------------*/
+
+#include "stdio_byte_channel.h"
+
+#define bufch_stdio_init(bufch, in_path, out_path)                             \
+  bufch_init(bufch, stdio_bytechannel_open_path(in_path, out_path))
 
 #endif

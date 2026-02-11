@@ -188,11 +188,11 @@ static void test_bufch_peek_find_and_read(void) {
   ASSERT_TRUE(bufch_findn(&bc, "world", 5, 6) == 6);
 
   char buf[8];
-  ASSERT_TRUE(bufch_read_n(&bc, buf, 6) == OK);
+  ASSERT_TRUE(bufch_read_exact(&bc, buf, 6) == OK);
   buf[6] = '\0';
   ASSERT_TRUE(strcmp(buf, "hello ") == 0);
 
-  ASSERT_TRUE(bufch_read_n(&bc, buf, 5) == OK);
+  ASSERT_TRUE(bufch_read_exact(&bc, buf, 5) == OK);
   buf[5] = '\0';
   ASSERT_TRUE(strcmp(buf, "world") == 0);
 
@@ -212,7 +212,7 @@ static void test_bufch_partial_reads(void) {
   ASSERT_TRUE(impl != NULL);
 
   char buf[12];
-  ASSERT_TRUE(bufch_read_n(bc, buf, 11) == OK);
+  ASSERT_TRUE(bufch_read_exact(bc, buf, 11) == OK);
   buf[11] = '\0';
   ASSERT_TRUE(strcmp(buf, msg) == 0);
   ASSERT_TRUE(impl->read_calls > 1);
@@ -270,12 +270,69 @@ static void test_bufch_write2v_uses_writev(void) {
   bufch_destroy(bc);
 }
 
+/* Verifies bufch_read_until returns -1 for invalid input. */
+static void test_bufch_read_until_bad_input(void) {
+  char out[8] = {0};
+  ASSERT_TRUE(bufch_read_until(NULL, out, sizeof(out)) == -1);
+
+  FILE *in = MEMFILE_IN("abc");
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel bc;
+  ASSERT_TRUE(bufch_init(&bc, ch) == OK);
+  ASSERT_TRUE(bufch_read_until(&bc, NULL, 1) == -1);
+  bufch_clean(&bc);
+  fclose(in);
+}
+
+/* Verifies bufch_read_until returns fewer bytes when source ends early. */
+static void test_bufch_read_until_shorter_than_max(void) {
+  FILE *in = MEMFILE_IN("abc");
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel bc;
+  ASSERT_TRUE(bufch_init(&bc, ch) == OK);
+
+  char out[16] = {0};
+  ssize_t n = bufch_read_until(&bc, out, 10);
+  ASSERT_TRUE(n == 3);
+  out[3] = '\0';
+  ASSERT_TRUE(strcmp(out, "abc") == 0);
+  ASSERT_TRUE(bufch_read_until(&bc, out, 10) == 0);
+
+  bufch_clean(&bc);
+  fclose(in);
+}
+
+/* Verifies bufch_read_until caps at max bytes and preserves remaining bytes. */
+static void test_bufch_read_until_greater_than_max(void) {
+  FILE *in = MEMFILE_IN("abcdef");
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel bc;
+  ASSERT_TRUE(bufch_init(&bc, ch) == OK);
+
+  char out[8] = {0};
+  ssize_t n = bufch_read_until(&bc, out, 3);
+  ASSERT_TRUE(n == 3);
+  out[3] = '\0';
+  ASSERT_TRUE(strcmp(out, "abc") == 0);
+
+  char tail[4] = {0};
+  ASSERT_TRUE(bufch_read_exact(&bc, tail, 3) == OK);
+  tail[3] = '\0';
+  ASSERT_TRUE(strcmp(tail, "def") == 0);
+
+  bufch_clean(&bc);
+  fclose(in);
+}
+
 int main(void) {
   test_bufch_peek_find_and_read();
   test_bufch_partial_reads();
   test_bufch_partial_writes();
   test_bufch_zero_len();
   test_bufch_write2v_uses_writev();
+  test_bufch_read_until_bad_input();
+  test_bufch_read_until_shorter_than_max();
+  test_bufch_read_until_greater_than_max();
 
   fprintf(stderr, "OK: test_bufio\n");
   return 0;
