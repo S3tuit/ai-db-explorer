@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 
-#include "file_io.h"
 #include "private_dir.h"
+#include "file_io.h"
 #include "utils.h"
 
 #include <errno.h>
@@ -162,46 +162,18 @@ int privdir_generate_token(const PrivDir *pd) {
   if (fill_random(token, sizeof(token)) != OK)
     return ERR;
 
-  int fd = open(pd->token_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-  if (fd < 0)
-    return ERR;
-
-  ssize_t written = write(fd, token, sizeof(token));
-  if (written != (ssize_t)sizeof(token)) {
-    close(fd);
-    unlink(pd->token_path);
-    return ERR;
-  }
-
-  if (fchmod(fd, 0600) != 0) {
-    close(fd);
-    unlink(pd->token_path);
-    return ERR;
-  }
-
-  close(fd);
-  return OK;
+  return fileio_write_exact(pd->token_path, token, sizeof(token), 0600);
 }
 
-/* Reads token_path into a temporary buffer and enforces exact token length.
- * Ownership: borrows 'pd'; writes token bytes into caller-owned 'out'.
- * Side effects: performs filesystem I/O and clears temporary token memory.
- * Error semantics: returns OK when exactly PRIVDIR_TOKEN_LEN bytes are read,
- * ERR on invalid input, read failure, or invalid token length. */
 int privdir_read_token(const PrivDir *pd, uint8_t *out) {
   if (!pd || !pd->token_path || !out)
     return ERR;
 
-  StrBuf sb = {0};
-  if (fileio_read_all_limit(pd->token_path, PRIVDIR_TOKEN_LEN, &sb) != OK)
+  size_t nread = 0;
+  if (fileio_read_limit(pd->token_path, PRIVDIR_TOKEN_LEN, out, &nread) != OK)
     return ERR;
-  if (sb.len != PRIVDIR_TOKEN_LEN) {
-    sb_zero_clean(&sb);
+  if (nread != PRIVDIR_TOKEN_LEN)
     return ERR;
-  }
-
-  memcpy(out, sb.data, PRIVDIR_TOKEN_LEN);
-  sb_zero_clean(&sb);
   return OK;
 }
 

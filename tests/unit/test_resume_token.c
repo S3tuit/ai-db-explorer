@@ -66,7 +66,7 @@ static void test_init_and_load_missing(void) {
   ASSERT_TRUE(restok_init(&store) == YES);
   ASSERT_TRUE(store.enabled == YES);
 
-  uint8_t out[RESUME_TOKEN_LEN] = {0};
+  uint8_t out[ADBX_RESUME_TOKEN_LEN] = {0};
   ASSERT_TRUE(restok_load(&store, out) == NO);
 
   cleanup_runtime_dir(tmpdir, &store);
@@ -83,14 +83,14 @@ static void test_store_then_load_ok(void) {
   ASSERT_TRUE(restok_init(&store) == YES);
   ASSERT_TRUE(store.enabled == YES);
 
-  const uint8_t in[RESUME_TOKEN_LEN] = {
+  const uint8_t in[ADBX_RESUME_TOKEN_LEN] = {
       1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
       17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
   ASSERT_TRUE(restok_store(&store, in) == OK);
 
-  uint8_t out[RESUME_TOKEN_LEN] = {0};
+  uint8_t out[ADBX_RESUME_TOKEN_LEN] = {0};
   ASSERT_TRUE(restok_load(&store, out) == YES);
-  ASSERT_TRUE(memcmp(in, out, RESUME_TOKEN_LEN) == 0);
+  ASSERT_TRUE(memcmp(in, out, ADBX_RESUME_TOKEN_LEN) == 0);
 
   ASSERT_TRUE(restok_delete(&store) == OK);
   ASSERT_TRUE(restok_load(&store, out) == NO);
@@ -109,7 +109,7 @@ static void test_corrupted_file_is_deleted(void) {
   ASSERT_TRUE(restok_init(&store) == YES);
   ASSERT_TRUE(store.enabled == YES);
 
-  const uint8_t tok[RESUME_TOKEN_LEN] = {
+  const uint8_t tok[ADBX_RESUME_TOKEN_LEN] = {
       50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65,
       66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81};
   ASSERT_TRUE(restok_store(&store, tok) == OK);
@@ -121,7 +121,7 @@ static void test_corrupted_file_is_deleted(void) {
   ASSERT_TRUE(write(fd, bad, sizeof(bad)) == (ssize_t)sizeof(bad));
   ASSERT_TRUE(close(fd) == 0);
 
-  uint8_t out[RESUME_TOKEN_LEN] = {0};
+  uint8_t out[ADBX_RESUME_TOKEN_LEN] = {0};
   ASSERT_TRUE(restok_load(&store, out) == NO);
 
   struct stat st;
@@ -144,12 +144,12 @@ static void test_dir_policy_disables_resume(void) {
 
   ASSERT_TRUE(chmod(store.dir_path, 0755) == 0);
 
-  uint8_t out[RESUME_TOKEN_LEN] = {0};
+  uint8_t out[ADBX_RESUME_TOKEN_LEN] = {0};
   ASSERT_TRUE(restok_load(&store, out) == NO);
   ASSERT_TRUE(store.enabled == NO);
 
   // Disabled state is fail-safe no-op for persistence operations.
-  const uint8_t tok[RESUME_TOKEN_LEN] = {0};
+  const uint8_t tok[ADBX_RESUME_TOKEN_LEN] = {0};
   ASSERT_TRUE(restok_store(&store, tok) == OK);
   ASSERT_TRUE(restok_delete(&store) == OK);
 

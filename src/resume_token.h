@@ -5,10 +5,6 @@
 
 #include "token_constants.h"
 
-#ifndef RESUME_TOKEN_LEN
-#define RESUME_TOKEN_LEN ADBX_RESUME_TOKEN_LEN
-#endif
-
 /* All strings are owned by the struct and freed by restok_clean(). */
 typedef struct ResumeTokenStore {
   int enabled;      /* YES when persistence is active, NO when fail-disabled. */
@@ -33,7 +29,7 @@ int restok_init(ResumeTokenStore *store);
  * Error semantics: returns YES when token is loaded, NO when absent/corrupted/
  * disabled, ERR on invalid input.
  */
-int restok_load(ResumeTokenStore *store, uint8_t out[RESUME_TOKEN_LEN]);
+int restok_load(ResumeTokenStore *store, uint8_t out[ADBX_RESUME_TOKEN_LEN]);
 
 /* Stores the provided raw token bytes for this process scope.
  * Ownership: borrows 'store' and 'token'; no caller-owned allocations.
@@ -43,7 +39,7 @@ int restok_load(ResumeTokenStore *store, uint8_t out[RESUME_TOKEN_LEN]);
  * input or write failure.
  */
 int restok_store(ResumeTokenStore *store,
-                 const uint8_t token[RESUME_TOKEN_LEN]);
+                 const uint8_t token[ADBX_RESUME_TOKEN_LEN]);
 
 /* Deletes the persisted token for this process scope.
  * Ownership: borrows 'store'; no caller-owned allocations.

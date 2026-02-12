@@ -2,6 +2,7 @@
 
 #include "resume_token.h"
 
+#include "file_io.h"
 #include "proc_identity.h"
 #include "utils.h"
 
@@ -30,20 +31,6 @@ static void restok_disable(ResumeTokenStore *store, const char *reason) {
           "resume_token: %s; session resume disabled for this process\n",
           reason);
   store->enabled = NO;
-}
-
-/* Frees current path fields and resets them to NULL.
- * Ownership: consumes owned strings in 'store'.
- * Side effects: frees heap memory and mutates 'store'.
- * Error semantics: none.
- */
-static void restok_reset_paths(ResumeTokenStore *store) {
-  if (!store)
-    return;
-  free(store->dir_path);
-  free(store->token_path);
-  store->dir_path = NULL;
-  store->token_path = NULL;
 }
 
 /* Resolves the process-local base directory used by token persistence.
@@ -162,121 +149,6 @@ static int restok_validate_token_stat(const struct stat *st) {
   return OK;
 }
 
-/* Reads exactly RESUME_TOKEN_LEN bytes and verifies EOF immediately after.
- * Ownership: borrows 'path'; writes to caller-owned 'out'.
- * Side effects: opens/reads/closes file descriptor.
- * Error semantics: returns YES when token length is exact, NO on malformed
- * length or read failure, ERR on invalid input.
- */
-static int restok_read_exact_token(const char *path,
-                                   uint8_t out[RESUME_TOKEN_LEN]) {
-  if (!path || !out)
-    return ERR;
-
-  int flags = O_RDONLY;
-#ifdef O_NOFOLLOW
-  flags |= O_NOFOLLOW;
-#endif
-  int fd = open(path, flags);
-  if (fd < 0)
-    return NO;
-
-  size_t off = 0;
-  while (off < RESUME_TOKEN_LEN) {
-    ssize_t n = read(fd, out + off, RESUME_TOKEN_LEN - off);
-    if (n == 0)
-      break;
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      (void)close(fd);
-      return NO;
-    }
-    off += (size_t)n;
-  }
-
-  if (off != RESUME_TOKEN_LEN) {
-    (void)close(fd);
-    return NO;
-  }
-
-  uint8_t extra = 0;
-  for (;;) {
-    ssize_t n = read(fd, &extra, 1);
-    if (n == 0)
-      break;
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      (void)close(fd);
-      return NO;
-    }
-    // Any extra byte means the file is longer than expected.
-    (void)close(fd);
-    return NO;
-  }
-
-  if (close(fd) != 0)
-    return NO;
-  return YES;
-}
-
-/* Writes exactly RESUME_TOKEN_LEN bytes to 'path' with strict 0600 policy.
- * Ownership: borrows 'path' and 'token'; no allocations.
- * Side effects: opens/writes/chmods/closes file and may unlink on failure.
- * Error semantics: returns OK on success, ERR on invalid input or I/O failure.
- */
-static int restok_write_exact_token(const char *path,
-                                    const uint8_t token[RESUME_TOKEN_LEN]) {
-  if (!path || !token)
-    return ERR;
-
-  int flags = O_WRONLY | O_CREAT | O_TRUNC;
-#ifdef O_NOFOLLOW
-  flags |= O_NOFOLLOW;
-#endif
-  int fd = open(path, flags, 0600);
-  if (fd < 0)
-    return ERR;
-
-  size_t off = 0;
-  while (off < RESUME_TOKEN_LEN) {
-    ssize_t n = write(fd, token + off, RESUME_TOKEN_LEN - off);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      (void)close(fd);
-      (void)unlink(path);
-      return ERR;
-    }
-    if (n == 0) {
-      (void)close(fd);
-      (void)unlink(path);
-      return ERR;
-    }
-    off += (size_t)n;
-  }
-
-  if (fchmod(fd, 0600) != 0) {
-    (void)close(fd);
-    (void)unlink(path);
-    return ERR;
-  }
-
-  struct stat st;
-  if (fstat(fd, &st) != 0 || restok_validate_token_stat(&st) != OK) {
-    (void)close(fd);
-    (void)unlink(path);
-    return ERR;
-  }
-
-  if (close(fd) != 0) {
-    (void)unlink(path);
-    return ERR;
-  }
-  return OK;
-}
-
 /* Deletes 'path' if present.
  * Ownership: borrows 'path'; no allocations.
  * Side effects: performs unlink syscall.
@@ -291,14 +163,6 @@ static int restok_delete_path(const char *path) {
   return OK;
 }
 
-/* Initializes process-scoped resume-token persistence and policy checks.
- * Ownership: writes owned paths into caller-owned 'store'; caller must invoke
- * restok_clean() to free them.
- * Side effects: reads parent process identity, creates/validates storage
- * directory, and logs+disables persistence on policy failure.
- * Error semantics: returns OK when enabled, NO when disabled fail-safe, ERR on
- * invalid input.
- */
 int restok_init(ResumeTokenStore *store) {
   if (!store)
     return ERR;
@@ -336,14 +200,7 @@ int restok_init(ResumeTokenStore *store) {
   return YES;
 }
 
-/* Loads a persisted raw token when present and policy-compliant.
- * Ownership: borrows 'store'; writes into caller-owned 'out'.
- * Side effects: performs filesystem I/O, may delete corrupted files, and may
- * disable resume persistence for this process.
- * Error semantics: returns YES when loaded, NO when absent/corrupted/disabled,
- * ERR on invalid input.
- */
-int restok_load(ResumeTokenStore *store, uint8_t out[RESUME_TOKEN_LEN]) {
+int restok_load(ResumeTokenStore *store, uint8_t out[ADBX_RESUME_TOKEN_LEN]) {
   if (!store || !out)
     return ERR;
   if (store->enabled != YES)
@@ -359,6 +216,7 @@ int restok_load(ResumeTokenStore *store, uint8_t out[RESUME_TOKEN_LEN]) {
   struct stat st;
   if (lstat(store->token_path, &st) != 0) {
     if (errno == ENOENT)
+      // there's no token to be read
       return NO;
     restok_disable(store, "token file metadata read failed");
     return NO;
@@ -369,11 +227,14 @@ int restok_load(ResumeTokenStore *store, uint8_t out[RESUME_TOKEN_LEN]) {
     return NO;
   }
 
-  int rrc = restok_read_exact_token(store->token_path, out);
-  if (rrc == YES)
-    return YES;
-  if (rrc == ERR)
+  // read exact token length
+  size_t nread = 0;
+  if (fileio_read_limit(store->token_path, ADBX_RESUME_TOKEN_LEN, out,
+                        &nread) != OK)
     return ERR;
+  if (nread == ADBX_RESUME_TOKEN_LEN) {
+    return YES;
+  }
 
   // Corrupted token files are treated as stale and removed immediately.
   fprintf(stderr, "Token file corrupted, treating as stale\n");
@@ -383,15 +244,8 @@ int restok_load(ResumeTokenStore *store, uint8_t out[RESUME_TOKEN_LEN]) {
   return NO;
 }
 
-/* Persists a raw resume token for this process identity scope.
- * Ownership: borrows 'store' and 'token'; no caller-owned allocations.
- * Side effects: performs filesystem I/O and may disable persistence on policy
- * or write failures.
- * Error semantics: returns OK on success or when already disabled, ERR on
- * invalid input or write failure.
- */
 int restok_store(ResumeTokenStore *store,
-                 const uint8_t token[RESUME_TOKEN_LEN]) {
+                 const uint8_t token[ADBX_RESUME_TOKEN_LEN]) {
   if (!store || !token)
     return ERR;
   if (store->enabled != YES)
@@ -401,6 +255,13 @@ int restok_store(ResumeTokenStore *store,
 
   if (restok_ensure_dir_policy(store->dir_path) != OK) {
     restok_disable(store, "directory permissions/ownership are too open");
+    return ERR;
+  }
+
+  if (fileio_write_exact(store->token_path, token, ADBX_RESUME_TOKEN_LEN,
+                         0700) != OK) {
+    fprintf(stderr, "Failed to write token file: %s\n", strerror(errno));
+    restok_disable(store, "token file write failed");
     return ERR;
   }
 
@@ -416,21 +277,9 @@ int restok_store(ResumeTokenStore *store,
     return ERR;
   }
 
-  if (restok_write_exact_token(store->token_path, token) != OK) {
-    fprintf(stderr, "Failed to write token file: %s\n", strerror(errno));
-    restok_disable(store, "token file write failed");
-    return ERR;
-  }
   return OK;
 }
 
-/* Deletes the persisted token file for this process identity scope.
- * Ownership: borrows 'store'; no allocations.
- * Side effects: performs filesystem I/O and may disable persistence on policy
- * failure.
- * Error semantics: returns OK when deleted/absent/disabled, ERR on invalid
- * input or filesystem failure.
- */
 int restok_delete(ResumeTokenStore *store) {
   if (!store)
     return ERR;
@@ -463,14 +312,13 @@ int restok_delete(ResumeTokenStore *store) {
   return OK;
 }
 
-/* Releases heap memory owned by 'store' and resets it.
- * Ownership: consumes internal owned strings; does not free 'store'.
- * Side effects: frees memory and resets flags.
- * Error semantics: none.
- */
 void restok_clean(ResumeTokenStore *store) {
   if (!store)
     return;
-  restok_reset_paths(store);
+
+  free(store->dir_path);
+  free(store->token_path);
+  store->dir_path = NULL;
+  store->token_path = NULL;
   store->enabled = NO;
 }

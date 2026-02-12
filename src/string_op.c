@@ -123,8 +123,9 @@ int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst) {
 }
 
 /* Returns a C-string view of the current bytes in sb without changing sb->len.
- * This is best-effort: if sb can't be grown to fit trailing '\0', returns "". */
-const char *sb_to_cstr(StrBuf *sb) {
+ * This is best-effort: if sb can't be grown to fit trailing '\0', returns "".
+ */
+char *sb_to_cstr(StrBuf *sb) {
   if (!sb || !sb->data)
     return "";
   if (sb->len > sb->cap)

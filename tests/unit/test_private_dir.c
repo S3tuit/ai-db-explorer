@@ -219,7 +219,7 @@ static void test_generate_and_read_token(void) {
 
   /* Token should not be all zeros (extremely unlikely from CSPRNG). */
   int all_zero = 1;
-  for (int i = 0; i < PRIVDIR_TOKEN_LEN; i++) {
+  for (size_t i = 0; i < PRIVDIR_TOKEN_LEN; i++) {
     if (token[i] != 0) {
       all_zero = 0;
       break;

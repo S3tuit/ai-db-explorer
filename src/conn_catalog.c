@@ -754,7 +754,7 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
     goto error;
   }
 
-  if (fileio_read_all_limit(path, CONFIG_MAX_BYTES, &sb) != OK) {
+  if (fileio_sb_read_limit(path, CONFIG_MAX_BYTES, &sb) != OK) {
     err_msg = "ConnCatalog: failed to read config file. Check path and ensure "
               "file size respects configured limits.";
     goto error;

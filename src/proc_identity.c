@@ -2,14 +2,11 @@
 
 #include "proc_identity.h"
 
-#include "bufio.h"
-#include "stdio_byte_channel.h"
+#include "file_io.h"
 #include "utils.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -99,19 +96,16 @@ static int procid_read_stat_fields(pid_t pid, StatFields *stats) {
   if (n < 0 || (size_t)n >= sizeof(path))
     return ERR;
 
-  char line[PROCID_STAT_MAX];
-  BufChannel bc = {0};
-  if (bufch_stdio_init(&bc, path, NULL) != OK)
+  char line[PROCID_STAT_MAX + 1];
+  ssize_t nread = fileio_read_up_to(path, PROCID_STAT_MAX, (uint8_t *)line);
+  if (nread < 0)
     return ERR;
-  ssize_t nread = bufch_read_until(&bc, line, sizeof(line) - 1);
-  if (nread < 0) {
-    bufch_clean(&bc);
-    return ERR;
-  }
   line[nread] = '\0';
-  bufch_clean(&bc);
+  if (line[0] == '\0')
+    return ERR;
 
-  return procid_parse_stat_line(line, stats);
+  int rc = procid_parse_stat_line(line, stats);
+  return rc;
 }
 
 /* Returns YES when 'name' is a known thin launcher wrapper process.
