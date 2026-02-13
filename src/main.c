@@ -57,7 +57,12 @@ int main(int argc, char **argv) {
     }
 
     McpServer s;
-    if (mcpser_init(&s, stdin, stdout, pd->sock_path) != OK) {
+    McpServerInit init = {
+        .in = stdin,
+        .out = stdout,
+        .privd = pd,
+    };
+    if (mcpser_init(&s, &init) != OK) {
       fprintf(stderr, "ERROR: server init failed\n");
       privdir_free(pd);
       return 1;

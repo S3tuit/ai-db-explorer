@@ -13,7 +13,7 @@ typedef struct ProcIdentity {
  * Ownership: writes into caller-owned 'out'; does not allocate.
  * Side effects: reads process metadata from OS proc interfaces.
  * Error semantics: returns OK on success, ERR on unsupported platform or parse
- * / I/O failure.
+ * I/O failure.
  */
 int procid_parent_identity(ProcIdentity *out);
 

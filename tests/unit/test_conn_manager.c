@@ -53,10 +53,13 @@ static void fake_destroy(DbBackend *db) {
   free(db);
 }
 
-static int fake_exec(DbBackend *db, const McpId *request_id, const char *sql,
-                     QueryResult **out_qr) {
+/* Fake exec implementation used by ConnManager tests.
+ * Ownership: borrows all inputs; performs no allocations.
+ * Side effects: none.
+ * Error semantics: always returns ERR because these tests don't execute SQL.
+ */
+static int fake_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
   (void)db;
-  (void)request_id;
   (void)sql;
   (void)out_qr;
   return ERR;

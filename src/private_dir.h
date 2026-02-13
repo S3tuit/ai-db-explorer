@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "token_constants.h"
+#include "handshake_codec.h"
 
 #define PRIVDIR_APPNAME "ai-dbexplorer"
 #define PRIVDIR_SOCK_FILENAME "broker.sock"

@@ -38,6 +38,8 @@ Where:
 **Rationale:** This combination uniquely identifies a specific MCP host process instance.
 Even if PIDs are reused by the operating system, the combination of PID and start time remains unique.
 
+This logic is handled by procid_parent_identity of src/proc_indentity.h/.c.
+
 ### Token File Format
 
 Token files contain the session token as plain text with no additional formatting or metadata.
@@ -50,27 +52,29 @@ Token files contain the session token as plain text with no additional formattin
 
 When the MCP server starts:
 
-1. Obtain parent PID via `getppid()`
-2. Obtain parent process start time:
-3. If parent start time cannot be determined:
+1. Obtain parent PID via procid_parent_identity().
+2. If procid_parent_identity() fails:
    - Log: "Could not verify parent process start time, session resume disabled for this instance"
    - Continue without attempting to read or write token files
-   - Exit startup flow
-4. Construct token filename: `token-<parent_pid>-<parent_start_time>`
-5. Check if token file exists in the storage directory
-6. If token file exists:
-   - Attempt to read the token
-   - If read succeeds and token is valid (non-empty, well-formed):
+Step 1 and 2 are handled by restok_init of src/resume_token.h/.c.
+
+3. Construct token filename: `token-<parent_pid>-<parent_start_time>`
+4. Check if token file exists in the storage directory
+
+Step 3 and 4 are handled by restok_load.
+
+5. If restok_load returns YES:
      - Send token to broker for session resume
      - If broker accepts: session resumed successfully
      - If broker rejects: log "Broker rejected resume token, starting fresh session", delete token file, request new token from broker
-   - If read fails or token is corrupted:
+
+The MCP server entity should have no knowledge if the resume token is disables or not.
+All the data/function about the resume token should be handled by ResumeTokenStore, for example:
+     - If read fails or token is corrupted:
      - Log: "Token file corrupted, treating as stale"
-     - Delete the token file
-     - Request new token from broker
-7. If token file does not exist:
-   - Log: "Token file not found (first run or clean slate)"
-   - Request new token from broker
+     - restok_load will not return YES. MCP server will request new token from broker
+
+6. If token file exists and is valid the Broker will still return a new token (rotate). So in any case, the MCP server calls restok_store after receiving broker token.
 
 ### 2. Token Persistence
 

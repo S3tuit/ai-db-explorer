@@ -2,6 +2,7 @@
 
 #include "broker.h"
 #include "frame_codec.h"
+#include "handshake_codec.h"
 #include "json_codec.h"
 #include "log.h"
 #include "packed_array.h"
@@ -26,7 +27,17 @@
 
 // Maximum size of a single request payload (bytes). Larger frames are rejected.
 #define MAX_REQ_LEN (8u * 1024u * 1024u)
+
+#ifdef ADBX_TEST_MODE
+// Keep test timeout small but non-zero so timeout paths stay deterministic.
+#define HANDSHAKE_READ_TIMEOUT_SEC 1
+#define REQUEST_READ_TIMEOUT_SEC 1
+#endif
+
+#ifndef ADBX_TEST_MODE
 #define HANDSHAKE_READ_TIMEOUT_SEC 3
+#define REQUEST_READ_TIMEOUT_SEC 3
+#endif
 
 struct Broker {
   int listen_fd;   // file descriptor of the socket used to
@@ -39,7 +50,39 @@ struct Broker {
 
   PackedArray *active_sessions; // polled for I/O, max MAX_CLIENTS
   PackedArray *idle_sessions;   // not polled, max MAX_IDLE_SESSIONS
+
+  uint32_t idle_ttl_secs;
+  uint32_t abs_ttl_secs;
 };
+
+/* Resolves a positive TTL override from environment in test builds.
+ * It borrows 'name' and does not allocate memory.
+ * Side effects: reads environment variables.
+ * Returns fallback_ttl on parse/validation failure, otherwise parsed value.
+ */
+static uint32_t broker_ttl_from_env_or_default(const char *name,
+                                               uint32_t fallback_ttl) {
+#ifndef ADBX_TEST_MODE
+  (void)name;
+  return fallback_ttl;
+#else
+  if (!name || fallback_ttl == 0)
+    return fallback_ttl;
+
+  const char *raw = getenv(name);
+  if (!raw || raw[0] == '\0')
+    return fallback_ttl;
+
+  char *end = NULL;
+  errno = 0;
+  unsigned long long parsed = strtoull(raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0')
+    return fallback_ttl;
+  if (parsed == 0 || parsed > UINT32_MAX)
+    return fallback_ttl;
+  return (uint32_t)parsed;
+#endif
+}
 
 /* Closes '*fd' when it is valid and sets it to -1.
  * It borrows 'fd' and does not allocate memory.
@@ -77,22 +120,27 @@ static int bytes_equal_ct(const uint8_t *a, const uint8_t *b, size_t len) {
  */
 static int broker_write_handshake_resp(BrokerMcpSession *sess,
                                        handshake_status status,
-                                       const uint8_t *resume_token) {
-  if (!sess)
+                                       const uint8_t *resume_token,
+                                       uint32_t idle_ttl_secs,
+                                       uint32_t abs_ttl_secs) {
+  if (!sess || idle_ttl_secs == 0 || abs_ttl_secs == 0)
     return ERR;
 
   handshake_resp_t resp = {0};
   resp.magic = HANDSHAKE_MAGIC;
   resp.version = HANDSHAKE_VERSION;
   resp.status = status;
-  resp.idle_ttl_secs = IDLE_TTL;
-  resp.abs_ttl_secs = ABSOLUTE_TTL;
+  resp.idle_ttl_secs = idle_ttl_secs;
+  resp.abs_ttl_secs = abs_ttl_secs;
 
   if (resume_token) {
     memcpy(resp.resume_token, resume_token, RESUME_TOKEN_LEN);
   }
 
-  return frame_write_len(&sess->bc, &resp, (uint32_t)sizeof(resp));
+  uint8_t wire[HANDSHAKE_RESP_WIRE_SIZE];
+  if (handshake_resp_encode(&resp, wire) != OK)
+    return ERR;
+  return frame_write_len(&sess->bc, wire, (uint32_t)sizeof(wire));
 }
 
 /* Reads one framed handshake request and decodes it into 'out_req'.
@@ -114,12 +162,11 @@ static int broker_read_handshake_req(BrokerMcpSession *sess,
     return ERR;
   }
 
-  if (payload.len != sizeof(*out_req)) {
+  if (handshake_req_decode(out_req, (const uint8_t *)payload.data,
+                           payload.len) != OK) {
     sb_clean(&payload);
     return ERR;
   }
-
-  memcpy(out_req, payload.data, sizeof(*out_req));
   sb_clean(&payload);
   return OK;
 }
@@ -141,19 +188,24 @@ static int broker_set_rcv_timeout_sec(int fd, int sec) {
 
 /* Checks whether 'sess' exceeded idle or absolute TTL policy.
  * It borrows 'sess'; no allocation or ownership transfer.
+ * Side effects: none.
  * Returns YES when expired, NO when still valid, ERR on invalid input.
  */
-static int broker_session_is_expired(const BrokerMcpSession *sess, time_t now) {
+static int broker_session_is_expired(const BrokerMcpSession *sess, time_t now,
+                                     uint32_t idle_ttl_secs,
+                                     uint32_t abs_ttl_secs) {
   if (!sess || now < 0 || sess->created_at <= 0 || sess->last_active <= 0)
+    return ERR;
+  if (idle_ttl_secs == 0 || abs_ttl_secs == 0)
     return ERR;
 
   // Fail closed on backwards clock jumps.
   if (now < sess->created_at || now < sess->last_active)
     return YES;
 
-  if ((now - sess->created_at) > ABSOLUTE_TTL)
+  if ((now - sess->created_at) > (time_t)abs_ttl_secs)
     return YES;
-  if ((now - sess->last_active) > IDLE_TTL)
+  if ((now - sess->last_active) > (time_t)idle_ttl_secs)
     return YES;
   return NO;
 }
@@ -260,14 +312,7 @@ static int session_init_live(BrokerMcpSession *sess, int cfd) {
   sess->fd = -1;
 
   // The BufChannel owns the ByteChannel, which owns the fd.
-  ByteChannel *channel = stdio_bytechannel_open_fd(cfd, cfd);
-  if (!channel) {
-    safe_close_fd(&cfd);
-    return ERR;
-  }
-
-  if (bufch_init(&sess->bc, channel) != OK) {
-    bytech_destroy(channel);
+  if (bufch_stdio_openfd_init(&sess->bc, cfd, cfd) != OK) {
     return ERR;
   }
 
@@ -417,6 +462,11 @@ Broker *broker_create(const char *sock_path, ConnManager *cm,
     memcpy(b->secret_token, secret_token, SECRET_TOKEN_LEN);
     b->has_secret_token = 1;
   }
+
+  b->idle_ttl_secs = broker_ttl_from_env_or_default("ADBX_TEST_IDLE_TTL_SEC",
+                                                    (uint32_t)IDLE_TTL);
+  b->abs_ttl_secs = broker_ttl_from_env_or_default("ADBX_TEST_ABS_TTL_SEC",
+                                                   (uint32_t)ABSOLUTE_TTL);
 
   b->active_sessions = parr_create(sizeof(BrokerMcpSession));
   parr_set_cleanup(b->active_sessions, active_sessions_cleanup, NULL);
@@ -737,7 +787,8 @@ static int broker_accept_after_peer_check(Broker *b, int cfd) {
     }
 
     time_t resume_created_at = idle_sess->created_at;
-    int exp = broker_session_is_expired(idle_sess, now);
+    int exp = broker_session_is_expired(idle_sess, now, b->idle_ttl_secs,
+                                        b->abs_ttl_secs);
     if (exp == YES) {
       parr_drop_swap(b->idle_sessions, (size_t)idle_idx);
       status = HS_ERR_TOKEN_EXPIRED;
@@ -807,7 +858,8 @@ static int broker_accept_after_peer_check(Broker *b, int cfd) {
 send_n_close: {
   BrokerMcpSession *resp_sess = keep_open == YES ? active_sess : &pending;
   const uint8_t *resp_token = (status == HS_OK) ? out_token : NULL;
-  if (broker_write_handshake_resp(resp_sess, status, resp_token) != OK) {
+  if (broker_write_handshake_resp(resp_sess, status, resp_token,
+                                  b->idle_ttl_secs, b->abs_ttl_secs) != OK) {
     // close the new session
     if (keep_open && active_idx != SIZE_MAX)
       parr_drop_swap(b->active_sessions, active_idx);
@@ -823,7 +875,10 @@ send_n_close: {
     return ERR;
   }
 
-  if (broker_set_rcv_timeout_sec(active_sess->fd, 0) != OK) {
+  // Keep bounded read timeouts after handshake too, so malformed/truncated
+  // request frames cannot stall broker_run() indefinitely.
+  if (broker_set_rcv_timeout_sec(active_sess->fd, REQUEST_READ_TIMEOUT_SEC) !=
+      OK) {
     parr_drop_swap(b->active_sessions, active_idx);
     return ERR;
   }

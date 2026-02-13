@@ -30,4 +30,10 @@ ByteChannel *stdio_bytechannel_open_path(const char *in_path,
  * destroy.*/
 ByteChannel *stdio_bytechannel_wrap_fd(int in_fd, int out_fd);
 
+/* Same as stdio_bytechannel_open_path but this does NOT take ownership and
+ * will NOT close() on destroy.
+ */
+ByteChannel *stdio_bytechannel_wrap_path(const char *in_path,
+                                         const char *out_path);
+
 #endif

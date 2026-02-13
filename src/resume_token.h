@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "token_constants.h"
+#include "handshake_codec.h"
 
 /* All strings are owned by the struct and freed by restok_clean(). */
 typedef struct ResumeTokenStore {

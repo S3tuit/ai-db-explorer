@@ -23,8 +23,12 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
-
+  
   test:
+    # in this integration test, both the broker and server runs in the same
+    # namespace since we just test the communication between them.
+    # The correctness of the isolation depends on the tool used by the user to
+    # isolate broker and server.
     build:
       context: ../../..
       dockerfile: tests/integration/postgres/Dockerfile
@@ -38,4 +42,4 @@ services:
       PGUSER: my_user
       PGPASSWORD: my_secret
     # PIE_LDFLAGS needed for Debian’s default PIE toolchain
-    command: ["sh", "-lc", "make PIE_LDFLAGS=-no-pie test-postgres"]
+    command: ["sh", "-lc", "make PIE_LDFLAGS=-no-pie -j4 test-postgres"]

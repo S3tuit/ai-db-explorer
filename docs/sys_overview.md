@@ -80,6 +80,8 @@ checks).
 
 In v1, for internal communication between the broker and the MCP Server, we use
 length-prefixed format.
+The 4-byte frame length is big-endian, and all handshake scalar fields are also
+big-endian on the wire (token byte arrays are copied verbatim).
 
 ### Broker - MCP Server handshake
 The goal of the handshake is to prevent random local process from connecting to

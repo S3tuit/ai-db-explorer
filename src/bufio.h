@@ -84,7 +84,43 @@ int bufch_write2v(BufChannel *bc, const void *h, size_t hlen, const void *p,
 
 #include "stdio_byte_channel.h"
 
-#define bufch_stdio_init(bufch, in_path, out_path)                             \
-  bufch_init(bufch, stdio_bytechannel_open_path(in_path, out_path))
+/* Initializes 'bufch' from opened paths and closes ByteChannel on init error.
+ *
+ * This helper guarantees the temporary owned channel is destroyed when
+ * bufch_init fails (for example when 'bufch' is NULL), preventing fd leaks.
+ */
+static inline int bufch_stdio_openp_init(BufChannel *bufch, const char *in_path,
+                                         const char *out_path) {
+  ByteChannel *ch = stdio_bytechannel_open_path(in_path, out_path);
+  if (!ch)
+    return ERR;
+  if (bufch_init(bufch, ch) != OK) {
+    bytech_destroy(ch);
+    return ERR;
+  }
+  return OK;
+}
+
+#define bufch_stdio_wrapp_init(bufch, in_path, out_path)                       \
+  bufch_init(bufch, stdio_bytechannel_wrap_path(in_path, out_path))
+
+/* Initializes 'bufch' from owned fds and closes ByteChannel on init error.
+ *
+ * This helper guarantees ownership is not leaked when bufch_init fails.
+ */
+static inline int bufch_stdio_openfd_init(BufChannel *bufch, int in_fd,
+                                          int out_fd) {
+  ByteChannel *ch = stdio_bytechannel_open_fd(in_fd, out_fd);
+  if (!ch)
+    return ERR;
+  if (bufch_init(bufch, ch) != OK) {
+    bytech_destroy(ch);
+    return ERR;
+  }
+  return OK;
+}
+
+#define bufch_stdio_wrapfd_init(bufch, in_fd, out_fd)                          \
+  bufch_init(bufch, stdio_bytechannel_wrap_fd(in_fd, out_fd))
 
 #endif

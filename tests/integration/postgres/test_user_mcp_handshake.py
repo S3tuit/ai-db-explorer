@@ -3,14 +3,42 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 # root is not '/', but is the root of our repo copied inside the docker
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 BIN = os.path.join(ROOT, "build", "ai-db-explorer-asan")
-PRIVDIR = os.path.join(ROOT, "build", "privdir")
-SOCK = os.path.join(PRIVDIR, "run", "broker.sock")
+DEFAULT_PRIVDIR = os.path.join(ROOT, "build", "privdir")
 CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
+MCP_PROTOCOL_VERSION = "2025-11-25"
+
+
+def broker_sock_path(privdir):
+    return os.path.join(privdir, "run", "broker.sock")
+
+
+def secret_token_path(privdir):
+    return os.path.join(privdir, "secret", "token")
+
+
+def make_temp_privdir(prefix="mcp-it"):
+    build_dir = os.path.join(ROOT, "build")
+    os.makedirs(build_dir, exist_ok=True)
+    return tempfile.mkdtemp(prefix=f"{prefix}-", dir=build_dir)
+
+
+def make_runtime_dir(prefix="mcp-rt"):
+    path = tempfile.mkdtemp(prefix=f"{prefix}-")
+    os.chmod(path, 0o700)
+    return path
+
+
+def merge_env(extra_env):
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    return env
 
 
 def write_frame(proc, payload_bytes):
@@ -48,36 +76,46 @@ def read_frame(proc):
     return payload
 
 
-def start_broker():
-    if os.path.exists(SOCK):
-        os.unlink(SOCK)
+def start_broker(privdir=DEFAULT_PRIVDIR, env=None):
+    sock = broker_sock_path(privdir)
+    if os.path.exists(sock):
+        os.unlink(sock)
+
     proc = subprocess.Popen(
-        [BIN, "-broker", "-privdir", PRIVDIR, "-config", CONFIG],
+        [BIN, "-broker", "-privdir", privdir, "-config", CONFIG],
         cwd=ROOT,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         # Forward broker logs to the test runner so failures aren't silent.
         stderr=None,
+        env=merge_env(env),
     )
+
     for _ in range(50):
-        if os.path.exists(SOCK):
+        if proc.poll() is not None:
+            raise RuntimeError("broker exited before creating socket")
+        if os.path.exists(sock):
             return proc
         time.sleep(0.05)
-    proc.terminate()
+
+    stop_proc(proc)
     raise RuntimeError("broker did not create socket")
 
 
-def start_server():
+def start_server(privdir=DEFAULT_PRIVDIR, env=None):
     return subprocess.Popen(
-        [BIN, "-privdir", PRIVDIR],
+        [BIN, "-privdir", privdir],
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         # Forward MCP server logs to the test runner for easier debugging.
         stderr=None,
+        env=merge_env(env),
     )
 
 
 def stop_proc(proc):
+    if proc is None:
+        return
     try:
         proc.terminate()
         proc.wait(timeout=2)
@@ -85,7 +123,7 @@ def stop_proc(proc):
         proc.kill()
 
 
-def do_handshake(server, req_id, protocol_version):
+def do_user_handshake(server, req_id, protocol_version):
     req = {
         "jsonrpc": "2.0",
         "id": req_id,
@@ -100,39 +138,42 @@ def do_handshake(server, req_id, protocol_version):
     return json.loads(read_frame(server).decode("utf-8"))
 
 
-def test_handshake_ok(broker):
+def test_handshake_ok():
     server = start_server()
     try:
-        resp = do_handshake(server, 1, "2025-11-25")
+        resp = do_user_handshake(server, 1, MCP_PROTOCOL_VERSION)
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 1
-        assert resp["result"]["protocolVersion"] == "2025-11-25"
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
         assert "tools" in resp["result"]["capabilities"]
         assert "resources" in resp["result"]["capabilities"]
         assert resp["result"]["serverInfo"]["name"] == "ai-db-explorer"
         assert resp["result"]["serverInfo"]["version"] == "0.0.1"
-        # double handshake should fail
-        resp = do_handshake(server, "second", "2025-11-25")
+
+        # Double initialize should fail.
+        resp = do_user_handshake(server, "second", MCP_PROTOCOL_VERSION)
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == "second"
         assert "error" in resp
     finally:
         stop_proc(server)
 
-# this should not give error, the broker should respond with the laster version
-# available to it
-def test_handshake_bad_version(broker):
+
+# This should not error: when client asks for an unsupported version, the
+# server replies with a supported one.
+def test_handshake_bad_version():
     server = start_server()
     try:
-        resp = do_handshake(server, 2, "2020-01-01")
+        resp = do_user_handshake(server, 2, "2020-01-01")
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 2
-        assert resp["result"]["protocolVersion"] == "2025-11-25"
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
     finally:
         stop_proc(server)
 
-# this should error
-def test_handshake_invalid_json(broker):
+
+# Invalid JSON should return JSON-RPC Invalid Request.
+def test_handshake_invalid_json():
     server = start_server()
     try:
         bad = b'{"jsonrpc":"2.0","id":3,"method":"initialize"'
@@ -144,10 +185,11 @@ def test_handshake_invalid_json(broker):
     finally:
         stop_proc(server)
 
-def test_notification_invalid_request(broker):
+
+def test_notification_invalid_request():
     server = start_server()
     try:
-        resp = do_handshake(server, 4, "2025-11-25")
+        resp = do_user_handshake(server, 4, MCP_PROTOCOL_VERSION)
         assert resp["jsonrpc"] == "2.0"
 
         # Notifications must not include an id; server should ignore them.
@@ -158,9 +200,8 @@ def test_notification_invalid_request(broker):
         }
         write_frame(server, json.dumps(note).encode("utf-8"))
 
-        # A valid server should not respond to notifications; verify
-        # the connection is still alive by sending another handshake.
-        resp = do_handshake(server, 5, "2025-11-25")
+        # Verify connection still alive by issuing initialize again.
+        resp = do_user_handshake(server, 5, MCP_PROTOCOL_VERSION)
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 5
     finally:
@@ -170,11 +211,11 @@ def test_notification_invalid_request(broker):
 def main():
     broker = start_broker()
     try:
-        test_handshake_ok(broker)
-        test_handshake_bad_version(broker)
-        test_handshake_invalid_json(broker)
-        test_notification_invalid_request(broker)
-        print("OK: test_mcp_handshake")
+        test_handshake_ok()
+        test_handshake_bad_version()
+        test_handshake_invalid_json()
+        test_notification_invalid_request()
+        print("OK: test_user_mcp_handshake")
     finally:
         stop_proc(broker)
 

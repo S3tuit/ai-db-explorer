@@ -10,7 +10,6 @@ typedef enum ValidatorErrCode {
   VERR_PARSE_FAIL,             /* parser/IR failure */
   VERR_UNSUPPORTED_QUERY,      /* unsupported query structure */
   VERR_ANALYZE_FAIL,           /* internal analysis failure */
-  VERR_VAULT_CLOSED,           /* sensitive mode required but vault closed */
   VERR_NO_TABLE_ALIAS,         /* missing table alias */
   VERR_NO_COLUMN_ALIAS,        /* missing/unknown column alias */
   VERR_STAR,                   /* SELECT * or alias.* */

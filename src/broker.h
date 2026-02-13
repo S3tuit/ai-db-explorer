@@ -8,47 +8,7 @@
 #include "byte_channel.h"
 #include "conn_manager.h"
 #include "db_backend.h"
-#include "token_constants.h"
-
-/*-------------------------------- Handshake --------------------------------*/
-
-#define HANDSHAKE_MAGIC 0x4D435042 /* "MCPB" */
-#define HANDSHAKE_VERSION 1
-#define SECRET_TOKEN_LEN ADBX_SHARED_TOKEN_LEN /* 256-bit random token */
-#define RESUME_TOKEN_LEN ADBX_RESUME_TOKEN_LEN
-
-typedef struct {
-  uint32_t magic;
-  uint16_t version;
-  uint16_t flags;                         /* bit 0: has_resume_token */
-  uint8_t resume_token[RESUME_TOKEN_LEN]; /* ignored if has_resume_token is not
-                                             set */
-  uint8_t secret_token[SECRET_TOKEN_LEN]; /* required during handshake */
-} handshake_req_t;
-
-#define HANDSHAKE_FLAG_RESUME (1u << 0)
-
-typedef enum {
-  HS_OK = 0,
-  HS_ERR_BAD_MAGIC = 1,
-  HS_ERR_BAD_VERSION = 2,
-  HS_ERR_TOKEN_EXPIRED = 3,
-  HS_ERR_TOKEN_UNKNOWN = 4,
-  HS_ERR_FULL = 5, /* MAX_CLIENTS reached */
-  HS_ERR_REQ = 6,  /* malformed handshake request */
-  HS_ERR_INTERNAL = 7,
-} handshake_status;
-
-typedef struct {
-  uint32_t magic;
-  uint16_t version;
-  handshake_status status;                /* 0 = OK, nonzero = error code */
-  uint8_t resume_token[RESUME_TOKEN_LEN]; /* the (new or resumed) token */
-  uint32_t idle_ttl_secs;                 /* server communicates policy back */
-  uint32_t abs_ttl_secs;
-} handshake_resp_t;
-
-/*---------------------------------------------------------------------------*/
+#include "handshake_codec.h"
 
 /* The entity is responsible for connecting to databases and running the
  * commands of the clients. */

@@ -1,5 +1,10 @@
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "bufio.h"
 #include "stdio_byte_channel.h"
@@ -169,6 +174,47 @@ partial_bytechannel_create(const unsigned char *rbuf, size_t rlen,
   return ch;
 }
 
+/* Creates a temporary file path and returns it in caller-owned memory.
+ * Ownership: returns heap path owned by caller; caller must unlink/free.
+ * Side effects: creates an empty file under /tmp and closes it.
+ * Error semantics: asserts on setup failure and returns non-NULL path.
+ */
+static char *make_tmp_path(void) {
+  char tmpl[] = "/tmp/test_bufio_XXXXXX";
+  int fd = mkstemp(tmpl);
+  ASSERT_TRUE(fd >= 0);
+  ASSERT_TRUE(close(fd) == 0);
+  return dup_or_null(tmpl);
+}
+
+/* Counts open fds in this process that refer to a specific inode.
+ * Ownership: borrows 'path'; no allocations.
+ * Side effects: queries process fd table via fstat/getrlimit.
+ * Error semantics: asserts on setup failures and returns non-negative count.
+ */
+static int count_open_fds_for_path_inode(const char *path) {
+  ASSERT_TRUE(path != NULL);
+  struct stat target = {0};
+  ASSERT_TRUE(stat(path, &target) == 0);
+
+  struct rlimit lim = {0};
+  ASSERT_TRUE(getrlimit(RLIMIT_NOFILE, &lim) == 0);
+
+  rlim_t max = lim.rlim_cur;
+  if (max == RLIM_INFINITY || max > 65536)
+    max = 65536;
+
+  int count = 0;
+  for (int fd = 0; (rlim_t)fd < max; fd++) {
+    struct stat st = {0};
+    if (fstat(fd, &st) == 0 && st.st_dev == target.st_dev &&
+        st.st_ino == target.st_ino) {
+      count++;
+    }
+  }
+  return count;
+}
+
 static void test_bufch_peek_find_and_read(void) {
   FILE *in = MEMFILE_IN("hello world");
   ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
@@ -324,6 +370,34 @@ static void test_bufch_read_until_greater_than_max(void) {
   fclose(in);
 }
 
+/* Verifies openp helper destroys temporary channel when bufch_init fails. */
+static void test_bufch_stdio_openp_init_closes_fd_on_init_error(void) {
+  char *path = make_tmp_path();
+  int before = count_open_fds_for_path_inode(path);
+
+  ASSERT_TRUE(bufch_stdio_openp_init(NULL, path, path) == ERR);
+
+  int after = count_open_fds_for_path_inode(path);
+  ASSERT_TRUE(after == before);
+
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
+/* Verifies openfd helper destroys temporary channel when bufch_init fails. */
+static void test_bufch_stdio_openfd_init_closes_fd_on_init_error(void) {
+  char *path = make_tmp_path();
+  int fd = open(path, O_RDWR);
+  ASSERT_TRUE(fd >= 0);
+
+  ASSERT_TRUE(bufch_stdio_openfd_init(NULL, fd, -1) == ERR);
+  ASSERT_TRUE(fcntl(fd, F_GETFD) == -1);
+  ASSERT_TRUE(errno == EBADF);
+
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
 int main(void) {
   test_bufch_peek_find_and_read();
   test_bufch_partial_reads();
@@ -333,6 +407,8 @@ int main(void) {
   test_bufch_read_until_bad_input();
   test_bufch_read_until_shorter_than_max();
   test_bufch_read_until_greater_than_max();
+  test_bufch_stdio_openp_init_closes_fd_on_init_error();
+  test_bufch_stdio_openfd_init_closes_fd_on_init_error();
 
   fprintf(stderr, "OK: test_bufio\n");
   return 0;

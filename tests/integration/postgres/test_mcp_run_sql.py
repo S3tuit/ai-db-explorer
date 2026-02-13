@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import json
+import shutil
 import sys
 
-from test_mcp_handshake import (
-    do_handshake,
+from test_broker_mcp_handshake import (
+    do_full_handshake,
+)
+from test_user_mcp_handshake import (
     read_frame,
-    start_broker,
-    start_server,
     stop_proc,
     write_frame,
 )
@@ -30,10 +31,12 @@ def send_tools_call(server, req_id, connection_name, query):
 
 
 def test_run_sql_my_db():
-    broker = start_broker()
-    server = start_server()
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
     try:
-        resp = do_handshake(server, 1, "2025-11-25")
+        broker, server, privdir, runtime_dir, resp = do_full_handshake(req_id=1)
         assert resp["jsonrpc"] == "2.0"
 
         resp = send_tools_call(
@@ -49,13 +52,19 @@ def test_run_sql_my_db():
     finally:
         stop_proc(server)
         stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def test_run_sql_another_db():
-    broker = start_broker()
-    server = start_server()
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
     try:
-        resp = do_handshake(server, 2, "2025-11-25")
+        broker, server, privdir, runtime_dir, resp = do_full_handshake(req_id=2)
         assert resp["jsonrpc"] == "2.0"
 
         resp = send_tools_call(
@@ -73,13 +82,19 @@ def test_run_sql_another_db():
     finally:
         stop_proc(server)
         stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def test_run_sql_unknown_db():
-    broker = start_broker()
-    server = start_server()
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
     try:
-        resp = do_handshake(server, 5, "2025-11-25")
+        broker, server, privdir, runtime_dir, resp = do_full_handshake(req_id=5)
         assert resp["jsonrpc"] == "2.0"
 
         resp = send_tools_call(
@@ -94,13 +109,19 @@ def test_run_sql_unknown_db():
     finally:
         stop_proc(server)
         stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def test_run_sql_unsafe_role():
-    broker = start_broker()
-    server = start_server()
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
     try:
-        resp = do_handshake(server, 5, "2025-11-25")
+        broker, server, privdir, runtime_dir, resp = do_full_handshake(req_id=5)
         assert resp["jsonrpc"] == "2.0"
 
         resp = send_tools_call(
@@ -115,13 +136,19 @@ def test_run_sql_unsafe_role():
     finally:
         stop_proc(server)
         stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def test_run_sql_sensitive():
-    broker = start_broker()
-    server = start_server()
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
     try:
-        resp = do_handshake(server, 5, "2025-11-25")
+        broker, server, privdir, runtime_dir, resp = do_full_handshake(req_id=5)
         assert resp["jsonrpc"] == "2.0"
 
         resp = send_tools_call(
@@ -171,6 +198,10 @@ def test_run_sql_sensitive():
     finally:
         stop_proc(server)
         stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def main():

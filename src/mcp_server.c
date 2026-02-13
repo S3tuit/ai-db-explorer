@@ -1,11 +1,13 @@
 #define _GNU_SOURCE
 
 #include "mcp_server.h"
+#include "file_io.h"
 #include "frame_codec.h"
+#include "handshake_codec.h"
 #include "json_codec.h"
 #include "log.h"
 #include "mcp_id.h"
-#include "stdio_byte_channel.h"
+#include "resume_token.h"
 #include "utils.h"
 
 #include <errno.h>
@@ -16,8 +18,6 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#define MCP_PROTOCOL_VERSION "2025-11-25"
-
 static void mcpser_set_err(McpServer *s, const char *msg) {
   if (!s)
     return;
@@ -26,8 +26,12 @@ static void mcpser_set_err(McpServer *s, const char *msg) {
   snprintf(s->last_err, sizeof(s->last_err), "%s", msg);
 }
 
-/* Connects to the socket located at 'path' and returns the new endpoint to
- * use for communication. On error returns -1. */
+/* Connects to the Unix-domain socket at 'path'.
+ * Ownership: borrows 'path'; returns a new fd owned by caller.
+ * Side effects: creates and connects a socket.
+ * Error semantics: returns connected fd on success, -1 on invalid input or
+ * socket/connect failures.
+ */
 static int connect_unix_socket(const char *path) {
   if (!path)
     return -1;
@@ -51,11 +55,187 @@ static int connect_unix_socket(const char *path) {
   return fd;
 }
 
-/* Writes a JSON-RPC error response. If 'requested' is non-NULL, include data
- * with supported/requested protocol versions. */
+/* Opens and installs a broker channel connected to 'sock_path'.
+ * Ownership: borrows 's' and 'sock_path'; stores owned channel in 's'.
+ * Side effects: creates/connects a Unix socket and mutates 's->brok_bc'.
+ * Error semantics: returns OK on success, ERR on invalid input or connection/
+ * channel creation failure.
+ */
+static int mcpser_connect_broker_channel(McpServer *s, const char *sock_path) {
+  if (!s || !sock_path)
+    return ERR;
+
+  bufch_clean(&s->brok_bc);
+
+  int brok_fd = connect_unix_socket(sock_path);
+  if (brok_fd < 0)
+    return ERR;
+  if (bufch_stdio_openfd_init(&s->brok_bc, brok_fd, brok_fd) != OK)
+    return ERR;
+
+  return OK;
+}
+
+/* Writes one framed broker handshake request using provided credentials.
+ * Ownership: borrows all inputs.
+ * Side effects: writes one binary frame to 's->brok_bc'.
+ * Error semantics: returns OK on success, ERR on invalid input or write
+ * failure.
+ */
+static int mcpser_send_broker_handshake_req(
+    McpServer *s, const uint8_t secret_token[SECRET_TOKEN_LEN], int use_resume,
+    const uint8_t resume_token[RESUME_TOKEN_LEN]) {
+  if (!s || !s->brok_bc.ch || !secret_token)
+    return ERR;
+  if (use_resume == YES && !resume_token)
+    return ERR;
+
+  handshake_req_t req = {0};
+  req.magic = HANDSHAKE_MAGIC;
+  req.version = HANDSHAKE_VERSION;
+  memcpy(req.secret_token, secret_token, SECRET_TOKEN_LEN);
+  if (use_resume == YES) {
+    req.flags |= HANDSHAKE_FLAG_RESUME;
+    memcpy(req.resume_token, resume_token, RESUME_TOKEN_LEN);
+  }
+
+  uint8_t wire[HANDSHAKE_REQ_WIRE_SIZE];
+  if (handshake_req_encode(&req, wire) != OK)
+    return ERR;
+  return frame_write_len(&s->brok_bc, wire, (uint32_t)sizeof(wire));
+}
+
+/* Reads one framed broker handshake response and validates envelope fields.
+ * Ownership: borrows 's'; writes parsed response into caller-owned 'out'.
+ * Side effects: reads one binary frame from 's->brok_bc'.
+ * Error semantics: returns OK on valid response frame, ERR on invalid input,
+ * framing I/O failure, payload-size mismatch, or bad magic/version.
+ */
+static int mcpser_read_broker_handshake_resp(McpServer *s,
+                                             handshake_resp_t *out) {
+  if (!s || !s->brok_bc.ch || !out)
+    return ERR;
+
+  StrBuf payload = {0};
+  int rc = frame_read_len(&s->brok_bc, &payload);
+  if (rc != OK) {
+    sb_clean(&payload);
+    return ERR;
+  }
+
+  if (handshake_resp_decode(out, (const uint8_t *)payload.data, payload.len) !=
+      OK) {
+    sb_clean(&payload);
+    return ERR;
+  }
+  sb_clean(&payload);
+
+  if (out->magic != HANDSHAKE_MAGIC || out->version != HANDSHAKE_VERSION)
+    return ERR;
+  return OK;
+}
+
+/* Maps broker handshake status code to human-readable reason.
+ * Ownership: pure helper, borrows no resources.
+ * Side effects: none.
+ * Error semantics: returns static string for any input status value.
+ */
+static const char *mcpser_hs_status_desc(handshake_status st) {
+  switch (st) {
+  case HS_OK:
+    return "ok";
+  case HS_ERR_BAD_MAGIC:
+    return "bad magic";
+  case HS_ERR_BAD_VERSION:
+    return "bad version";
+  case HS_ERR_TOKEN_EXPIRED:
+    return "token expired";
+  case HS_ERR_TOKEN_UNKNOWN:
+    return "token unknown";
+  case HS_ERR_FULL:
+    return "broker full";
+  case HS_ERR_REQ:
+    return "bad request";
+  case HS_ERR_INTERNAL:
+    return "broker internal";
+  default:
+    return "unknown status";
+  }
+}
+
+/* Connects to broker and completes client-side handshake with optional single
+ * retry on stale resume token.
+ * Ownership: borrows 's', 'sock_path', 'store', and 'secret_token'.
+ * Side effects: opens/closes broker channels, performs framed I/O, and updates
+ * persisted resume token state through restok_* API.
+ * Error semantics: returns OK on established session, ERR on connection,
+ * protocol, or unrecoverable handshake errors.
+ */
+static int mcpser_connect_and_handshake_broker(
+    McpServer *s, const char *sock_path, ResumeTokenStore *store,
+    const uint8_t secret_token[SECRET_TOKEN_LEN]) {
+  if (!s || !sock_path || !store || !secret_token)
+    return ERR;
+
+  uint8_t resume_token[RESUME_TOKEN_LEN] = {0};
+  int have_resume = (restok_load(store, resume_token) == YES) ? YES : NO;
+
+  for (int attempt = 0; attempt < 2; attempt++) {
+    // this closes the socket first because the broker expects the handshake as
+    // first message. TODO: maybe is there a better pattern?
+    if (mcpser_connect_broker_channel(s, sock_path) != OK)
+      return ERR;
+
+    // try handshake once
+    handshake_resp_t resp = {0};
+    int rc = mcpser_send_broker_handshake_req(s, secret_token, have_resume,
+                                              resume_token);
+    if (rc == OK)
+      rc = mcpser_read_broker_handshake_resp(s, &resp);
+    if (rc != OK) {
+      bufch_clean(&s->brok_bc);
+      return ERR;
+    }
+
+    if (resp.status == HS_OK) {
+      if (restok_store(store, resp.resume_token) != OK) {
+        fprintf(stderr,
+                "Failed to write token file: session resume disabled\n");
+      }
+      return OK;
+    }
+
+    // Broker closes on handshake errors; close local channel before retry/fail.
+    bufch_clean(&s->brok_bc);
+
+    if (have_resume == YES && (resp.status == HS_ERR_TOKEN_EXPIRED ||
+                               resp.status == HS_ERR_TOKEN_UNKNOWN)) {
+      fprintf(stderr, "Broker rejected resume token, starting fresh session\n");
+      (void)restok_delete(store);
+      have_resume = NO;
+      memset(resume_token, 0, sizeof(resume_token));
+      continue;
+    }
+
+    fprintf(stderr, "Broker handshake failed: %s\n",
+            mcpser_hs_status_desc(resp.status));
+    return ERR;
+  }
+
+  return ERR;
+}
+
+/* Writes a JSON-RPC error response to the MCP host output channel.
+ * Ownership: borrows 's', optional 'id', and message pointers; temporary JSON
+ * buffer is internal and freed before return.
+ * Side effects: serializes JSON and writes one Content-Length frame to
+ * 's->out_bc'.
+ * Error semantics: returns OK on successful serialization/write, ERR on invalid
+ * input, allocation failure, or output I/O failure.
+ */
 static int mcpser_send_error(McpServer *s, const McpId *id, long code,
                              const char *msg, const char *requested) {
-  if (!s || !s->out_bc || !msg)
+  if (!s || !s->out_bc.ch || !msg)
     return ERR;
 
   StrBuf sb = {0};
@@ -100,7 +280,7 @@ static int mcpser_send_error(McpServer *s, const McpId *id, long code,
   if (json_obj_end(&sb) != OK)
     goto err;
 
-  int rc = frame_write_cl(s->out_bc, sb.data, sb.len);
+  int rc = frame_write_cl(&s->out_bc, sb.data, sb.len);
   sb_clean(&sb);
   return rc;
 
@@ -109,69 +289,66 @@ err:
   return ERR;
 }
 
-int mcpser_init(McpServer *s, FILE *in, FILE *out, const char *sock_path) {
-  if (!s || !in || !out || !sock_path)
+int mcpser_init(McpServer *s, const McpServerInit *init) {
+  if (!s || !init || !init->in || !init->out || !init->privd)
     return ERR;
   memset(s, 0, sizeof(*s));
   s->last_err[0] = '\0';
 
-  int in_fd = fileno(in);
-  int out_fd = fileno(out);
+  int in_fd = fileno(init->in);
+  int out_fd = fileno(init->out);
   if (in_fd < 0 || out_fd < 0)
     return ERR;
 
-  // The McpServer doesn't own the input file destriptors, so it won't cloes
-  // them. That's because usually they're stdin and stdout
-  ByteChannel *stdin_ch = stdio_bytechannel_wrap_fd(in_fd, -1);
-  if (!stdin_ch)
+  // The McpServer doesn't own the input/output file descriptors, so it wraps
+  // them as non-owning channels.
+  if (bufch_stdio_wrapfd_init(&s->in_bc, in_fd, -1) != OK)
     return ERR;
-  s->in_bc = bufch_create(stdin_ch);
-  if (!s->in_bc)
-    return ERR;
-
-  ByteChannel *out_ch = stdio_bytechannel_wrap_fd(-1, out_fd);
-  if (!out_ch) {
-    bufch_destroy(s->in_bc);
-    s->in_bc = NULL;
-    return ERR;
-  }
-  s->out_bc = bufch_create(out_ch);
-  if (!s->out_bc) {
-    bytech_destroy(out_ch);
-    bufch_destroy(s->in_bc);
-    s->in_bc = NULL;
+  if (bufch_stdio_wrapfd_init(&s->out_bc, -1, out_fd) != OK) {
+    bufch_clean(&s->in_bc);
     return ERR;
   }
 
-  // tries to connect to the Broker
-  int brok_fd = connect_unix_socket(sock_path);
-  if (brok_fd < 0) {
+  uint8_t secret_token[SECRET_TOKEN_LEN] = {0};
+  if (privdir_read_token(init->privd, secret_token) != OK) {
     mcpser_clean(s);
+    mcpser_set_err(s, "failed to load broker secret token");
     return ERR;
   }
-  ByteChannel *brok_ch = stdio_bytechannel_open_fd(brok_fd, brok_fd);
-  if (!brok_ch) {
-    close(brok_fd);
+
+  ResumeTokenStore store = {0};
+  if (restok_init(&store) == ERR) {
     mcpser_clean(s);
+    mcpser_set_err(s, "failed to initialize resume token store");
     return ERR;
   }
-  s->brok_bc = bufch_create(brok_ch);
-  if (!s->brok_bc) {
-    bytech_destroy(brok_ch);
+
+  int hrc = mcpser_connect_and_handshake_broker(s, init->privd->sock_path,
+                                                &store, secret_token);
+  restok_clean(&store);
+  if (hrc != OK) {
     mcpser_clean(s);
+    mcpser_set_err(s, "failed broker handshake");
     return ERR;
   }
 
   return OK;
 }
 
-/* Handles the MCP initialize handshake. */
-static int mcpser_handshake(McpServer *s) {
+/* Validates and answers the user-facing MCP "initialize" JSON-RPC request.
+ * Ownership: borrows 's'; allocates temporary request/response buffers and
+ * frees them before return.
+ * Side effects: reads one Content-Length-framed request from stdin channel and
+ * writes one framed response (or error) to stdout channel.
+ * Error semantics: returns OK on valid initialize flow, ERR on malformed input
+ * framing/JSON, write failure, or protocol mismatch.
+ */
+static int mcpser_user_initialize_handshake(McpServer *s) {
   if (!s)
     return ERR;
 
   StrBuf req = {0};
-  int rc = frame_read_cl(s->in_bc, &req);
+  int rc = frame_read_cl(&s->in_bc, &req);
   if (rc != YES) {
     sb_clean(&req);
     return ERR;
@@ -272,7 +449,7 @@ static int mcpser_handshake(McpServer *s) {
   if (json_obj_end(&sb) != OK)
     goto fail;
 
-  int wrc = frame_write_cl(s->out_bc, sb.data, sb.len);
+  int wrc = frame_write_cl(&s->out_bc, sb.data, sb.len);
   sb_clean(&sb);
   if (id.kind == MCP_ID_STR)
     mcp_id_clean(&id);
@@ -285,14 +462,106 @@ fail:
   return ERR;
 }
 
+/* Validates one user JSON-RPC request frame before broker forwarding.
+ * Ownership: borrows 's' and 'req'; writes parsed id to caller-owned 'id_out'
+ * (string id ownership transfers to caller when return is YES).
+ * Side effects: may write JSON-RPC error replies to 's->out_bc' for invalid
+ * requests.
+ * Error semantics: returns YES for valid request, NO for non-fatal
+ * reject/ignore (error already sent or notification without id), ERR when
+ * processing must stop (typically failed error-response write or invalid input
+ * pointers).
+ */
+static int mcpser_validate_user_req(McpServer *s, const StrBuf *req,
+                                    McpId *id_out, const McpId **idp_out) {
+  if (!s || !req || !id_out || !idp_out)
+    return ERR;
+
+  memset(id_out, 0, sizeof(*id_out));
+  *idp_out = NULL;
+
+  JsonGetter jg;
+  int irc = jsget_init(&jg, req->data, req->len);
+  if (irc != OK) {
+    fprintf(stderr, "McpServer: malformed input\n");
+    TLOG("ERROR - invalid JSON in MCP input");
+    if (mcpser_send_error(s, NULL, -32600, "Malformed JSON-RPC request",
+                          NULL) != OK) {
+      mcpser_set_err(s, "failed to write error response");
+      return ERR;
+    }
+    return NO;
+  }
+
+  if (jsget_u32(&jg, "id", &id_out->u32) == YES) {
+    id_out->kind = MCP_ID_INT;
+    *idp_out = id_out;
+  } else {
+    char *id_str = NULL;
+    int src = jsget_string_decode_alloc(&jg, "id", &id_str);
+    if (src == YES) {
+      id_out->kind = MCP_ID_STR;
+      id_out->str = id_str;
+      *idp_out = id_out;
+    } else if (src == NO) {
+      // Notifications have no id; ignore them for now.
+      return NO;
+    } else {
+      TLOG("ERROR - invalid id in JSON-RPC request");
+      if (mcpser_send_error(s, NULL, -32600, "Invalid JSON-RPC request.",
+                            NULL) != OK) {
+        mcpser_set_err(s, "failed to write error response");
+        return ERR;
+      }
+      return NO;
+    }
+  }
+
+  int vrc = jsget_simple_rpc_validation(&jg);
+  if (vrc != YES) {
+    fprintf(stderr, "McpServer: invalid input\n");
+    TLOG("ERROR - invalid JSON-RPC envelope");
+    if (mcpser_send_error(s, *idp_out, -32600, "Invalid JSON-RPC request.",
+                          NULL) != OK) {
+      mcpser_set_err(s, "failed to write error response");
+      if (id_out->kind == MCP_ID_STR)
+        mcp_id_clean(id_out);
+      return ERR;
+    }
+    if (id_out->kind == MCP_ID_STR)
+      mcp_id_clean(id_out);
+    *idp_out = NULL;
+    return NO;
+  }
+
+  // Overflow guard before narrowing request length to uint32 for broker frame.
+  if (req->len > UINT32_MAX) {
+    fprintf(stderr, "McpServer: request too large\n");
+    TLOG("ERROR - request too large: len=%zu", req->len);
+    if (mcpser_send_error(s, *idp_out, -32600, "Request too large.", NULL) !=
+        OK) {
+      mcpser_set_err(s, "failed to write error response");
+      if (id_out->kind == MCP_ID_STR)
+        mcp_id_clean(id_out);
+      return ERR;
+    }
+    if (id_out->kind == MCP_ID_STR)
+      mcp_id_clean(id_out);
+    *idp_out = NULL;
+    return NO;
+  }
+
+  return YES;
+}
+
 int mcpser_run(McpServer *s) {
   // This is the flow of McpServer:
   // handshake -> read JSON-RPC -> validate -> write to broker -> read from
   // broker -> write to out channel
-  if (!s || !s->in_bc || !s->brok_bc || !s->out_bc)
+  if (!s || !s->in_bc.ch || !s->brok_bc.ch || !s->out_bc.ch)
     return ERR;
 
-  int hrc = mcpser_handshake(s);
+  int hrc = mcpser_user_initialize_handshake(s);
   if (hrc != OK)
     return ERR;
   TLOG("INFO - handshake complete, entering main loop");
@@ -300,7 +569,7 @@ int mcpser_run(McpServer *s) {
   for (;;) {
     // McpServer reads JSON-RPC request
     StrBuf req = {0};
-    int rc = frame_read_cl(s->in_bc, &req);
+    int rc = frame_read_cl(&s->in_bc, &req);
     TLOG("INFO - frame_read_cl rc=%d len=%zu", rc, req.len);
     if (rc == NO) {
       // EOF
@@ -315,85 +584,21 @@ int mcpser_run(McpServer *s) {
       return ERR;
     }
 
-    JsonGetter jg;
-    int irc = jsget_init(&jg, req.data, req.len);
-    if (irc != OK) {
-      fprintf(stderr, "McpServer: malformed input\n");
-      sb_clean(&req);
-      TLOG("ERROR - invalid JSON in MCP input");
-      if (mcpser_send_error(s, NULL, -32600, "Malformed JSON-RPC request",
-                            NULL) != OK) {
-        mcpser_set_err(s, "failed to write error response");
-        return ERR;
-      }
-      continue;
-    }
-
     McpId id = {0};
     const McpId *idp = NULL;
-    if (jsget_u32(&jg, "id", &id.u32) == YES) {
-      id.kind = MCP_ID_INT;
-      idp = &id;
-    } else {
-      char *id_str = NULL;
-      int src = jsget_string_decode_alloc(&jg, "id", &id_str);
-      if (src == YES) {
-        id.kind = MCP_ID_STR;
-        id.str = id_str;
-        idp = &id;
-      } else if (src == NO) {
-        // Notifications have no id; ignore them for now.
-        sb_clean(&req);
-        continue;
-      } else {
-        sb_clean(&req);
-        TLOG("ERROR - invalid id in JSON-RPC request");
-        if (mcpser_send_error(s, NULL, -32600, "Invalid JSON-RPC request.",
-                              NULL) != OK) {
-          mcpser_set_err(s, "failed to write error response");
-          return ERR;
-        }
-        continue;
-      }
-    }
-
-    int vrc = jsget_simple_rpc_validation(&jg);
-
-    if (vrc != YES) {
-      fprintf(stderr, "McpServer: invalid input\n");
+    int vrc = mcpser_validate_user_req(s, &req, &id, &idp);
+    if (vrc == ERR) {
       sb_clean(&req);
-      TLOG("ERROR - invalid JSON-RPC envelope");
-      if (mcpser_send_error(s, idp, -32600, "Invalid JSON-RPC request.",
-                            NULL) != OK) {
-        mcpser_set_err(s, "failed to write error response");
-        if (idp)
-          mcp_id_clean(&id);
-        return ERR;
-      }
-      if (idp)
-        mcp_id_clean(&id);
-      continue;
+      return ERR;
     }
-
-    // overflow
-    if (req.len > UINT32_MAX) {
-      fprintf(stderr, "McpServer: request too large\n");
+    if (vrc == NO) {
       sb_clean(&req);
-      TLOG("ERROR - request too large: len=%zu", req.len);
-      if (mcpser_send_error(s, idp, -32600, "Request too large.", NULL) != OK) {
-        mcpser_set_err(s, "failed to write error response");
-        if (idp)
-          mcp_id_clean(&id);
-        return ERR;
-      }
-      if (idp)
-        mcp_id_clean(&id);
       continue;
     }
 
     // McpServer sends request to the broker
     //
-    if (frame_write_len(s->brok_bc, req.data, (uint32_t)req.len) != OK) {
+    if (frame_write_len(&s->brok_bc, req.data, (uint32_t)req.len) != OK) {
       fprintf(stderr, "McpServer: broker write failed\n");
       sb_clean(&req);
       TLOG("ERROR - failed to write request to broker");
@@ -414,7 +619,7 @@ int mcpser_run(McpServer *s) {
     // McpServer reads broker response
     //
     StrBuf resp = {0};
-    if (frame_read_len(s->brok_bc, &resp) != OK) {
+    if (frame_read_len(&s->brok_bc, &resp) != OK) {
       fprintf(stderr, "McpServer: broker read failed\n");
       sb_clean(&resp);
       TLOG("ERROR - failed to read response from broker");
@@ -432,7 +637,7 @@ int mcpser_run(McpServer *s) {
     }
 
     // McpServer writes response to user
-    if (frame_write_cl(s->out_bc, resp.data, resp.len) != OK) {
+    if (frame_write_cl(&s->out_bc, resp.data, resp.len) != OK) {
       fprintf(stderr, "McpServer: stdout write failed\n");
       sb_clean(&resp);
       TLOG("ERROR - failed to write response to stdout");
@@ -451,18 +656,9 @@ int mcpser_run(McpServer *s) {
 void mcpser_clean(McpServer *s) {
   if (!s)
     return;
-  if (s->in_bc) {
-    bufch_destroy(s->in_bc);
-    s->in_bc = NULL;
-  }
-  if (s->brok_bc) {
-    bufch_destroy(s->brok_bc);
-    s->brok_bc = NULL;
-  }
-  if (s->out_bc) {
-    bufch_destroy(s->out_bc);
-    s->out_bc = NULL;
-  }
+  bufch_clean(&s->in_bc);
+  bufch_clean(&s->brok_bc);
+  bufch_clean(&s->out_bc);
   s->last_err[0] = '\0';
 }
 

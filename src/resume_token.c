@@ -259,7 +259,7 @@ int restok_store(ResumeTokenStore *store,
   }
 
   if (fileio_write_exact(store->token_path, token, ADBX_RESUME_TOKEN_LEN,
-                         0700) != OK) {
+                         0600) != OK) {
     fprintf(stderr, "Failed to write token file: %s\n", strerror(errno));
     restok_disable(store, "token file write failed");
     return ERR;

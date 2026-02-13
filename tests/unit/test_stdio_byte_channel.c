@@ -8,6 +8,14 @@
 #include "stdio_byte_channel.h"
 #include "test.h"
 
+/* Test-only view used to fetch write-only fd for cleanup assertions. */
+typedef struct StdioByteChannelImplView {
+  int in_fd;
+  int out_fd;
+  int owns_fds;
+  int is_closed;
+} StdioByteChannelImplView;
+
 static void test_stdio_read_some(void) {
   FILE *in = MEMFILE_IN("abc");
   ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
@@ -195,6 +203,88 @@ static void test_open_path_invalid_input(void) {
   ASSERT_TRUE(stdio_bytechannel_open_path(NULL, "") == NULL);
 }
 
+/* Verifies wrap_path handles same path and leaves fd open after destroy. */
+static void test_wrap_path_same_file_non_owning(void) {
+  char *path = make_tmp_path();
+  write_file_exact(path, "ab");
+
+  ByteChannel *ch = stdio_bytechannel_wrap_path(path, path);
+  ASSERT_TRUE(ch != NULL);
+  int fd = (int)bytech_get_pollable(ch);
+  ASSERT_TRUE(fd >= 0);
+
+  char buf[8] = {0};
+  ASSERT_TRUE(bytech_read_some(ch, buf, 2) == 2);
+  ASSERT_TRUE(memcmp(buf, "ab", 2) == 0);
+  ASSERT_TRUE(bytech_write_some(ch, "cd", 2) == 2);
+  bytech_destroy(ch);
+
+  ASSERT_TRUE(fcntl(fd, F_GETFD) != -1);
+  ASSERT_TRUE(close(fd) == 0);
+
+  char out[16] = {0};
+  read_file_all(path, out, sizeof(out));
+  ASSERT_TRUE(strcmp(out, "abcd") == 0);
+
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
+/* Verifies wrap_path read-only mode keeps its fd open after destroy. */
+static void test_wrap_path_read_only_non_owning(void) {
+  char *path = make_tmp_path();
+  write_file_exact(path, "xyz");
+
+  ByteChannel *ch = stdio_bytechannel_wrap_path(path, NULL);
+  ASSERT_TRUE(ch != NULL);
+  int fd = (int)bytech_get_pollable(ch);
+  ASSERT_TRUE(fd >= 0);
+
+  char buf[8] = {0};
+  ASSERT_TRUE(bytech_read_some(ch, buf, 3) == 3);
+  ASSERT_TRUE(memcmp(buf, "xyz", 3) == 0);
+  ASSERT_TRUE(bytech_write_some(ch, "q", 1) == ERR);
+  bytech_destroy(ch);
+
+  ASSERT_TRUE(fcntl(fd, F_GETFD) != -1);
+  ASSERT_TRUE(close(fd) == 0);
+
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
+/* Verifies wrap_path write-only mode and read-blocking behavior. */
+static void test_wrap_path_write_only(void) {
+  char *path = make_tmp_path();
+  write_file_exact(path, "");
+
+  ByteChannel *ch = stdio_bytechannel_wrap_path(NULL, path);
+  ASSERT_TRUE(ch != NULL);
+  StdioByteChannelImplView *impl = (StdioByteChannelImplView *)ch->impl;
+  ASSERT_TRUE(impl != NULL);
+  int fd = impl->out_fd;
+  ASSERT_TRUE(fd >= 0);
+  ASSERT_TRUE(bytech_write_some(ch, "ok", 2) == 2);
+  ASSERT_TRUE(bytech_read_some(ch, (char[1]){0}, 1) == ERR);
+  bytech_destroy(ch);
+  ASSERT_TRUE(fcntl(fd, F_GETFD) != -1);
+  ASSERT_TRUE(close(fd) == 0);
+
+  char out[16] = {0};
+  read_file_all(path, out, sizeof(out));
+  ASSERT_TRUE(strcmp(out, "ok") == 0);
+
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
+/* Verifies invalid wrap_path input is rejected. */
+static void test_wrap_path_invalid_input(void) {
+  ASSERT_TRUE(stdio_bytechannel_wrap_path(NULL, NULL) == NULL);
+  ASSERT_TRUE(stdio_bytechannel_wrap_path("", NULL) == NULL);
+  ASSERT_TRUE(stdio_bytechannel_wrap_path(NULL, "") == NULL);
+}
+
 int main(void) {
   test_stdio_read_some();
   test_stdio_write_and_flush();
@@ -204,6 +294,10 @@ int main(void) {
   test_open_path_read_only();
   test_open_path_write_only();
   test_open_path_invalid_input();
+  test_wrap_path_same_file_non_owning();
+  test_wrap_path_read_only_non_owning();
+  test_wrap_path_write_only();
+  test_wrap_path_invalid_input();
 
   fprintf(stderr, "OK: test_stdio_byte_channel\n");
   return 0;

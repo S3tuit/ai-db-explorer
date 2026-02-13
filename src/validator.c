@@ -2,7 +2,6 @@
 #include "log.h"
 #include "query_ir.h"
 #include "utils.h"
-#include "vault.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -1198,8 +1197,7 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirJoin *j = q->joins ? q->joins[i] : NULL;
     if (!j) {
-      set_err(ctx, VERR_ANALYZE_FAIL,
-              "Invalid query structure (NULL JOIN).");
+      set_err(ctx, VERR_ANALYZE_FAIL, "Invalid query structure (NULL JOIN).");
       return ERR;
     }
     if (j->kind != QIR_JOIN_INNER) {
@@ -1359,14 +1357,6 @@ int validate_query(const ValidatorRequest *req, ValidatorErr *err) {
               "Unable to analyze columns. Every table must have an alias, and "
               "every column must be qualified as alias.column.");
     }
-    qir_touch_report_destroy(tr);
-    qir_handle_destroy(&h);
-    sb_clean(&ctx.scratch);
-    return ERR;
-  }
-  if (sensitive_mode == true && vault_is_opened() != YES) {
-    set_err(&ctx, VERR_VAULT_CLOSED,
-            "Cannot enter sensitive mode when vault is closed.");
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     sb_clean(&ctx.scratch);

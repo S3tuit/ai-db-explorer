@@ -5,18 +5,25 @@
 #include <stdio.h>
 
 #include "bufio.h"
+#include "private_dir.h"
+
+typedef struct McpServerInit {
+  FILE *in;             /* borrowed by McpServer */
+  FILE *out;            /* borrowed by McpServer */
+  const PrivDir *privd; /* borrowed */
+} McpServerInit;
 
 typedef struct McpServer {
-  BufChannel *in_bc;   // owned, used to read from user
-  BufChannel *brok_bc; // owned, used to communicate with the Broker
-  BufChannel *out_bc;  // owned, used to write to user
-  char last_err[256];  // last fatal error (best-effort)
+  BufChannel in_bc;   // owned wrapper; underlying stdin fd is borrowed
+  BufChannel brok_bc; // owned wrapper around broker socket
+  BufChannel out_bc;  // owned wrapper; underlying stdout fd is borrowed
+  char last_err[256]; // last fatal error (best-effort)
 } McpServer;
 
-/* Initializes the McpServer to read from 'in', write to 'out', and talk to the
- * broker at 'sock_path'. The McpServer doesn't take ownership of 'in' and
- * 'out', so it won't close them. Returns OK/ERR. */
-int mcpser_init(McpServer *s, FILE *in, FILE *out, const char *sock_path);
+/* Initializes the McpServer from 'init' and performs broker handshake.
+ * The McpServer borrows FILE handles and does not close them.
+ * Returns OK/ERR. */
+int mcpser_init(McpServer *s, const McpServerInit *init);
 
 /* Runs the main loop until EOF. Returns OK on clean EOF, ERR on fatal error.
  * This handle errors logging to the user via JSONRPC and via stderr. If
