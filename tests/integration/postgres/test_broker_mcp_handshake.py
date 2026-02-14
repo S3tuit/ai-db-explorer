@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import socket
 import struct
@@ -14,7 +15,9 @@ from test_user_mcp_handshake import (
     secret_token_path,
     start_broker,
     start_server,
+    read_frame,
     stop_proc,
+    write_frame,
 )
 
 SECRET_TOKEN_LEN = 32
@@ -95,6 +98,31 @@ def _wait_start_failure(proc, timeout_sec=3.0):
     assert rc != 0
     # Negative return codes mean signal-based termination (crash).
     assert rc > 0
+
+
+def _do_tools_call(server, req_id, connection_name="MyPostgres", query="SELECT 1 AS one;"):
+    req = {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "tools/call",
+        "params": {
+            "name": "run_sql_query",
+            "arguments": {
+                "connectionName": connection_name,
+                "query": query,
+            },
+        },
+    }
+    write_frame(server, json.dumps(req).encode("utf-8"))
+    return json.loads(read_frame(server).decode("utf-8"))
+
+
+def _assert_broker_unavailable_error(resp, req_id):
+    assert resp["jsonrpc"] == "2.0"
+    assert resp["id"] == req_id
+    assert "error" in resp
+    msg = str(resp["error"].get("message", ""))
+    assert "Unable to reach broker" in msg
 
 
 def _assert_server_usable(privdir, server_env):
@@ -241,21 +269,25 @@ def do_full_handshake(
         raise
 
 
-def test_broker_absent_server_fails_to_start():
+def test_broker_absent_server_reports_unavailable_on_tools_call():
     privdir = make_temp_privdir("broker-absent")
     runtime_dir = make_runtime_dir("restok-absent")
     server = None
     try:
         _prepare_privdir_for_server_start(privdir, os.urandom(SECRET_TOKEN_LEN))
         server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
-        _wait_start_failure(server)
+        resp = do_user_handshake(server, "no-broker", MCP_PROTOCOL_VERSION)
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+        call = _do_tools_call(server, "no-broker-tool")
+        _assert_broker_unavailable_error(call, "no-broker-tool")
     finally:
         stop_proc(server)
         shutil.rmtree(runtime_dir, ignore_errors=True)
         shutil.rmtree(privdir, ignore_errors=True)
 
 
-def test_secret_token_mismatch_server_fails_to_start():
+def test_secret_token_mismatch_reports_unavailable_then_recovers():
     privdir = make_temp_privdir("secret-mismatch")
     runtime_dir = make_runtime_dir("restok-mismatch")
     broker = None
@@ -273,14 +305,21 @@ def test_secret_token_mismatch_server_fails_to_start():
         os.chmod(token_path, 0o600)
 
         server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
-        _wait_start_failure(server)
+        resp = do_user_handshake(server, "mismatch", MCP_PROTOCOL_VERSION)
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+        call = _do_tools_call(server, "mismatch-1")
+        _assert_broker_unavailable_error(call, "mismatch-1")
 
         with open(token_path, "wb") as f:
             f.write(good_secret)
         os.chmod(token_path, 0o600)
 
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+        call = _do_tools_call(server, "mismatch-2")
+        assert call["jsonrpc"] == "2.0"
+        assert call["id"] == "mismatch-2"
+        assert "Unable to reach broker" not in str(call.get("error", {}).get("message", ""))
+
     finally:
         stop_proc(server)
         stop_proc(broker)
@@ -373,7 +412,7 @@ def test_wrong_resume_dir_permissions_disable_resume_but_starts():
         shutil.rmtree(privdir, ignore_errors=True)
 
 
-def test_server_cannot_read_secret_token_fails_to_start():
+def test_server_cannot_read_secret_token_reports_unavailable_then_recovers():
     privdir = make_temp_privdir("secret-unreadable")
     runtime_dir = make_runtime_dir("restok-secret")
     broker = None
@@ -392,13 +431,21 @@ def test_server_cannot_read_secret_token_fails_to_start():
         os.unlink(token_path)
 
         server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
-        _wait_start_failure(server)
+        resp = do_user_handshake(server, "secret-missing", MCP_PROTOCOL_VERSION)
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+        call = _do_tools_call(server, "secret-missing-1")
+        _assert_broker_unavailable_error(call, "secret-missing-1")
 
         with open(token_path, "wb") as f:
             f.write(token)
         os.chmod(token_path, 0o600)
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+
+        call = _do_tools_call(server, "secret-missing-2")
+        assert call["jsonrpc"] == "2.0"
+        assert call["id"] == "secret-missing-2"
+        assert "Unable to reach broker" not in str(call.get("error", {}).get("message", ""))
+
     finally:
         stop_proc(server)
         stop_proc(broker)
@@ -544,12 +591,12 @@ def test_broker_survives_no_bytes_raw_handshake():
 
 
 def main():
-    test_broker_absent_server_fails_to_start()
-    test_secret_token_mismatch_server_fails_to_start()
+    test_broker_absent_server_reports_unavailable_on_tools_call()
+    test_secret_token_mismatch_reports_unavailable_then_recovers()
     test_unknown_resume_token_fallback_still_starts()
     test_resume_happy_path_across_restart_rotates_token()
     test_wrong_resume_dir_permissions_disable_resume_but_starts()
-    test_server_cannot_read_secret_token_fails_to_start()
+    test_server_cannot_read_secret_token_reports_unavailable_then_recovers()
     test_expired_resume_token_fallback_still_starts()
     test_broker_survives_bad_magic_raw_handshake()
     test_broker_survives_len_mismatch_raw_handshake()

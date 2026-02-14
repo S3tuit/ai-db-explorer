@@ -26,6 +26,22 @@ static void mcpser_set_err(McpServer *s, const char *msg) {
   snprintf(s->last_err, sizeof(s->last_err), "%s", msg);
 }
 
+static int mcpser_send_error(McpServer *s, const McpId *id, long code,
+                             const char *msg, const char *requested);
+
+/* Marks broker channel as unavailable and drops its socket/channel resources.
+ * Ownership: borrows 's'.
+ * Side effects: closes broker channel and clears runtime-ready state bit.
+ * Error semantics: returns OK on state update, ERR on invalid input.
+ */
+static int mcpser_invalidate_broker(McpServer *s) {
+  if (!s)
+    return ERR;
+  s->flags &= ~MCPSER_F_BROKER_READY;
+  bufch_clean(&s->brok_bc);
+  return OK;
+}
+
 /* Connects to the Unix-domain socket at 'path'.
  * Ownership: borrows 'path'; returns a new fd owned by caller.
  * Side effects: creates and connects a socket.
@@ -65,7 +81,7 @@ static int mcpser_connect_broker_channel(McpServer *s, const char *sock_path) {
   if (!s || !sock_path)
     return ERR;
 
-  bufch_clean(&s->brok_bc);
+  (void)mcpser_invalidate_broker(s);
 
   int brok_fd = connect_unix_socket(sock_path);
   if (brok_fd < 0)
@@ -163,27 +179,37 @@ static const char *mcpser_hs_status_desc(handshake_status st) {
   }
 }
 
-/* Connects to broker and completes client-side handshake with optional single
- * retry on stale resume token.
- * Ownership: borrows 's', 'sock_path', 'store', and 'secret_token'.
- * Side effects: opens/closes broker channels, performs framed I/O, and updates
- * persisted resume token state through restok_* API.
- * Error semantics: returns OK on established session, ERR on connection,
- * protocol, or unrecoverable handshake errors.
+/* Ensures broker channel is connected and handshake-complete for this server.
+ * Ownership: borrows 's'; uses borrowed private-dir paths and owned resume
+ * token store contained in 's'.
+ * Side effects: may read secret token from disk, open/close broker sockets,
+ * perform framed handshake I/O, and update persisted resume token state.
+ * Error semantics: returns OK when broker is ready (already ready or newly
+ * connected), ERR on missing/invalid inputs or failed connect/handshake flow.
  */
-static int mcpser_connect_and_handshake_broker(
-    McpServer *s, const char *sock_path, ResumeTokenStore *store,
-    const uint8_t secret_token[SECRET_TOKEN_LEN]) {
-  if (!s || !sock_path || !store || !secret_token)
+static int mcpser_connect_and_handshake_broker(McpServer *s) {
+  if (!s || !s->privd || !s->privd->sock_path)
     return ERR;
 
+  // Ready means we already have a connected channel that completed handshake.
+  if ((s->flags & MCPSER_F_BROKER_READY) != 0 && s->brok_bc.ch != NULL)
+    return OK;
+  if ((s->flags & MCPSER_F_BROKER_READY) != 0 && s->brok_bc.ch == NULL)
+    s->flags &= ~MCPSER_F_BROKER_READY;
+
+  uint8_t secret_token[SECRET_TOKEN_LEN] = {0};
+  if (privdir_read_token(s->privd, secret_token) != OK) {
+    TLOG("ERROR - failed to read broker secret token before reconnect");
+    return ERR;
+  }
+
   uint8_t resume_token[RESUME_TOKEN_LEN] = {0};
-  int have_resume = (restok_load(store, resume_token) == YES) ? YES : NO;
+  int have_resume = (restok_load(&s->restok, resume_token) == YES) ? YES : NO;
 
   for (int attempt = 0; attempt < 2; attempt++) {
-    // this closes the socket first because the broker expects the handshake as
-    // first message. TODO: maybe is there a better pattern?
-    if (mcpser_connect_broker_channel(s, sock_path) != OK)
+    // Broker requires handshake as first frame, so each retry uses a fresh
+    // socket/channel.
+    if (mcpser_connect_broker_channel(s, s->privd->sock_path) != OK)
       return ERR;
 
     // try handshake once
@@ -193,25 +219,26 @@ static int mcpser_connect_and_handshake_broker(
     if (rc == OK)
       rc = mcpser_read_broker_handshake_resp(s, &resp);
     if (rc != OK) {
-      bufch_clean(&s->brok_bc);
+      (void)mcpser_invalidate_broker(s);
       return ERR;
     }
 
     if (resp.status == HS_OK) {
-      if (restok_store(store, resp.resume_token) != OK) {
+      if (restok_store(&s->restok, resp.resume_token) != OK) {
         fprintf(stderr,
                 "Failed to write token file: session resume disabled\n");
       }
+      s->flags |= MCPSER_F_BROKER_READY;
       return OK;
     }
 
-    // Broker closes on handshake errors; close local channel before retry/fail.
-    bufch_clean(&s->brok_bc);
+    // Broker closes on handshake errors; mirror state locally before retry/fail.
+    (void)mcpser_invalidate_broker(s);
 
     if (have_resume == YES && (resp.status == HS_ERR_TOKEN_EXPIRED ||
                                resp.status == HS_ERR_TOKEN_UNKNOWN)) {
       fprintf(stderr, "Broker rejected resume token, starting fresh session\n");
-      (void)restok_delete(store);
+      (void)restok_delete(&s->restok);
       have_resume = NO;
       memset(resume_token, 0, sizeof(resume_token));
       continue;
@@ -223,6 +250,20 @@ static int mcpser_connect_and_handshake_broker(
   }
 
   return ERR;
+}
+
+/* Emits a JSON-RPC error explaining broker unavailability.
+ * Ownership: borrows all inputs.
+ * Side effects: writes one error frame to the MCP host output channel.
+ * Error semantics: returns OK on successful write, ERR on invalid input or
+ * write failure.
+ */
+static int mcpser_send_broker_unavailable(McpServer *s, const McpId *id) {
+  return mcpser_send_error(
+      s, id, -32600,
+      "Unable to reach broker. Please, try again. If the issue persists, ask "
+      "the user to check for broker health.",
+      NULL);
 }
 
 /* Writes a JSON-RPC error response to the MCP host output channel.
@@ -309,27 +350,19 @@ int mcpser_init(McpServer *s, const McpServerInit *init) {
     return ERR;
   }
 
-  uint8_t secret_token[SECRET_TOKEN_LEN] = {0};
-  if (privdir_read_token(init->privd, secret_token) != OK) {
-    mcpser_clean(s);
-    mcpser_set_err(s, "failed to load broker secret token");
-    return ERR;
-  }
+  s->privd = init->privd;
+  s->flags = 0;
 
-  ResumeTokenStore store = {0};
-  if (restok_init(&store) == ERR) {
+  if (restok_init(&s->restok) == ERR) {
     mcpser_clean(s);
     mcpser_set_err(s, "failed to initialize resume token store");
     return ERR;
   }
 
-  int hrc = mcpser_connect_and_handshake_broker(s, init->privd->sock_path,
-                                                &store, secret_token);
-  restok_clean(&store);
-  if (hrc != OK) {
-    mcpser_clean(s);
-    mcpser_set_err(s, "failed broker handshake");
-    return ERR;
+  // Best-effort eager connect: startup remains available even if broker is not
+  // ready yet. Each request retries via mcpser_connect_and_handshake_broker().
+  if (mcpser_connect_and_handshake_broker(s) != OK) {
+    TLOG("INFO - broker not ready during server init; requests will retry");
   }
 
   return OK;
@@ -558,7 +591,7 @@ int mcpser_run(McpServer *s) {
   // This is the flow of McpServer:
   // handshake -> read JSON-RPC -> validate -> write to broker -> read from
   // broker -> write to out channel
-  if (!s || !s->in_bc.ch || !s->brok_bc.ch || !s->out_bc.ch)
+  if (!s || !s->in_bc.ch || !s->out_bc.ch || !s->privd)
     return ERR;
 
   int hrc = mcpser_user_initialize_handshake(s);
@@ -596,23 +629,38 @@ int mcpser_run(McpServer *s) {
       continue;
     }
 
-    // McpServer sends request to the broker
-    //
-    if (frame_write_len(&s->brok_bc, req.data, (uint32_t)req.len) != OK) {
-      fprintf(stderr, "McpServer: broker write failed\n");
+    // Keep fail-closed semantics: never process requests without a live broker
+    // handshake, but keep MCP server alive and reply with explicit errors.
+    if (mcpser_connect_and_handshake_broker(s) != OK) {
+      fprintf(stderr, "McpServer: broker unavailable\n");
+      TLOG("ERROR - broker connect+handshake failed for request");
       sb_clean(&req);
-      TLOG("ERROR - failed to write request to broker");
-      if (mcpser_send_error(s, idp, -32600, "Unable to reach broker.", NULL) !=
-          OK) {
+      if (mcpser_send_broker_unavailable(s, idp) != OK) {
         mcpser_set_err(s, "failed to write error response");
         if (idp)
           mcp_id_clean(&id);
         return ERR;
       }
-      mcpser_set_err(s, "failed to write to broker");
       if (idp)
         mcp_id_clean(&id);
-      return ERR;
+      continue;
+    }
+
+    // McpServer sends request to the broker.
+    if (frame_write_len(&s->brok_bc, req.data, (uint32_t)req.len) != OK) {
+      fprintf(stderr, "McpServer: broker write failed\n");
+      sb_clean(&req);
+      TLOG("ERROR - failed to write request to broker");
+      (void)mcpser_invalidate_broker(s);
+      if (mcpser_send_broker_unavailable(s, idp) != OK) {
+        mcpser_set_err(s, "failed to write error response");
+        if (idp)
+          mcp_id_clean(&id);
+        return ERR;
+      }
+      if (idp)
+        mcp_id_clean(&id);
+      continue;
     }
     sb_clean(&req);
 
@@ -623,17 +671,16 @@ int mcpser_run(McpServer *s) {
       fprintf(stderr, "McpServer: broker read failed\n");
       sb_clean(&resp);
       TLOG("ERROR - failed to read response from broker");
-      if (mcpser_send_error(s, idp, -32600, "Unable to read broker response.",
-                            NULL) != OK) {
+      (void)mcpser_invalidate_broker(s);
+      if (mcpser_send_broker_unavailable(s, idp) != OK) {
         mcpser_set_err(s, "failed to write error response");
         if (idp)
           mcp_id_clean(&id);
         return ERR;
       }
-      mcpser_set_err(s, "failed to read from broker");
       if (idp)
         mcp_id_clean(&id);
-      return ERR;
+      continue;
     }
 
     // McpServer writes response to user
@@ -659,6 +706,9 @@ void mcpser_clean(McpServer *s) {
   bufch_clean(&s->in_bc);
   bufch_clean(&s->brok_bc);
   bufch_clean(&s->out_bc);
+  restok_clean(&s->restok);
+  s->privd = NULL;
+  s->flags = 0;
   s->last_err[0] = '\0';
 }
 
