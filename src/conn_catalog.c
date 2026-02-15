@@ -5,6 +5,7 @@
 #include "utils.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -20,6 +21,39 @@ static inline void str_lower_inplace(char *s) {
   for (; *s; s++) {
     *s = (char)tolower((unsigned char)*s);
   }
+}
+
+/* Sets an allocated error message once.
+ * Ownership: allocates *err_out once; caller must free it.
+ * Side effects: heap allocation for the formatted message.
+ * Error semantics: returns ERR in all cases; if allocation fails, *err_out
+ * remains unchanged.
+ */
+static int set_parse_err(char **err_out, const char *fmt, ...) {
+  if (!err_out || !fmt)
+    return ERR;
+  if (*err_out)
+    return ERR;
+
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n < 0)
+    return ERR;
+
+  size_t len = (size_t)n;
+  if (len >= sizeof(buf))
+    len = sizeof(buf) - 1;
+
+  char *msg = (char *)malloc(len + 1);
+  if (!msg)
+    return ERR;
+  memcpy(msg, buf, len);
+  msg[len] = '\0';
+  *err_out = msg;
+  return ERR;
 }
 
 /* Splits a decoded column path into schema/table/column components.
@@ -144,122 +178,104 @@ static int split_func_path(char *input, char **out_schema, char **out_name) {
   return OK;
 }
 
-/* Parses columnPolicy.pseudonymize.{deterministic,randomized} into ColumnRules.
+/* Parses sensitiveColumns into ColumnRules.
  * Business logic is documented in connp_is_col_sensitive().
- * Ownership: stores all strings and arrays in out->col_policy.arena. */
-static int parse_column_policy(const JsonGetter *jg, ConnProfile *out) {
-  if (!jg || !out)
+ * Ownership: stores all strings and arrays in out->col_policy.arena.
+ * Side effects: allocates temporary heap lists and arena-backed rule storage.
+ * Error semantics: returns OK on success, ERR on malformed entries, allocation
+ * failures, or invalid input.
+ */
+static int parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
+                                   const char *path_prefix, char **err_out) {
+  if (!jg || !out || !path_prefix)
     return ERR;
 
-  JsonGetter col = {0};
-  int crc = jsget_object(jg, "columnPolicy", &col);
-  if (crc == NO)
+  JsonArrIter it;
+  int rc = jsget_array_strings_begin(jg, "sensitiveColumns", &it);
+  if (rc == NO)
     return OK;
-  if (crc != YES)
-    return ERR;
-
-  const char *const col_keys[] = {"pseudonymize"};
-  if (jsget_top_level_validation(&col, NULL, col_keys, ARRLEN(col_keys)) !=
-      YES) {
-    return ERR;
+  if (rc != YES) {
+    return set_parse_err(err_out,
+                         "%s.sensitiveColumns: expected an array of strings.",
+                         path_prefix);
   }
 
-  JsonGetter pseud = {0};
-  int prc = jsget_object(&col, "pseudonymize", &pseud);
-  if (prc == NO)
-    return OK;
-  if (prc != YES)
-    return ERR;
-
-  const char *const pseu_keys[] = {"deterministic", "randomized"};
-  if (jsget_top_level_validation(&pseud, NULL, pseu_keys, ARRLEN(pseu_keys)) !=
-      YES) {
-    return ERR;
-  }
-
-  // v1 only supports deterministic; reject randomized to avoid silent footguns.
-  JsonStrSpan span = {0};
-  int rrc = jsget_string_span(&pseud, "randomized", &span);
-  if (rrc == YES)
-    return ERR;
-  if (rrc == ERR)
-    return ERR;
-
-  // init a temporary heap list
   ColumnRuleTmp *tmp = NULL;
   size_t tmp_len = 0;
   size_t tmp_cap = 0;
 
-  const char *const lists[] = {"deterministic"};
-  for (size_t li = 0; li < ARRLEN(lists); li++) {
-    JsonArrIter it;
-    int rc = jsget_array_strings_begin(&pseud, lists[li], &it);
+  for (;;) {
+    JsonStrSpan sp = {0};
+    rc = jsget_array_strings_next(jg, &it, &sp);
     if (rc == NO)
-      continue;
-    if (rc != YES)
+      break;
+    if (rc != YES) {
+      set_parse_err(err_out, "%s.sensitiveColumns: expected string entries.",
+                    path_prefix);
       goto error;
-
-    for (;;) {
-      JsonStrSpan sp = {0};
-      rc = jsget_array_strings_next(&pseud, &it, &sp);
-      if (rc == NO)
-        break;
-      if (rc != YES)
-        goto error;
-
-      char *decoded = NULL;
-      if (json_span_decode_alloc(&sp, &decoded) != YES)
-        goto error;
-
-      char *schema = NULL;
-      char *table = NULL;
-      char *colname = NULL;
-      if (split_column_path(decoded, &schema, &table, &colname) != OK) {
-        free(decoded);
-        goto error;
-      }
-
-      str_lower_inplace(schema);
-      str_lower_inplace(table);
-      str_lower_inplace(colname);
-
-      // For v1 we only store "deterministic" rules (lists[0]) while still
-      // validating "randomized" entries to reject malformed configs.
-      // li == 0 means only "deterministic"
-      if (li == 0) {
-
-        // grow the temporary list
-        if (tmp_len == tmp_cap) {
-          size_t nc = (tmp_cap == 0) ? 8 : tmp_cap * 2;
-          ColumnRuleTmp *nt = (ColumnRuleTmp *)xrealloc(tmp, nc * sizeof(*tmp));
-          tmp = nt;
-          tmp_cap = nc;
-        }
-
-        // add elements to the temporary list
-        tmp[tmp_len].schema = schema ? strdup(schema) : NULL;
-        tmp[tmp_len].table = strdup(table);
-        tmp[tmp_len].col = strdup(colname);
-        tmp_len++;
-      }
-
-      free(decoded);
     }
+
+    char *decoded = NULL;
+    if (json_span_decode_alloc(&sp, &decoded) != YES) {
+      set_parse_err(err_out,
+                    "%s.sensitiveColumns: failed to decode string entry.",
+                    path_prefix);
+      goto error;
+    }
+
+    char *schema = NULL;
+    char *table = NULL;
+    char *colname = NULL;
+    if (split_column_path(decoded, &schema, &table, &colname) != OK) {
+      free(decoded);
+      set_parse_err(err_out,
+                    "%s.sensitiveColumns[]: expected [schema.]table.column.",
+                    path_prefix);
+      goto error;
+    }
+
+    str_lower_inplace(schema);
+    str_lower_inplace(table);
+    str_lower_inplace(colname);
+
+    if (tmp_len == tmp_cap) {
+      size_t nc = (tmp_cap == 0) ? 8 : tmp_cap * 2;
+      ColumnRuleTmp *nt = (ColumnRuleTmp *)xrealloc(tmp, nc * sizeof(*tmp));
+      tmp = nt;
+      tmp_cap = nc;
+    }
+
+    tmp[tmp_len].schema = schema ? strdup(schema) : NULL;
+    tmp[tmp_len].table = strdup(table);
+    tmp[tmp_len].col = strdup(colname);
+    if (!tmp[tmp_len].table || !tmp[tmp_len].col ||
+        (schema && !tmp[tmp_len].schema)) {
+      free(decoded);
+      set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
+                    path_prefix);
+      goto error;
+    }
+    tmp_len++;
+
+    free(decoded);
   }
 
   if (tmp_len == 0)
     return OK;
 
-  // sort the temporary list
   qsort(tmp, tmp_len, sizeof(*tmp), colruletmp_cmp);
 
-  if (pl_arena_init(&out->col_policy.arena, NULL, NULL) != OK)
+  if (pl_arena_init(&out->col_policy.arena, NULL, NULL) != OK) {
+    set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
+                  path_prefix);
     goto error;
+  }
 
-  // find unique elemets
+  // this loop finds unique elements
   size_t n_rules = 0;
   for (size_t i = 0; i < tmp_len;) {
     size_t j = i + 1;
+    // works because the array is sorted
     while (j < tmp_len && strcmp(tmp[i].table, tmp[j].table) == 0 &&
            strcmp(tmp[i].col, tmp[j].col) == 0) {
       j++;
@@ -268,11 +284,17 @@ static int parse_column_policy(const JsonGetter *jg, ConnProfile *out) {
     i = j;
   }
 
+  // At this point we have a sorted tmp array (not malloc'd) of ColumnRuleTmp.
+  // Now we have to malloc it in order to persist it.
   ColumnRule *rules = (ColumnRule *)pl_arena_alloc(
       &out->col_policy.arena, (uint32_t)(n_rules * sizeof(*rules)));
-  if (!rules)
+  if (!rules) {
+    set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
+                  path_prefix);
     goto error;
+  }
 
+  // since we may have duplication, this loop is used for deduplication
   size_t rix = 0;
   for (size_t i = 0; i < tmp_len;) {
     size_t j = i;
@@ -308,8 +330,12 @@ static int parse_column_policy(const JsonGetter *jg, ConnProfile *out) {
     if (n_schema > 0) {
       const char **schemas = (const char **)pl_arena_alloc(
           &out->col_policy.arena, (uint32_t)(n_schema * sizeof(*schemas)));
-      if (!schemas)
+      if (!schemas) {
+        set_parse_err(err_out,
+                      "%s.sensitiveColumns: internal allocation error.",
+                      path_prefix);
         goto error;
+      }
 
       size_t k = 0;
       last_schema = NULL;
@@ -341,6 +367,7 @@ static int parse_column_policy(const JsonGetter *jg, ConnProfile *out) {
   return OK;
 
 error:
+  set_parse_err(err_out, "%s.sensitiveColumns: invalid entry.", path_prefix);
   if (tmp) {
     for (size_t i = 0; i < tmp_len; i++) {
       free(tmp[i].schema);
@@ -353,39 +380,60 @@ error:
 }
 
 /* Parses safeFunctions into SafeFunctionRule list.
- * Business logic is documented in connp_is_func_safe().
- * Ownership: stores all strings and arrays in out->safe_funcs.arena. */
-static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out) {
-  if (!jg || !out)
+ * Ownership: stores all strings and arrays in out->safe_funcs.arena.
+ * Side effects: allocates temporary heap lists and arena-backed rule storage.
+ * Error semantics: returns OK on success, ERR on malformed entries, allocation
+ * failures, or invalid input.
+ */
+static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
+                                const char *path_prefix, char **err_out) {
+  if (!jg || !out || !path_prefix)
     return ERR;
 
   JsonArrIter it;
   int rc = jsget_array_strings_begin(jg, "safeFunctions", &it);
   if (rc == NO)
     return OK;
-  if (rc != YES)
-    return ERR;
+  if (rc != YES) {
+    return set_parse_err(err_out,
+                         "%s.safeFunctions: expected an array of strings.",
+                         path_prefix);
+  }
+
+  if (pl_arena_init(&out->safe_funcs.arena, NULL, NULL) != OK) {
+    return set_parse_err(
+        err_out, "%s.safeFunctions: internal allocation error.", path_prefix);
+  }
 
   SafeFuncRuleTmp *tmp = NULL;
   size_t tmp_len = 0;
   size_t tmp_cap = 0;
 
+  // same logic as the loop we use to parse sensitive columns
   for (;;) {
     JsonStrSpan sp = {0};
     rc = jsget_array_strings_next(jg, &it, &sp);
     if (rc == NO)
       break;
-    if (rc != YES)
+    if (rc != YES) {
+      set_parse_err(err_out, "%s.safeFunctions: expected string entries.",
+                    path_prefix);
       goto error;
+    }
 
     char *decoded = NULL;
-    if (json_span_decode_alloc(&sp, &decoded) != YES)
+    if (json_span_decode_alloc(&sp, &decoded) != YES) {
+      set_parse_err(err_out, "%s.safeFunctions: failed to decode string entry.",
+                    path_prefix);
       goto error;
+    }
 
     char *schema = NULL;
     char *name = NULL;
     if (split_func_path(decoded, &schema, &name) != OK) {
       free(decoded);
+      set_parse_err(err_out, "%s.safeFunctions[]: expected [schema.]function.",
+                    path_prefix);
       goto error;
     }
 
@@ -400,6 +448,12 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out) {
     }
     tmp[tmp_len].schema = schema ? strdup(schema) : NULL;
     tmp[tmp_len].name = strdup(name);
+    if (!tmp[tmp_len].name || (schema && !tmp[tmp_len].schema)) {
+      free(decoded);
+      set_parse_err(err_out, "%s.safeFunctions: internal allocation error.",
+                    path_prefix);
+      goto error;
+    }
     tmp_len++;
 
     free(decoded);
@@ -409,9 +463,6 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out) {
     return OK;
 
   qsort(tmp, tmp_len, sizeof(*tmp), saferuletmp_cmp);
-
-  if (pl_arena_init(&out->safe_funcs.arena, NULL, NULL) != OK)
-    goto error;
 
   // find unique function names
   size_t uniq = 0;
@@ -486,6 +537,7 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out) {
   return OK;
 
 error:
+  set_parse_err(err_out, "%s.safeFunctions: invalid entry.", path_prefix);
   if (tmp) {
     for (size_t t = 0; t < tmp_len; t++) {
       free(tmp[t].schema);
@@ -499,84 +551,161 @@ error:
   return ERR;
 }
 
-/* Parses the "safetyPolicy" object and stores the resulting SafetyPolicy into
- * '*out'. */
-static int parse_policy(const JsonGetter *jg, SafetyPolicy *out) {
-  if (!jg || !out)
+/* Parses one safetyPolicy object and merges parsed values into '*out'.
+ * Ownership: borrows all inputs and mutates caller-owned '*out'.
+ * Side effects: none beyond writing '*out' and optional allocated error string.
+ * Error semantics: returns OK on valid policy object, ERR on malformed values
+ * or unknown keys. On ERR, it sets a descriptive allocated message in
+ * '*err_out' when provided.
+ */
+static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
+                        const char *path_prefix, char **err_out) {
+  if (!jg || !out || !path_prefix)
     return ERR;
 
-  // makes sure policy if correctly formatted
   const char *const keys[] = {"readOnly", "statementTimeoutMs",
-                              "maxRowReturned", "maxQueryKiloBytes"};
-  int vrc = jsget_top_level_validation(jg, "safetyPolicy", keys, ARRLEN(keys));
-  if (vrc != YES)
-    return ERR;
+                              "maxRowReturned", "maxPayloadKiloBytes",
+                              "columnPolicy"};
+  if (jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys)) != YES) {
+    return set_parse_err(err_out, "%s: unknown key in object.", path_prefix);
+  }
 
-  int read_only_flag = 0;
-  int *read_only_ptr = NULL;
-  JsonStrSpan span = {0};
-  int rrc = jsget_string_span(jg, "safetyPolicy.readOnly", &span);
-  if (rrc == ERR)
-    return ERR;
+  JsonStrSpan ro = {0};
+  int rrc = jsget_string_span(jg, "readOnly", &ro);
+  if (rrc == ERR) {
+    return set_parse_err(err_out, "%s.readOnly: expected string.", path_prefix);
+  }
   if (rrc == YES) {
-    if (strncasecmp(span.ptr, "yes", span.len) == 0) {
-      read_only_flag = 1;
-    } else if (strncasecmp(span.ptr, "no unsafe", span.len) == 0) {
-      read_only_flag = 0;
+    if (ro.len == 3 && strncasecmp(ro.ptr, "yes", 3) == 0) {
+      out->read_only = 1;
+    } else if (ro.len == 9 && strncasecmp(ro.ptr, "no unsafe", 9) == 0) {
+      out->read_only = 0;
     } else {
-      return ERR;
+      return set_parse_err(err_out,
+                           "%s.readOnly: expected \"yes\" or \"no unsafe\".",
+                           path_prefix);
     }
-    read_only_ptr = &read_only_flag;
   }
 
   uint32_t timeout_ms = 0;
-  uint32_t *timeout_ptr = NULL;
-  int trc = jsget_u32(jg, "safetyPolicy.statementTimeoutMs", &timeout_ms);
+  int trc = jsget_u32(jg, "statementTimeoutMs", &timeout_ms);
   if (trc == ERR)
-    return ERR;
+    return set_parse_err(err_out, "%s.statementTimeoutMs: expected uint32.",
+                         path_prefix);
   if (trc == YES)
-    timeout_ptr = &timeout_ms;
+    out->statement_timeout_ms = timeout_ms;
 
   uint32_t max_rows = 0;
-  uint32_t *max_rows_ptr = NULL;
-  int mrc = jsget_u32(jg, "safetyPolicy.maxRowReturned", &max_rows);
+  int mrc = jsget_u32(jg, "maxRowReturned", &max_rows);
   if (mrc == ERR)
-    return ERR;
+    return set_parse_err(err_out, "%s.maxRowReturned: expected uint32.",
+                         path_prefix);
   if (mrc == YES)
-    max_rows_ptr = &max_rows;
+    out->max_rows = max_rows;
 
-  uint32_t max_query_kb = 0;
-  uint32_t *max_query_ptr = NULL;
-  int qrc = jsget_u32(jg, "safetyPolicy.maxQueryKiloBytes", &max_query_kb);
+  uint32_t max_payload_kb = 0;
+  int qrc = jsget_u32(jg, "maxPayloadKiloBytes", &max_payload_kb);
   if (qrc == ERR)
-    return ERR;
+    return set_parse_err(err_out, "%s.maxPayloadKiloBytes: expected uint32.",
+                         path_prefix);
   if (qrc == YES) {
-    if (max_query_kb > (UINT32_MAX / 1024u))
-      return ERR;
-    max_query_kb *= 1024u;
-    max_query_ptr = &max_query_kb;
+    if (max_payload_kb > (UINT32_MAX / 1024u)) {
+      return set_parse_err(err_out, "%s.maxPayloadKiloBytes: value too large.",
+                           path_prefix);
+    }
+    out->max_payload_bytes = max_payload_kb * 1024u;
   }
 
-  // Use the standard defaults for any unset knobs.
-  if (safety_policy_init(out, read_only_ptr, max_rows_ptr, max_query_ptr,
-                         timeout_ptr) != OK) {
-    return ERR;
+  JsonGetter col = {0};
+  int crc = jsget_object(jg, "columnPolicy", &col);
+  if (crc == ERR)
+    return set_parse_err(err_out, "%s.columnPolicy: expected object.",
+                         path_prefix);
+  if (crc == YES) {
+    const char *const ckeys[] = {"mode", "strategy"};
+    if (jsget_top_level_validation(&col, NULL, ckeys, ARRLEN(ckeys)) != YES) {
+      return set_parse_err(err_out, "%s.columnPolicy: unknown key in object.",
+                           path_prefix);
+    }
+
+    JsonStrSpan mode = {0};
+    int mrc2 = jsget_string_span(&col, "mode", &mode);
+    if (mrc2 != YES) {
+      return set_parse_err(err_out,
+                           "%s.columnPolicy.mode: expected \"pseudonymize\".",
+                           path_prefix);
+    }
+    if (!(mode.len == strlen("pseudonymize") &&
+          strncasecmp(mode.ptr, "pseudonymize", mode.len) == 0)) {
+      return set_parse_err(err_out,
+                           "%s.columnPolicy.mode: expected \"pseudonymize\".",
+                           path_prefix);
+    }
+    out->column_mode = SAFETY_COLMODE_PSEUDONYMIZE;
+
+    JsonStrSpan strat = {0};
+    int src = jsget_string_span(&col, "strategy", &strat);
+    if (src != YES) {
+      return set_parse_err(
+          err_out,
+          "%s.columnPolicy.strategy: expected \"deterministic\" or "
+          "\"randomized\".",
+          path_prefix);
+    }
+
+    if (strat.len == strlen("deterministic") &&
+        strncasecmp(strat.ptr, "deterministic", strat.len) == 0) {
+      out->column_strategy = SAFETY_COLSTRAT_DETERMINISTIC;
+    } else if (strat.len == strlen("randomized") &&
+               strncasecmp(strat.ptr, "randomized", strat.len) == 0) {
+      out->column_strategy = SAFETY_COLSTRAT_RANDOMIZED;
+    } else {
+      return set_parse_err(
+          err_out,
+          "%s.columnPolicy.strategy: expected \"deterministic\" or "
+          "\"randomized\".",
+          path_prefix);
+    }
   }
+
   return OK;
 }
 
-/* Parses one database entry object into 'out'. */
+static void profile_clean(ConnProfile *p) {
+  if (!p)
+    return;
+  free((char *)p->connection_name);
+  free((char *)p->host);
+  free((char *)p->db_name);
+  free((char *)p->user);
+  free((char *)p->options);
+  pl_arena_clean(&p->col_policy.arena);
+  pl_arena_clean(&p->safe_funcs.arena);
+}
+
+/* Parses one databases[i] object into 'out'. This will clean 'out' if something
+ * goes wrong. Ownership: writes owned strings and policy arenas into
+ * caller-owned 'out'. Side effects: heap and arena allocations. Error
+ * semantics: returns OK on valid entry, ERR on malformed fields or allocation
+ * failures.
+ */
 static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
-                          ConnProfile *out) {
+                          ConnProfile *out, size_t db_index, char **err_out) {
   if (!cat || !jg || !out)
     return ERR;
 
-  const char *const keys[] = {"type",    "connectionName", "host",
-                              "port",    "username",       "database",
-                              "options", "columnPolicy",   "safeFunctions"};
+  char db_path[64];
+  snprintf(db_path, sizeof(db_path), "$.databases[%zu]", db_index);
+
+  const char *const keys[] = {
+      "type",          "connectionName", "host",    "port",
+      "username",      "database",       "options", "sensitiveColumns",
+      "safeFunctions", "safetyPolicy"};
   int vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys));
-  if (vrc != YES)
-    return ERR;
+  if (vrc != YES) {
+    return set_parse_err(err_out, "%s: unknown key in database entry.",
+                         db_path);
+  }
 
   char *type = NULL;
   char *conn_name = NULL;
@@ -585,28 +714,45 @@ static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
   char *db_name = NULL;
   char *options = NULL;
 
-  if (jsget_string_decode_alloc(jg, "type", &type) != YES)
+  if (jsget_string_decode_alloc(jg, "type", &type) != YES) {
+    set_parse_err(err_out, "%s.type: expected string.", db_path);
     goto error;
-  if (strcmp(type, "postgres") != 0)
+  }
+  if (strcmp(type, "postgres") != 0) {
+    set_parse_err(err_out, "%s.type: only \"postgres\" is supported.", db_path);
     goto error;
+  }
 
-  if (jsget_string_decode_alloc(jg, "connectionName", &conn_name) != YES)
+  if (jsget_string_decode_alloc(jg, "connectionName", &conn_name) != YES) {
+    set_parse_err(err_out, "%s.connectionName: expected string.", db_path);
     goto error;
-  if (jsget_string_decode_alloc(jg, "host", &host) != YES)
+  }
+  if (jsget_string_decode_alloc(jg, "host", &host) != YES) {
+    set_parse_err(err_out, "%s.host: expected string.", db_path);
     goto error;
+  }
 
   uint32_t port = 0;
-  if (jsget_u32(jg, "port", &port) != YES || port > UINT16_MAX)
+  if (jsget_u32(jg, "port", &port) != YES || port > UINT16_MAX) {
+    set_parse_err(err_out, "%s.port: expected uint16.", db_path);
     goto error;
+  }
 
-  if (jsget_string_decode_alloc(jg, "username", &user) != YES)
+  if (jsget_string_decode_alloc(jg, "username", &user) != YES) {
+    set_parse_err(err_out, "%s.username: expected string.", db_path);
     goto error;
-  if (jsget_string_decode_alloc(jg, "database", &db_name) != YES)
+  }
+  if (jsget_string_decode_alloc(jg, "database", &db_name) != YES) {
+    set_parse_err(err_out, "%s.database: expected string.", db_path);
     goto error;
+  }
 
   int orc = jsget_string_decode_alloc(jg, "options", &options);
-  if (orc == ERR)
+  if (orc == ERR) {
+    set_parse_err(err_out, "%s.options: expected string when present.",
+                  db_path);
     goto error;
+  }
   if (orc == NO)
     options = NULL;
 
@@ -621,62 +767,66 @@ static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
   out->user = user;
   out->options = options;
 
-  // TODO: Right now, we allow just for one global SafetyPolicy, allow a
-  // SafetyPolicy per connection that, if present, overwrites the global
-  // SafetyPolicy just for that connection
   out->safe_policy = cat->policy;
-  if (parse_column_policy(jg, out) != OK)
+  JsonGetter db_pol = {0};
+  int prc = jsget_object(jg, "safetyPolicy", &db_pol);
+  if (prc == ERR) {
+    set_parse_err(err_out, "%s.safetyPolicy: expected object.", db_path);
     goto error;
-  if (parse_safe_functions(jg, out) != OK)
+  }
+  if (prc == YES) {
+    char sp_path[96];
+    snprintf(sp_path, sizeof(sp_path), "%s.safetyPolicy", db_path);
+    if (parse_policy(&db_pol, &out->safe_policy, sp_path, err_out) != OK)
+      goto error;
+  }
+
+  if (parse_sensitive_columns(jg, out, db_path, err_out) != OK)
+    goto error;
+  if (parse_safe_functions(jg, out, db_path, err_out) != OK)
     goto error;
   return OK;
 
 error:
-  free(type);
-  free(conn_name);
-  free(host);
-  free(user);
-  free(db_name);
-  free(options);
+  profile_clean(out);
+
+  // make it safe for caller to call free if ERR
   out->connection_name = NULL;
-  out->host = NULL;
   out->db_name = NULL;
-  out->user = NULL;
+  out->host = NULL;
   out->options = NULL;
-  pl_arena_clean(&out->col_policy.arena);
-  out->col_policy.rules = NULL;
-  out->col_policy.n_rules = 0;
-  pl_arena_clean(&out->safe_funcs.arena);
-  out->safe_funcs.rules = NULL;
-  out->safe_funcs.n_rules = 0;
+  out->user = NULL;
+  memset(&out->col_policy, 0, sizeof(out->col_policy));
+  memset(&out->safe_funcs, 0, sizeof(out->safe_funcs));
   return ERR;
 }
 
-static void profile_free(ConnProfile *p) {
-  if (!p)
-    return;
-  free((char *)p->connection_name);
-  free((char *)p->host);
-  free((char *)p->db_name);
-  free((char *)p->user);
-  free((char *)p->options);
-  pl_arena_clean(&p->col_policy.arena);
-  pl_arena_clean(&p->safe_funcs.arena);
-}
-
 /* Parses the "databases" array and allocates ConnProfile entries inside 'cat'.
+ * Ownership: writes owned profile array into '*cat'.
+ * Side effects: allocates heap memory for profiles and nested arenas.
+ * Error semantics: returns OK on valid non-empty array, ERR otherwise.
  */
-static int parse_databases(const JsonGetter *jg, ConnCatalog *cat) {
+static int parse_databases(const JsonGetter *jg, ConnCatalog *cat,
+                           char **err_out) {
   if (!jg || !cat)
     return ERR;
 
   JsonArrIter it;
   int rc = jsget_array_objects_begin(jg, "databases", &it);
-  if (rc != YES)
-    return ERR;
+  if (rc != YES) {
+    return set_parse_err(err_out, "$.databases: expected array of objects.");
+  }
 
-  if (it.count < 0 || (size_t)it.count > CONFIG_MAX_CONNECTIONS)
-    return ERR;
+  if (it.count <= 0) {
+    return set_parse_err(err_out,
+                         "$.databases: at least one entry is required.");
+  }
+
+  if (it.count < 0 || (size_t)it.count > CONFIG_MAX_CONNECTIONS) {
+    return set_parse_err(
+        err_out,
+        "$.databases: too many entries (exceeds configured connection cap).");
+  }
 
   size_t n = (size_t)it.count;
   ConnProfile *profiles = NULL;
@@ -694,13 +844,16 @@ static int parse_databases(const JsonGetter *jg, ConnCatalog *cat) {
     if (rc != YES)
       goto error;
 
-    if (parse_db_entry(cat, &entry, &profiles[idx]) != OK)
+    if (parse_db_entry(cat, &entry, &profiles[idx], idx, err_out) != OK)
       goto error;
 
     // connectionName must be unique
     for (size_t j = 0; j < idx; j++) {
-      if (strcmp(profiles[idx].connection_name, profiles[j].connection_name) ==
-          0) {
+      if (strcasecmp(profiles[idx].connection_name,
+                     profiles[j].connection_name) == 0) {
+        set_parse_err(
+            err_out,
+            "$.databases: duplicate connectionName (case-insensitive).");
         goto error;
       }
     }
@@ -713,14 +866,10 @@ static int parse_databases(const JsonGetter *jg, ConnCatalog *cat) {
   return OK;
 
 error:
-  if (profiles) {
-    // parse_db_entry can partially initialize profiles[idx] before failing.
-    // Since profiles are zero-initialized, it's safe to clean all entries.
-    for (size_t i = 0; i < n; i++) {
-      profile_free(&profiles[i]);
-    }
-    free(profiles);
+  for (; n > 0; n--) {
+    profile_clean(&profiles[n - 1]);
   }
+  free(profiles);
   return ERR;
 }
 
@@ -749,20 +898,23 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
   StrBuf sb = {0};
   ConnCatalog *cat = NULL;
 
+  if (err_out)
+    *err_out = NULL;
+
   if (!path) {
-    err_msg = "ConnCatalog: can't read from a NULL path.";
+    set_parse_err(&err_msg, "$: config path is NULL.");
     goto error;
   }
 
   if (fileio_sb_read_limit(path, CONFIG_MAX_BYTES, &sb) != OK) {
-    err_msg = "ConnCatalog: failed to read config file. Check path and ensure "
-              "file size respects configured limits.";
+    set_parse_err(&err_msg,
+                  "$: failed to read config file (check path and size limit).");
     goto error;
   }
 
   JsonGetter jg;
   if (jsget_init(&jg, sb.data, sb.len) != OK) {
-    err_msg = "ConnCatalog: invalid JSON.";
+    set_parse_err(&err_msg, "$: invalid JSON.");
     goto error;
   }
 
@@ -770,53 +922,37 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
   const char *const root_keys[] = {"version", "safetyPolicy", "databases"};
   if (jsget_top_level_validation(&jg, NULL, root_keys, ARRLEN(root_keys)) !=
       YES) {
-    err_msg = "ConnCatalog: unknown key at top level.";
+    set_parse_err(&err_msg, "$: unknown key at top level.");
     goto error;
   }
 
   int vrc = parse_version(&jg);
   if (vrc == NO) {
-    err_msg = "ConnCatalog: unsupported or missing \"version\".";
+    set_parse_err(&err_msg, "$.version: missing or unsupported value.");
     goto error;
   }
   if (vrc != YES) {
-    err_msg = "ConnCatalog: invalid \"version\".";
+    set_parse_err(&err_msg, "$.version: invalid string.");
     goto error;
   }
-
-  // TODO: make errors of parse_policy and parse_databases more user-friendly
 
   cat = xcalloc(1, sizeof(*cat));
-  // safetyPolicy is optional; when absent we fall back to defaults.
-  const char *const policy_keys[] = {"readOnly", "statementTimeoutMs",
-                                     "maxRowReturned", "maxQueryKiloBytes"};
-  int prc = jsget_top_level_validation(&jg, "safetyPolicy", policy_keys,
-                                       ARRLEN(policy_keys));
-  if (prc == YES) {
-    if (parse_policy(&jg, &cat->policy) != OK) {
-      err_msg = "ConnCatalog: invalid safetyPolicy.";
-      goto error;
-    }
-  } else if (prc == NO) {
-    // Distinguish between a missing object (allowed) and a malformed one.
-    JsonStrSpan span = {0};
-    int has = jsget_string_span(&jg, "safetyPolicy", &span);
-    if (has == NO) {
-      if (safety_policy_init(&cat->policy, NULL, NULL, NULL, NULL) != OK) {
-        err_msg = "ConnCatalog: invalid safetyPolicy.";
-        goto error;
-      }
-    } else {
-      err_msg = "ConnCatalog: invalid safetyPolicy.";
-      goto error;
-    }
-  } else {
-    err_msg = "ConnCatalog: invalid safetyPolicy.";
+  if (safety_policy_init(&cat->policy, NULL, NULL, NULL, NULL) != OK) {
+    set_parse_err(&err_msg, "$.safetyPolicy: failed to initialize defaults.");
     goto error;
   }
 
-  if (parse_databases(&jg, cat) != OK) {
-    err_msg = "ConnCatalog: invalid \"databases\".";
+  JsonGetter policy_obj = {0};
+  if (jsget_object(&jg, "safetyPolicy", &policy_obj) != YES) {
+    set_parse_err(&err_msg, "$.safetyPolicy: expected object.");
+    goto error;
+  }
+  if (parse_policy(&policy_obj, &cat->policy, "$.safetyPolicy", &err_msg) !=
+      OK) {
+    goto error;
+  }
+
+  if (parse_databases(&jg, cat, &err_msg) != OK) {
     goto error;
   }
 
@@ -826,8 +962,13 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
 error:
   sb_clean(&sb);
   catalog_destroy(cat);
-  if (err_out && err_msg)
+  if (!err_msg)
+    set_parse_err(&err_msg, "$: invalid configuration.");
+  if (err_out) {
     *err_out = err_msg;
+  } else {
+    free(err_msg);
+  }
   return NULL;
 }
 
@@ -836,7 +977,7 @@ void catalog_destroy(ConnCatalog *cat) {
     return;
   if (cat->profiles) {
     for (size_t i = 0; i < cat->n_profiles; i++) {
-      profile_free(&cat->profiles[i]);
+      profile_clean(&cat->profiles[i]);
     }
     free(cat->profiles);
     cat->profiles = NULL;

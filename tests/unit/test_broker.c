@@ -266,31 +266,26 @@ static void stop_running_broker(Broker *b, pthread_t tid, char *tmpdir,
   }
 }
 
-/* Asserts that broker has no active or idle sessions.
- * It borrows 'b' and does not allocate.
- * Side effects: none.
- * Error semantics: none (uses ASSERT_TRUE).
+/* Waits until socket 'fd' reports hangup/error.
+ * It borrows 'fd' and does not allocate.
+ * Side effects: blocks in poll up to timeout_ms.
+ * Error semantics: returns OK on hangup/error observation, ERR on invalid input
+ * or timeout.
  */
-static void assert_broker_empty(const Broker *b) {
-  ASSERT_TRUE(broker_active_count(b) == 0);
-  ASSERT_TRUE(broker_idle_count(b) == 0);
-}
-
-/* Waits until broker active session count matches 'target' or timeout.
- * It borrows 'b' and does not allocate memory.
- * Side effects: sleeps in small intervals while polling broker state.
- * Returns OK when target count is observed, ERR on invalid input or timeout.
- */
-static int wait_for_active_count(const Broker *b, size_t target,
-                                 int timeout_ms) {
-  if (!b || timeout_ms < 0)
+static int wait_for_fd_hangup(int fd, int timeout_ms) {
+  if (fd < 0 || timeout_ms < 0)
     return ERR;
+
   int elapsed = 0;
-  struct timespec ts = {.tv_sec = 0, .tv_nsec = 10 * 1000000L};
   while (elapsed <= timeout_ms) {
-    if (broker_active_count(b) == target)
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN | POLLERR | POLLHUP | POLLNVAL,
+        .revents = 0,
+    };
+    int prc = poll(&pfd, 1, 10);
+    if (prc > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)))
       return OK;
-    (void)nanosleep(&ts, NULL);
     elapsed += 10;
   }
   return ERR;
@@ -298,15 +293,16 @@ static int wait_for_active_count(const Broker *b, size_t target,
 
 #define HS_RESP_TIMEOUT_MS 5000
 
-/* Performs one broker handshake on an already connected client fd.
+/* Performs one broker handshake request/response exchange on a connected fd.
  * Ownership: borrows 'cfd'; uses non-owning channel wrapper so caller keeps fd
- * ownership.
- * Side effects: sends and receives one length-framed handshake message.
- * Error semantics: returns OK on successful transport and writes 'out_status';
- * returns ERR on framing/protocol I/O failures.
+ * ownership. Borrows 'req' and writes response into caller-owned 'out_resp'.
+ * Side effects: sends one frame and reads one frame on the socket.
+ * Error semantics: returns OK on successful framed exchange and decode, ERR on
+ * invalid input or transport/decode failure.
  */
-static int client_handshake_on_fd(int cfd, handshake_status *out_status) {
-  if (cfd < 0 || !out_status)
+static int client_handshake_req_on_fd(int cfd, const handshake_req_t *req,
+                                      handshake_resp_t *out_resp) {
+  if (cfd < 0 || !req || !out_resp)
     return ERR;
 
   ByteChannel *ch = stdio_bytechannel_wrap_fd(cfd, cfd);
@@ -318,12 +314,8 @@ static int client_handshake_on_fd(int cfd, handshake_status *out_status) {
     return ERR;
   }
 
-  handshake_req_t req = {0};
-  req.magic = HANDSHAKE_MAGIC;
-  req.version = HANDSHAKE_VERSION;
-  memcpy(req.secret_token, test_secret_token(), SECRET_TOKEN_LEN);
   uint8_t req_wire[HANDSHAKE_REQ_WIRE_SIZE] = {0};
-  if (handshake_req_encode(&req, req_wire) != OK) {
+  if (handshake_req_encode(req, req_wire) != OK) {
     bufch_destroy(bc);
     return ERR;
   }
@@ -335,12 +327,10 @@ static int client_handshake_on_fd(int cfd, handshake_status *out_status) {
 
   if (frame_read_len(bc, &payload) != OK)
     goto done;
-  handshake_resp_t resp = {0};
-  if (handshake_resp_decode(&resp, (const uint8_t *)payload.data, payload.len) !=
-      OK) {
+  if (handshake_resp_decode(out_resp, (const uint8_t *)payload.data,
+                            payload.len) != OK) {
     goto done;
   }
-  *out_status = resp.status;
   rc = OK;
 
 done:
@@ -349,22 +339,110 @@ done:
   return rc;
 }
 
-/* Connects to broker socket and completes a successful handshake.
+/* Performs a fresh-session handshake on a connected client fd.
+ * Ownership: borrows 'cfd'. Optionally writes returned resume token.
+ * Side effects: performs framed handshake I/O.
+ * Error semantics: returns OK on transport/decode success and writes status.
+ */
+static int client_handshake_on_fd(
+    int cfd, handshake_status *out_status,
+    uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+  if (cfd < 0 || !out_status)
+    return ERR;
+
+  handshake_req_t req = {0};
+  req.magic = HANDSHAKE_MAGIC;
+  req.version = HANDSHAKE_VERSION;
+  memcpy(req.secret_token, test_secret_token(), SECRET_TOKEN_LEN);
+
+  handshake_resp_t resp = {0};
+  if (client_handshake_req_on_fd(cfd, &req, &resp) != OK)
+    return ERR;
+
+  *out_status = resp.status;
+  if (out_resume_token)
+    memcpy(out_resume_token, resp.resume_token, RESUME_TOKEN_LEN);
+  return OK;
+}
+
+/* Performs a resume handshake on a connected client fd.
+ * Ownership: borrows 'cfd' and 'resume_token'. Optionally writes new token.
+ * Side effects: performs framed handshake I/O.
+ * Error semantics: returns OK on transport/decode success and writes status.
+ */
+static int client_resume_handshake_on_fd(
+    int cfd, const uint8_t resume_token[RESUME_TOKEN_LEN],
+    handshake_status *out_status, uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+  if (cfd < 0 || !resume_token || !out_status)
+    return ERR;
+
+  handshake_req_t req = {0};
+  req.magic = HANDSHAKE_MAGIC;
+  req.version = HANDSHAKE_VERSION;
+  req.flags = HANDSHAKE_FLAG_RESUME;
+  memcpy(req.secret_token, test_secret_token(), SECRET_TOKEN_LEN);
+  memcpy(req.resume_token, resume_token, RESUME_TOKEN_LEN);
+
+  handshake_resp_t resp = {0};
+  if (client_handshake_req_on_fd(cfd, &req, &resp) != OK)
+    return ERR;
+
+  *out_status = resp.status;
+  if (out_resume_token)
+    memcpy(out_resume_token, resp.resume_token, RESUME_TOKEN_LEN);
+  return OK;
+}
+
+/* Connects to broker socket and completes a successful fresh handshake.
  * Ownership: borrows 'sock_path'; returns connected fd owned by caller.
  * Side effects: creates socket connection and performs framed handshake I/O.
  * Error semantics: returns fd on HS_OK, -1 on connect/handshake failure.
  */
-static int connect_client_hs_ok(const char *sock_path) {
+static int connect_client_hs_ok(
+    const char *sock_path, uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
   int cfd = connect_client(sock_path);
   if (cfd < 0)
     return -1;
 
   handshake_status st = HS_ERR_INTERNAL;
-  if (client_handshake_on_fd(cfd, &st) != OK || st != HS_OK) {
+  if (client_handshake_on_fd(cfd, &st, out_resume_token) != OK || st != HS_OK) {
     close(cfd);
     return -1;
   }
   return cfd;
+}
+
+/* Opens a connection and performs a resume handshake, then closes the socket.
+ * Ownership: borrows 'sock_path' and 'resume_token'; socket is always closed.
+ * Side effects: creates socket and performs framed handshake I/O.
+ * Error semantics: returns OK on transport/decode success and writes status.
+ */
+static int connect_client_resume_status(
+    const char *sock_path, const uint8_t resume_token[RESUME_TOKEN_LEN],
+    handshake_status *out_status, uint8_t out_new_resume_token[RESUME_TOKEN_LEN]) {
+  if (!sock_path || !resume_token || !out_status)
+    return ERR;
+
+  int cfd = connect_client(sock_path);
+  if (cfd < 0)
+    return ERR;
+
+  int rc = client_resume_handshake_on_fd(cfd, resume_token, out_status,
+                                         out_new_resume_token);
+  close(cfd);
+  return rc;
+}
+
+/* Probes that broker can accept one fresh client handshake.
+ * Ownership: borrows 'sock_path'; probe connection is closed before return.
+ * Side effects: performs one successful client handshake + disconnect cycle.
+ * Error semantics: none (uses ASSERT_TRUE).
+ */
+static void assert_broker_accepts_new_client(const char *sock_path) {
+  int probe_fd = connect_client_hs_ok(sock_path, NULL);
+  ASSERT_TRUE(probe_fd >= 0);
+  close(probe_fd);
+  msleep(50);
 }
 
 static void msleep(int ms) {
@@ -443,29 +521,6 @@ static void test_client_connect(void) {
   (void)rmdir(tmpdir);
 }
 
-static void test_session_counts_initial(void) {
-  char tmpl[] = "/tmp/test_broker_XXXXXX";
-  char *tmpdir = mkdtemp(tmpl);
-  ASSERT_TRUE(tmpdir != NULL);
-
-  char *sock = make_sock_path(tmpdir);
-  ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(sock, cm, test_secret_token());
-  ASSERT_TRUE(b != NULL);
-
-  /* Fresh broker has zero sessions in both arrays. */
-  ASSERT_TRUE(broker_active_count(b) == 0);
-  ASSERT_TRUE(broker_idle_count(b) == 0);
-
-  /* NULL broker returns 0. */
-  ASSERT_TRUE(broker_active_count(NULL) == 0);
-  ASSERT_TRUE(broker_idle_count(NULL) == 0);
-
-  broker_destroy(b);
-  free(sock);
-  (void)rmdir(tmpdir);
-}
-
 static void test_disconnect_moves_to_idle(void) {
   char tmpl[] = "/tmp/test_broker_XXXXXX";
   char *tmpdir = mkdtemp(tmpl);
@@ -484,22 +539,19 @@ static void test_disconnect_moves_to_idle(void) {
   /* Give the event loop time to start polling. */
   msleep(50);
 
-  /* Connect a client. The poll loop should accept it. */
-  int cfd = connect_client_hs_ok(sock);
+  /* Connect and complete initial handshake, capture resume token. */
+  uint8_t tok1[RESUME_TOKEN_LEN] = {0};
+  int cfd = connect_client_hs_ok(sock, tok1);
   ASSERT_TRUE(cfd >= 0);
 
-  /* Give the poll loop time to accept and register the session. */
-  msleep(50);
-  ASSERT_TRUE(broker_active_count(b) == 1);
-  ASSERT_TRUE(broker_idle_count(b) == 0);
-
-  /* Disconnect the client. The poll loop should detect POLLHUP and move
-   * the session to idle. */
+  /* Disconnect the client so session becomes resumable. */
   close(cfd);
   msleep(50);
 
-  ASSERT_TRUE(broker_active_count(b) == 0);
-  ASSERT_TRUE(broker_idle_count(b) == 1);
+  /* Resume with the prior token; this proves the session moved to idle. */
+  handshake_status st = HS_ERR_INTERNAL;
+  ASSERT_TRUE(connect_client_resume_status(sock, tok1, &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_OK);
 
   /* Cleanup: cancel the blocking event loop and join. */
   pthread_cancel(tid);
@@ -526,27 +578,25 @@ static void test_multiple_disconnect_cycles(void) {
   msleep(50);
 
   /* First connect/disconnect cycle. */
-  int cfd1 = connect_client_hs_ok(sock);
+  uint8_t tok1[RESUME_TOKEN_LEN] = {0};
+  int cfd1 = connect_client_hs_ok(sock, tok1);
   ASSERT_TRUE(cfd1 >= 0);
-  msleep(50);
   close(cfd1);
   msleep(50);
 
-  ASSERT_TRUE(broker_active_count(b) == 0);
-  ASSERT_TRUE(broker_idle_count(b) == 1);
-
-  /* Second connect/disconnect cycle — new session in active, then moved to
-   * idle. The first idle session should still be there. */
-  int cfd2 = connect_client_hs_ok(sock);
+  /* Second connect/disconnect cycle creates another resumable token. */
+  uint8_t tok2[RESUME_TOKEN_LEN] = {0};
+  int cfd2 = connect_client_hs_ok(sock, tok2);
   ASSERT_TRUE(cfd2 >= 0);
-  msleep(50);
-  ASSERT_TRUE(broker_active_count(b) == 1);
-  ASSERT_TRUE(broker_idle_count(b) == 1);
-
   close(cfd2);
   msleep(50);
-  ASSERT_TRUE(broker_active_count(b) == 0);
-  ASSERT_TRUE(broker_idle_count(b) == 2);
+
+  /* Both tokens should still be resumable. */
+  handshake_status st = HS_ERR_INTERNAL;
+  ASSERT_TRUE(connect_client_resume_status(sock, tok1, &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_OK);
+  ASSERT_TRUE(connect_client_resume_status(sock, tok2, &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_OK);
 
   pthread_cancel(tid);
   pthread_join(tid, NULL);
@@ -557,7 +607,8 @@ static void test_multiple_disconnect_cycles(void) {
 }
 
 /* After MAX_IDLE_SESSIONS disconnect cycles idle is full. Further disconnects
- * should evict the oldest idle session, keeping idle_count capped. */
+ * should evict old resume tokens while keeping newer ones resumable.
+ */
 static void test_idle_sessions_cap(void) {
   char tmpl[] = "/tmp/test_broker_XXXXXX";
   char *tmpdir = mkdtemp(tmpl);
@@ -573,30 +624,25 @@ static void test_idle_sessions_cap(void) {
   ASSERT_TRUE(prc == 0);
   msleep(50);
 
-  /* Fill idle_sessions to capacity. */
-  int cycle = 0;
-  while (cycle < MAX_IDLE_SESSIONS) {
-    int cfd = connect_client_hs_ok(sock);
+  uint8_t tokens[MAX_IDLE_SESSIONS + 2][RESUME_TOKEN_LEN];
+
+  /* Create more resumable sessions than idle capacity allows. */
+  for (int i = 0; i < MAX_IDLE_SESSIONS + 2; i++) {
+    int cfd = connect_client_hs_ok(sock, tokens[i]);
     ASSERT_TRUE(cfd >= 0);
-    msleep(50);
     close(cfd);
     msleep(50);
-    cycle++;
   }
-  ASSERT_TRUE(broker_active_count(b) == 0);
-  ASSERT_TRUE(broker_idle_count(b) == (size_t)MAX_IDLE_SESSIONS);
 
-  /* Two more cycles past the cap: idle_count must stay at MAX_IDLE_SESSIONS. */
-  for (int i = 0; i < 2; i++) {
-    int cfd = connect_client_hs_ok(sock);
-    ASSERT_TRUE(cfd >= 0);
-    msleep(50);
-    close(cfd);
-    msleep(50);
+  /* Oldest token should be evicted once cap is exceeded. */
+  handshake_status st = HS_ERR_INTERNAL;
+  ASSERT_TRUE(connect_client_resume_status(sock, tokens[0], &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
 
-    ASSERT_TRUE(broker_active_count(b) == 0);
-    ASSERT_TRUE(broker_idle_count(b) == (size_t)MAX_IDLE_SESSIONS);
-  }
+  /* Most recent token should still be resumable. */
+  ASSERT_TRUE(connect_client_resume_status(
+                  sock, tokens[MAX_IDLE_SESSIONS + 1], &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_OK);
 
   pthread_cancel(tid);
   pthread_join(tid, NULL);
@@ -634,7 +680,7 @@ static void test_hs_bad_magic_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -664,7 +710,7 @@ static void test_hs_bad_version_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -694,7 +740,7 @@ static void test_hs_bad_secret_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -726,7 +772,7 @@ static void test_hs_len_mismatch_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -750,7 +796,7 @@ static void test_hs_declared_too_large_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -781,7 +827,7 @@ static void test_hs_truncated_then_eof_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -813,7 +859,7 @@ static void test_hs_truncated_keep_open_timeout_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -840,7 +886,7 @@ static void test_hs_partial_header_keep_open_timeout_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -862,7 +908,7 @@ static void test_hs_no_payload_timeout_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_empty(b);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -876,9 +922,9 @@ static void test_post_hs_truncated_request_drops_session(void) {
   char *sock = NULL;
   ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &sock) == OK);
 
-  int cfd = connect_client_hs_ok(sock);
+  uint8_t resume_tok[RESUME_TOKEN_LEN] = {0};
+  int cfd = connect_client_hs_ok(sock, resume_tok);
   ASSERT_TRUE(cfd >= 0);
-  ASSERT_TRUE(wait_for_active_count(b, 1, 1000) == OK);
 
   static const uint8_t req_prefix[] =
       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"";
@@ -886,11 +932,15 @@ static void test_post_hs_truncated_request_drops_session(void) {
   ASSERT_TRUE(write_len_frame_raw(cfd, declared_len, req_prefix,
                                   sizeof(req_prefix)) == OK);
 
-  ASSERT_TRUE(wait_for_active_count(b, 0, 5000) == OK);
-  ASSERT_TRUE(broker_idle_count(b) == 0);
+  ASSERT_TRUE(wait_for_fd_hangup(cfd, 5000) == OK);
 
   close(cfd);
-  assert_broker_empty(b);
+
+  /* Dropped malformed sessions must not remain resumable in idle storage. */
+  handshake_status st = HS_OK;
+  ASSERT_TRUE(connect_client_resume_status(sock, resume_tok, &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -904,17 +954,19 @@ static void test_post_hs_oversized_request_drops_session(void) {
   char *sock = NULL;
   ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &sock) == OK);
 
-  int cfd = connect_client_hs_ok(sock);
+  uint8_t resume_tok[RESUME_TOKEN_LEN] = {0};
+  int cfd = connect_client_hs_ok(sock, resume_tok);
   ASSERT_TRUE(cfd >= 0);
-  ASSERT_TRUE(wait_for_active_count(b, 1, 1000) == OK);
 
   ASSERT_TRUE(write_len_frame_raw(cfd, UINT32_MAX, NULL, 0) == OK);
 
-  ASSERT_TRUE(wait_for_active_count(b, 0, 2000) == OK);
-  ASSERT_TRUE(broker_idle_count(b) == 0);
+  ASSERT_TRUE(wait_for_fd_hangup(cfd, 3000) == OK);
 
   close(cfd);
-  assert_broker_empty(b);
+  handshake_status st = HS_OK;
+  ASSERT_TRUE(connect_client_resume_status(sock, resume_tok, &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
+  assert_broker_accepts_new_client(sock);
   stop_running_broker(b, tid, tmpdir, sock);
 }
 
@@ -923,7 +975,6 @@ int main(void) {
   test_create_and_destroy();
   test_destroy_null();
   test_client_connect();
-  test_session_counts_initial();
   test_disconnect_moves_to_idle();
   test_multiple_disconnect_cycles();
   test_idle_sessions_cap();

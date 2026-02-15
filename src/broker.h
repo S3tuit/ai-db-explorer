@@ -49,10 +49,4 @@ Broker *broker_create(const char *sock_path, ConnManager *cm,
 /* Frees 'b' and its owned entities. */
 void broker_destroy(Broker *b);
 
-/* Returns the number of active sessions (connected clients being polled). */
-size_t broker_active_count(const Broker *b);
-
-/* Returns the number of idle sessions (disconnected but resumable). */
-size_t broker_idle_count(const Broker *b);
-
 #endif

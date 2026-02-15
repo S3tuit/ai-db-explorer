@@ -102,6 +102,9 @@ cheap SO_PEERCRED check; must be same uid (or allowed gids).
 The token is not meant to protect from the agent; it only reduces accidental
 local noise and.
 
+The MCP Server never crashes if the broker handshake fails. It only fails when
+it encounters errors while reading/writing user input/output.
+
 ---
 
 ## Session model and continuity (current direction)

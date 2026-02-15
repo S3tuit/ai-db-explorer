@@ -29,6 +29,12 @@ static char *write_tmp_config(const char *json) {
 static ConnCatalog *load_test_catalog(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
+                     "  \"safetyPolicy\": {"
+                     "    \"columnPolicy\": {"
+                     "      \"mode\": \"pseudonymize\","
+                     "      \"strategy\": \"deterministic\""
+                     "    }"
+                     "  },"
                      "  \"databases\": ["
                      "    {"
                      "      \"type\": \"postgres\","
@@ -41,16 +47,12 @@ static ConnCatalog *load_test_catalog(void) {
                      "        \"users.calc_balance\","
                      "        \"transfer_amount\""
                      "      ],"
-                     "      \"columnPolicy\": {"
-                     "        \"pseudonymize\": {"
-                     "          \"deterministic\": ["
-                     "            \"users.fiscal_code\","
-                     "            \"users.card_code\","
-                     "            \"private.cards.balance\","
-                     "            \"expenses.receiver\""
-                     "          ]"
-                     "        }"
-                     "      }"
+                     "      \"sensitiveColumns\": ["
+                     "        \"users.fiscal_code\","
+                     "        \"users.card_code\","
+                     "        \"private.cards.balance\","
+                     "        \"expenses.receiver\""
+                     "      ]"
                      "    }"
                      "  ]"
                      "}";
@@ -60,6 +62,7 @@ static ConnCatalog *load_test_catalog(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat != NULL);
   ASSERT_TRUE(err == NULL);
+  free(err);
 
   unlink(path);
   free(path);

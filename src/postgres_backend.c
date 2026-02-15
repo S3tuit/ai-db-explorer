@@ -2397,7 +2397,7 @@ static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
     }
 
     qr = qr_create_ok(NULL, (uint32_t)ncols, out_rows, result_truncated,
-                      p->policy.max_query_bytes);
+                      p->policy.max_payload_bytes);
     if (!qr) {
       pg_set_err(p, "qr_create_ok error");
       goto fail;

@@ -5,7 +5,11 @@
     "readOnly": "yes",
     "statementTimeoutMs": 5000,
     "maxRowReturned": 200,
-    "maxQueryKiloBytes": 64
+    "maxPayloadKiloBytes": 64,
+    "columnPolicy": {
+      "mode": "pseudonymize",
+      "strategy": "deterministic"
+    }
   },
 
   "databases": [
@@ -35,13 +39,9 @@
       "safeFunctions": [
         "get_weight"
       ],
-      "columnPolicy":{
-        "pseudonymize":{
-          "deterministic":[
-            "gym_bros.real_name"
-          ]
-        }
-      }
+      "sensitiveColumns":[
+        "gym_bros.real_name"
+      ]
     }
   ]
 }

@@ -42,4 +42,4 @@ services:
       PGUSER: my_user
       PGPASSWORD: my_secret
     # PIE_LDFLAGS needed for Debian’s default PIE toolchain
-    command: ["sh", "-lc", "make PIE_LDFLAGS=-no-pie -j4 test-postgres"]
+    command: ["sh", "-lc", "make clean && make PIE_LDFLAGS=-no-pie -j4 test-postgres"]

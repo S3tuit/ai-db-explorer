@@ -7,6 +7,7 @@
 #include "utils.h"
 
 #include <signal.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -107,6 +108,7 @@ int main(int argc, char **argv) {
   if (!cat) {
     fprintf(stderr, "ERROR: catalog init failed: %s\n",
             cat_err ? cat_err : "unknown error");
+    free(cat_err);
     privdir_cleanup(pd);
     privdir_free(pd);
     return 1;

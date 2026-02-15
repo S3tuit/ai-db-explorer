@@ -259,20 +259,6 @@ static ssize_t broker_find_idle_by_token(const PackedArray *idle,
   return -1;
 }
 
-/* Decides whether handshake secret-token verification must run.
- * It borrows 'b'; no allocation or ownership transfer.
- * Returns YES when secret check must run, NO when test-mode bypass applies.
- */
-static int broker_should_check_secret(const Broker *b) {
-#ifdef ADBX_TEST_MODE
-  if (b && !b->has_secret_token)
-    return NO;
-#else
-  (void)b;
-#endif
-  return YES;
-}
-
 /* --------------------------------- Sessions ------------------------------ */
 
 /* Cleanup callback for active session slots.
@@ -297,27 +283,6 @@ static void active_sessions_cleanup(void *obj, void *ctx) {
 static void idle_sessions_cleanup(void *obj, void *ctx) {
   (void)ctx;
   (void)obj;
-}
-
-/* Initializes a live BrokerMcpSession around an owned socket fd.
- * It takes ownership of 'cfd' on entry. On failure the fd is closed.
- * Side effects: allocates ByteChannel state and mutates 'sess'.
- * Returns OK on success, ERR on invalid input or initialization failure.
- */
-static int session_init_live(BrokerMcpSession *sess, int cfd) {
-  if (!sess || cfd < 0)
-    return ERR;
-
-  memset(sess, 0, sizeof(*sess));
-  sess->fd = -1;
-
-  // The BufChannel owns the ByteChannel, which owns the fd.
-  if (bufch_stdio_openfd_init(&sess->bc, cfd, cfd) != OK) {
-    return ERR;
-  }
-
-  sess->fd = cfd;
-  return OK;
 }
 
 /* Moves ownership of a pending live session into the active session array.
@@ -519,22 +484,6 @@ void broker_destroy(Broker *b) {
   free(b);
 }
 
-/* Returns number of currently active (connected) sessions.
- * It borrows 'b' and performs no allocations.
- * Returns 0 when 'b' is NULL, otherwise current active session count.
- */
-size_t broker_active_count(const Broker *b) {
-  return b ? parr_len(b->active_sessions) : 0;
-}
-
-/* Returns number of currently idle (resumable) sessions.
- * It borrows 'b' and performs no allocations.
- * Returns 0 when 'b' is NULL, otherwise current idle session count.
- */
-size_t broker_idle_count(const Broker *b) {
-  return b ? parr_len(b->idle_sessions) : 0;
-}
-
 /*-------------------------------- Tools Call -------------------------------*/
 
 /* Executes validated run_sql_query arguments and builds a QueryResult.
@@ -708,15 +657,21 @@ static int verify_peer_uid(int cfd) {
 #endif
 }
 
-/* Performs broker-side handshake for an accepted + peer-verified socket.
+/* Performs broker-side handshake.
  * Takes ownership of 'cfd'. On success ownership moves into active_sessions;
  * on failure the fd/channel are closed before return.
  * Side effects: reads/writes handshake frames, mutates active/idle session
  * arrays, may reap idle sessions, and updates per-session timestamps/tokens.
  * Returns OK only when handshake succeeds and session is active; ERR otherwise.
  */
-static int broker_accept_after_peer_check(Broker *b, int cfd) {
+static int broker_do_handshake(Broker *b, int cfd) {
   if (!b || cfd < 0) {
+    safe_close_fd(&cfd);
+    return ERR;
+  }
+
+  if (verify_peer_uid(cfd) != OK) {
+    TLOG("INFO - rejected client fd=%d: peer UID mismatch", cfd);
     safe_close_fd(&cfd);
     return ERR;
   }
@@ -728,10 +683,14 @@ static int broker_accept_after_peer_check(Broker *b, int cfd) {
   size_t active_idx = SIZE_MAX;
   int keep_open = NO;
 
-  if (session_init_live(&pending, cfd) != OK) {
+  pending.fd = -1;
+  // The BufChannel owns the ByteChannel, which owns the fd.
+  if (bufch_stdio_openfd_init(&pending.bc, cfd, cfd) != OK) {
     return ERR;
   }
-  // session_init_live takes ownership of cfd; do not close it directly now.
+  pending.fd = cfd;
+  // BufChannel takes ownership of the file descriptor and is responsible for
+  // closing it
   cfd = -1;
 
   if (broker_set_rcv_timeout_sec(pending.fd, HANDSHAKE_READ_TIMEOUT_SEC) !=
@@ -755,13 +714,11 @@ static int broker_accept_after_peer_check(Broker *b, int cfd) {
     goto send_n_close;
   }
 
-  if (broker_should_check_secret(b) == YES) {
-    int secret_rc =
-        bytes_equal_ct(req.secret_token, b->secret_token, SECRET_TOKEN_LEN);
-    if (secret_rc != YES) {
-      status = HS_ERR_TOKEN_UNKNOWN;
-      goto send_n_close;
-    }
+  int secret_rc =
+      bytes_equal_ct(req.secret_token, b->secret_token, SECRET_TOKEN_LEN);
+  if (secret_rc != YES) {
+    status = HS_ERR_TOKEN_UNKNOWN;
+    goto send_n_close;
   }
 
   time_t now = time(NULL);
@@ -968,12 +925,7 @@ int broker_run(Broker *b) {
           // accept error; keep running
           break;
         }
-        if (verify_peer_uid(cfd) != OK) {
-          TLOG("INFO - rejected client fd=%d: peer UID mismatch", cfd);
-          safe_close_fd(&cfd);
-          continue;
-        }
-        if (broker_accept_after_peer_check(b, cfd) != OK) {
+        if (broker_do_handshake(b, cfd) != OK) {
           TLOG("INFO - rejected client fd=%d during handshake", cfd);
         }
         break;

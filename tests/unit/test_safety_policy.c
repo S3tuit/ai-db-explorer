@@ -17,15 +17,19 @@ static void test_init_defaults_and_overrides(void) {
   ASSERT_TRUE(rc == OK);
   ASSERT_TRUE(p.read_only == 0);
   ASSERT_TRUE(p.max_rows == 123);
-  ASSERT_TRUE(p.max_query_bytes == 2048);
+  ASSERT_TRUE(p.max_payload_bytes == 2048);
   ASSERT_TRUE(p.statement_timeout_ms == 777);
+  ASSERT_TRUE(p.column_mode == SAFETY_COLMODE_PSEUDONYMIZE);
+  ASSERT_TRUE(p.column_strategy == SAFETY_COLSTRAT_RANDOMIZED);
 
   rc = safety_policy_init(&p, NULL, NULL, NULL, NULL);
   ASSERT_TRUE(rc == OK);
   ASSERT_TRUE(p.read_only == 1);
   ASSERT_TRUE(p.max_rows == 200);
-  ASSERT_TRUE(p.max_query_bytes == 65536);
+  ASSERT_TRUE(p.max_payload_bytes == 65536);
   ASSERT_TRUE(p.statement_timeout_ms == 5000);
+  ASSERT_TRUE(p.column_mode == SAFETY_COLMODE_PSEUDONYMIZE);
+  ASSERT_TRUE(p.column_strategy == SAFETY_COLSTRAT_RANDOMIZED);
 }
 
 int main(void) {

@@ -18,7 +18,9 @@ static SafetyPolicy policy_default(void) {
   p.read_only = 1;
   p.statement_timeout_ms = 2000;
   p.max_rows = 200;
-  p.max_query_bytes = 4096;
+  p.max_payload_bytes = 4096;
+  p.column_mode = SAFETY_COLMODE_PSEUDONYMIZE;
+  p.column_strategy = SAFETY_COLSTRAT_DETERMINISTIC;
   return p;
 }
 
@@ -170,9 +172,9 @@ static void test_max_rows_truncates(void) {
   db_destroy(pg);
 }
 
-static void test_max_query_bytes_truncates_result(void) {
+static void test_max_payload_bytes_truncates_result(void) {
   SafetyPolicy p = policy_default();
-  p.max_query_bytes = 5; // allow only one 5-byte cell
+  p.max_payload_bytes = 5; // allow only one 5-byte cell
   DbBackend *pg = PG_CONNECT(&p);
 
   QueryResult *qr = PG_EXEC(pg, "SELECT '12345' AS v "
@@ -257,7 +259,7 @@ void test_postgres_backend(void) {
   test_base_select_join();
   test_select_null_cell();
   test_max_rows_truncates();
-  test_max_query_bytes_truncates_result();
+  test_max_payload_bytes_truncates_result();
   test_delete_fails_read_only();
   test_attempt_disable_readonly_still_cannot_write();
   test_long_running_query();

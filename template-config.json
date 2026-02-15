@@ -5,7 +5,11 @@
     "readOnly":"yes",
     "statementTimeoutMs":5000,
     "maxRowReturned":200,
-    "maxQueryKiloBytes":64
+    "maxPayloadKiloBytes":64,
+    "columnPolicy": {
+      "mode": "pseudonymize",
+      "strategy": "deterministic"
+    }
   },
 
   "databases":[
@@ -20,14 +24,10 @@
         "md1",
         "private.md2"
       ],
-      "columnPolicy":{
-        "pseudonymize":{
-          "deterministic":[
-            "users.email",
-            "private.users.phone"
-          ]
-        }
-      }
+      "sensitiveColumns": [
+        "users.email",
+        "private.users.phone"
+      ]
     },
 
     {
