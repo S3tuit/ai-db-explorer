@@ -72,7 +72,8 @@ static int ensure_connected(ConnManager *m, ConnEntry *e) {
   }
 
   // Fetch password if needed
-  StrBuf pw = {0};
+  StrBuf pw;
+  sb_init(&pw);
   if (secret_store_get(m->secrets, e->profile->connection_name, &pw) != OK) {
     TLOG("ERROR - secret_store_get failed for %s", e->profile->connection_name);
     return ERR;

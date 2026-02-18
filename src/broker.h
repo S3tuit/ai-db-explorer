@@ -22,15 +22,6 @@ typedef struct Broker Broker;
 #define ABSOLUTE_TTL (8 * 60 * 60) // 8 hours
 #define IDLE_TTL (20 * 60)         // 20 minutes
 
-/* This entity stores the usefull data to communicate with each Client. */
-typedef struct BrokerMcpSession {
-  BufChannel bc;
-  int fd; // connection identity (owned by bc). -1 if disconnected but resumable
-  uint8_t resume_token[RESUME_TOKEN_LEN]; // can be used to resume the session
-  time_t created_at;                      // for absolute TTL
-  time_t last_active;                     // for idle TTL
-} BrokerMcpSession;
-
 /* Run broker event loop (blocking).
  * Returns OK on clean stop, ERR on fatal error.
  *

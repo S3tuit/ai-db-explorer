@@ -20,44 +20,58 @@ struct PackedArray {
   void *cleanup_ctx;
 };
 
+/* Rounds 'n' up to the next multiple of 'multiple'.
+ * It borrows all inputs and does not allocate memory.
+ * Side effects: none.
+ * Error semantics: returns 0 on overflow or invalid multiple; otherwise
+ * returns the rounded value.
+ */
 static size_t round_up(size_t n, size_t multiple) {
   if (multiple == 0)
-    return n;
+    return 0;
   size_t rem = n % multiple;
   if (rem == 0)
     return n;
-  return n + (multiple - rem);
+  size_t add = multiple - rem;
+  if (n > SIZE_MAX - add)
+    return 0;
+  return n + add;
 }
 
-static void *slot_ptr(PackedArray *a, size_t idx) {
+static inline void *slot_ptr(PackedArray *a, size_t idx) {
   return (void *)(a->buf + (idx * a->stride));
 }
 
-static const void *slot_cptr(const PackedArray *a, size_t idx) {
+static inline const void *slot_cptr(const PackedArray *a, size_t idx) {
   return (const void *)(a->buf + (idx * a->stride));
 }
 
+/* Ensures capacity for at least 'min_cap' objects.
+ * It borrows 'a' and may replace its owned buffer.
+ * Side effects: may grow internal storage and update cap.
+ * Error semantics: returns OK on success, ERR on invalid input, arithmetic
+ * overflow, or when min_cap exceeds configured max_bytes bound.
+ */
 static int ensure_cap(PackedArray *a, size_t min_cap) {
   if (!a)
     return ERR;
   if (a->cap >= min_cap)
     return OK;
 
+  if (a->stride == 0)
+    return ERR;
+  size_t max_cap = a->max_bytes / a->stride;
+  if (min_cap > max_cap)
+    return ERR;
+
   size_t new_cap = (a->cap == 0) ? 1 : a->cap;
-  while (new_cap < min_cap) {
+  while (new_cap < min_cap && new_cap <= max_cap / 2) {
     /* Doubling keeps amortized O(1) append and is easy to reason about. */
-    if (new_cap > SIZE_MAX / 2) {
-      new_cap = min_cap;
-      break;
-    }
     new_cap *= 2;
   }
-
-  if (a->stride == 0 || new_cap > SIZE_MAX / a->stride)
-    return ERR;
+  if (new_cap < min_cap)
+    new_cap = min_cap;
   size_t new_bytes = new_cap * a->stride;
-  if (new_bytes > a->max_bytes)
-    return ERR;
 
   unsigned char *p = (unsigned char *)xrealloc(a->buf, new_bytes);
   a->buf = p;
@@ -65,20 +79,27 @@ static int ensure_cap(PackedArray *a, size_t min_cap) {
   return OK;
 }
 
-static int parr_validate_index(const PackedArray *a, size_t idx) {
-  if (!a)
-    return NO;
-  return (idx < a->len) ? YES : NO;
-}
-
-static int parr_is_usable(const PackedArray *a) {
+static inline int parr_is_usable(const PackedArray *a) {
   if (!a)
     return NO;
   if (!a->buf && a->cap > 0)
     return NO;
   if (a->stride == 0)
     return NO;
+  if (a->len > a->cap)
+    return NO;
   return YES;
+}
+
+/* Returns YES when idx is a valid live index inside 'a'.
+ * It borrows 'a' and does not allocate memory.
+ * Side effects: none.
+ * Error semantics: returns YES for in-range index, NO otherwise.
+ */
+static inline int parr_idx_in_range(const PackedArray *a, size_t idx) {
+  if (!a)
+    return NO;
+  return (idx < a->len) ? YES : NO;
 }
 
 static int parr_init(PackedArray *a, size_t obj_sz, size_t upper_bound) {
@@ -115,7 +136,7 @@ PackedArray *parr_create_upper_bound(size_t obj_sz, size_t upper_bound) {
   if (obj_sz == 0)
     return NULL;
 
-  PackedArray *a = (PackedArray *)xmalloc(sizeof(PackedArray));
+  PackedArray *a = xmalloc(sizeof(*a));
   if (parr_init(a, obj_sz, upper_bound) != OK) {
     free(a);
     return NULL;
@@ -140,7 +161,7 @@ size_t parr_len(const PackedArray *a) {
 void *parr_at(PackedArray *a, size_t idx) {
   if (!parr_is_usable(a))
     return NULL;
-  if (parr_validate_index(a, idx) != YES)
+  if (!parr_idx_in_range(a, idx))
     return NULL;
   return slot_ptr(a, idx);
 }
@@ -148,7 +169,7 @@ void *parr_at(PackedArray *a, size_t idx) {
 const void *parr_cat(const PackedArray *a, size_t idx) {
   if (!parr_is_usable(a))
     return NULL;
-  if (parr_validate_index(a, idx) != YES)
+  if (!parr_idx_in_range(a, idx))
     return NULL;
   return slot_cptr(a, idx);
 }
@@ -175,7 +196,7 @@ size_t parr_emplace(PackedArray *a, void **out_ptr) {
 void parr_drop_swap(PackedArray *a, size_t idx) {
   if (!parr_is_usable(a))
     return;
-  if (parr_validate_index(a, idx) != YES)
+  if (!parr_idx_in_range(a, idx))
     return;
 
   void *victim = slot_ptr(a, idx);

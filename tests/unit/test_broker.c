@@ -164,7 +164,8 @@ static int read_handshake_status_with_timeout(int fd, int timeout_ms,
   }
 
   int rc = ERR;
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   if (frame_read_len(bc, &payload) != OK)
     goto done;
   handshake_resp_t resp = {0};
@@ -321,7 +322,8 @@ static int client_handshake_req_on_fd(int cfd, const handshake_req_t *req,
   }
 
   int rc = ERR;
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   if (frame_write_len(bc, req_wire, (uint32_t)sizeof(req_wire)) != OK)
     goto done;
 

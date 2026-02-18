@@ -70,58 +70,58 @@ static ConnCatalog *load_test_catalog(void) {
 }
 
 /* Runs a single validation and checks for accept/reject + error code.
- * Side effects: allocates and frees a validator error buffer. */
+ * Side effects: initializes and cleans one request-scoped validator output. */
 static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
                                const char *sql, int expect_ok,
                                ValidatorErrCode expect_code,
                                const char *expect_substr, const char *file,
                                int line) {
-  StrBuf msg = {0};
-  ValidatorErr err = {.code = VERR_NONE, .msg = &msg};
+  ValidateQueryOut out = {0};
+  ASSERT_TRUE(vq_out_init(&out) == OK);
   ValidatorRequest req = {
       .db = db,
       .profile = cp,
       .sql = sql,
   };
 
-  int rc = validate_query(&req, &err);
+  int rc = validate_query(&req, &out);
   if (expect_ok) {
     if (rc != OK) {
-      fprintf(stderr, "validate_query failed: code=%d msg=", (int)err.code);
-      if (msg.data && msg.len > 0) {
-        fprintf(stderr, "%.*s", (int)msg.len, msg.data);
+      fprintf(stderr, "validate_query failed: code=%d msg=", (int)out.err.code);
+      if (out.err.msg.data && out.err.msg.len > 0) {
+        fprintf(stderr, "%.*s", (int)out.err.msg.len, out.err.msg.data);
       } else {
         fprintf(stderr, "(null)");
       }
       fprintf(stderr, "\n");
     }
     ASSERT_TRUE_AT(rc == OK, file, line);
-    ASSERT_TRUE_AT(err.code == VERR_NONE, file, line);
+    ASSERT_TRUE_AT(out.err.code == VERR_NONE, file, line);
   } else {
     if (rc != ERR) {
       fprintf(stderr, "validate_query unexpectedly OK\n");
-    } else if (err.code != expect_code) {
+    } else if (out.err.code != expect_code) {
       fprintf(stderr, "validate_query wrong code: got=%d expected=%d msg=",
-              (int)err.code, (int)expect_code);
-      if (msg.data && msg.len > 0) {
-        fprintf(stderr, "%.*s", (int)msg.len, msg.data);
+              (int)out.err.code, (int)expect_code);
+      if (out.err.msg.data && out.err.msg.len > 0) {
+        fprintf(stderr, "%.*s", (int)out.err.msg.len, out.err.msg.data);
       } else {
         fprintf(stderr, "(null)");
       }
       fprintf(stderr, "\n");
     }
     ASSERT_TRUE_AT(rc == ERR, file, line);
-    ASSERT_TRUE_AT(err.code == expect_code, file, line);
+    ASSERT_TRUE_AT(out.err.code == expect_code, file, line);
     if (expect_substr) {
-      ASSERT_TRUE_AT(msg.data != NULL, file, line);
-      size_t hay_len = msg.len;
+      ASSERT_TRUE_AT(out.err.msg.data != NULL, file, line);
+      size_t hay_len = out.err.msg.len;
       size_t needle_len = strlen(expect_substr);
       int found = 0;
       if (needle_len == 0) {
         found = 1;
       } else if (hay_len >= needle_len) {
         for (size_t i = 0; i + needle_len <= hay_len; i++) {
-          if (memcmp(msg.data + i, expect_substr, needle_len) == 0) {
+          if (memcmp(out.err.msg.data + i, expect_substr, needle_len) == 0) {
             found = 1;
             break;
           }
@@ -131,7 +131,7 @@ static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
     }
   }
 
-  sb_clean(&msg);
+  vq_out_clean(&out);
 }
 #define ASSERT_VALIDATE(db, cp, policy, sql, ok, code)                         \
   assert_validate_at((db), (cp), (sql), (ok), (code), NULL, __FILE__, __LINE__)

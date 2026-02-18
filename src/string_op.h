@@ -26,6 +26,13 @@ typedef struct StrBuf {
 // TODO: make this configurable via compile-time flags.
 #define STRBUF_MAX_BYTES (1u << 30)
 
+/* Initializes one StrBuf to empty state.
+ * It borrows 'sb' and does not allocate.
+ * Side effects: sets data=NULL, len=0, cap=0.
+ * Error semantics: none; NULL input is ignored.
+ */
+void sb_init(StrBuf *sb);
+
 /* Adds 'n' bytes starting from 'src' to sb. Returns OK/ERR. */
 int sb_append_bytes(StrBuf *sb, const void *src, size_t n);
 

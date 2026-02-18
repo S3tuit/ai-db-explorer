@@ -146,7 +146,8 @@ static int mock_handle_handshake(int cfd, const uint8_t expected_secret[32],
     return ERR;
   }
 
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   int rc = frame_read_len(bc, &payload);
   if (rc != OK) {
     sb_clean(&payload);

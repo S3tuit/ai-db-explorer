@@ -12,9 +12,7 @@ int bufch_init(BufChannel *bc, ByteChannel *ch) {
   if (!bc || !ch)
     return ERR;
   bc->ch = ch;
-  bc->buf.data = NULL;
-  bc->buf.len = 0;
-  bc->buf.cap = 0;
+  sb_init(&bc->buf);
   bc->rpos = 0;
   bc->eof = 0;
   return OK;

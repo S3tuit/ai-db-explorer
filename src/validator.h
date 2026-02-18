@@ -3,6 +3,8 @@
 
 #include "conn_catalog.h"
 #include "db_backend.h"
+#include "packed_array.h"
+#include "pl_arena.h"
 #include "string_op.h"
 
 typedef enum ValidatorErrCode {
@@ -32,8 +34,33 @@ typedef enum ValidatorErrCode {
 
 typedef struct ValidatorErr {
   ValidatorErrCode code;
-  StrBuf *msg;
+  StrBuf msg;
 } ValidatorErr;
+
+typedef enum ValidatorColOutKind {
+  VCOL_OUT_PLAINTEXT = 0,
+  VCOL_OUT_TOKEN = 1
+} ValidatorColOutKind;
+
+typedef struct ValidatorColPlan {
+  ValidatorColOutKind kind;
+  const char *col_id; // arena-owned canonical column id; NULL for plaintext
+} ValidatorColPlan;
+
+typedef struct ValidatorPlan {
+  PackedArray *cols; // entries are ValidatorColPlan, index-aligned with SELECT
+  PlArena arena;     // owns ValidatorColPlan.col_id strings
+} ValidatorPlan;
+
+/* Output contract for validate_query().
+ * Ownership:
+ * - caller initializes with vq_out_init() and cleans with vq_out_clean().
+ * - plan/err storage is owned by this struct.
+ */
+typedef struct ValidateQueryOut {
+  ValidatorPlan plan;
+  ValidatorErr err;
+} ValidateQueryOut;
 
 /* Input contract for validate_query().
  * Ownership:
@@ -45,10 +72,19 @@ typedef struct ValidatorRequest {
   const char *sql;
 } ValidatorRequest;
 
-/* Validates a SQL query against the global and sensitive-mode policies.
- * Returns OK if the query is valid, else, ERR and allocates a human-readable
- * error message into err->msg (guaranteed).
+/* Initializes one ValidateQueryOut.
+ * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int validate_query(const ValidatorRequest *req, ValidatorErr *err);
+int vq_out_init(ValidateQueryOut *out);
+
+/* Cleans one ValidateQueryOut and all memory it owns. */
+void vq_out_clean(ValidateQueryOut *out);
+
+/* Validates a SQL query against the global and sensitive-mode policies.
+ * On success, returns OK and fills out->plan (one entry per SELECT output
+ * column) and sets out->err.code=VERR_NONE.
+ * On failure, returns ERR and fills out->err with a human-readable message.
+ */
+int validate_query(const ValidatorRequest *req, ValidateQueryOut *out);
 
 #endif

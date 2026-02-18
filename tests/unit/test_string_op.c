@@ -41,8 +41,8 @@ static void test_dup_pretty(void) {
 }
 
 static void test_sb_append_bytes(void) {
-  StrBuf sb = {0};
-
+  StrBuf sb;
+  sb_init(&sb);
   ASSERT_TRUE(sb_append_bytes(&sb, "abc", 3) == OK);
   ASSERT_TRUE(sb.len == 3);
   ASSERT_TRUE(memcmp(sb.data, "abc", 3) == 0);
@@ -61,7 +61,8 @@ static void test_sb_append_bytes(void) {
 }
 
 static void test_sb_prepare_for_write(void) {
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   char *dst = NULL;
 
   ASSERT_TRUE(sb_prepare_for_write(&sb, 3, &dst) == OK);
@@ -85,7 +86,8 @@ static void test_sb_prepare_for_write(void) {
 }
 
 static void test_sb_append_hard_limit(void) {
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   char one = 'x';
 
   ASSERT_TRUE(sb_append_bytes(&sb, &one, STRBUF_MAX_BYTES + 1) == ERR);
@@ -99,7 +101,8 @@ static void test_sb_append_hard_limit(void) {
 }
 
 static void test_sb_to_cstr_basic(void) {
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   ASSERT_TRUE(sb_append_bytes(&sb, "abc", 3) == OK);
 
   const char *s = sb_to_cstr(&sb);
@@ -113,12 +116,14 @@ static void test_sb_to_cstr_basic(void) {
 static void test_sb_to_cstr_null_inputs(void) {
   ASSERT_STREQ(sb_to_cstr(NULL), "");
 
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   ASSERT_STREQ(sb_to_cstr(&sb), "");
 }
 
 static void test_sb_to_cstr_len_eq_cap_grow(void) {
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   ASSERT_TRUE(sb_append_bytes(&sb, "abc", 3) == OK);
 
   /* Force len==cap so sb_to_cstr must reserve one more byte. */
@@ -135,8 +140,8 @@ static void test_sb_to_cstr_len_eq_cap_grow(void) {
 }
 
 static void test_sb_to_cstr_hard_limit_cannot_grow(void) {
-  StrBuf sb = {0};
-
+  StrBuf sb;
+  sb_init(&sb);
   sb.data = (char *)malloc(1);
   ASSERT_TRUE(sb.data != NULL);
   sb.len = STRBUF_MAX_BYTES;
@@ -149,9 +154,23 @@ static void test_sb_to_cstr_hard_limit_cannot_grow(void) {
   sb_clean(&sb);
 }
 
+static void test_sb_init_null_noop(void) {
+  sb_init(NULL);
+}
+
+static void test_sb_init_resets_fields(void) {
+  StrBuf sb = {.data = (char *)0x1, .len = 123, .cap = 456};
+  sb_init(&sb);
+  ASSERT_TRUE(sb.data == NULL);
+  ASSERT_TRUE(sb.len == 0);
+  ASSERT_TRUE(sb.cap == 0);
+}
+
 int main(void) {
   test_dup_functions_basic();
   test_dup_pretty();
+  test_sb_init_null_noop();
+  test_sb_init_resets_fields();
   test_sb_append_bytes();
   test_sb_prepare_for_write();
   test_sb_append_hard_limit();

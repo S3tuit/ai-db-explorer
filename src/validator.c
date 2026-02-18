@@ -3,7 +3,10 @@
 #include "query_ir.h"
 #include "utils.h"
 
+#include <assert.h>
+#include <limits.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #define MAX_ROWS_SENS_ON 200
@@ -30,7 +33,7 @@
  *      + Sensitive columns can only be compared using = or IN() and only to
  *        parameters.
  *      + WHERE must be a conjunction of predicates: `pred (AND pred)`. No
- * `NOT`, no `OR`.
+ *        `NOT`, no `OR`.
  *      + All JOINs must be INNER and use only = and AND; JOIN ON cannot
  *        reference sensitive columns. Only column references or literals can
  *        be used inside JOIN.
@@ -59,6 +62,12 @@ typedef struct ValidatorCtx {
   StrBuf scratch;
 } ValidatorCtx;
 
+static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q);
+static inline const QirFromItem *find_from_alias(const QirQuery *q,
+                                                 const char *alias);
+static inline int colref_is_sensitive(const QirQuery *q, const ConnProfile *cp,
+                                      const QirColRef *c);
+
 #define MAX_ERR_MSG_LEN 512
 /* Resets 'ctx->err->msg' and writes a string into it using 'fmt' like printf().
  */
@@ -68,13 +77,12 @@ static int set_err(ValidatorCtx *ctx, ValidatorErrCode code, const char *fmt,
   char buffer[MAX_ERR_MSG_LEN];
   int len;
 
-  if (!ctx || !ctx->err || !fmt)
-    return ERR;
-  if (!ctx->err->msg)
-    return ERR;
+  assert(ctx != NULL);
+  assert(fmt != NULL);
+  assert(ctx->err != NULL);
 
   ctx->err->code = code;
-  sb_reset(ctx->err->msg);
+  sb_reset(&ctx->err->msg);
 
   va_start(args, fmt);
   len = vsnprintf(buffer, sizeof(buffer), fmt, args);
@@ -88,14 +96,152 @@ static int set_err(ValidatorCtx *ctx, ValidatorErrCode code, const char *fmt,
     len = sizeof(buffer) - 1;
   }
 
-  return sb_append_bytes(ctx->err->msg, buffer, len);
+  return sb_append_bytes(&ctx->err->msg, buffer, len);
+}
+
+/* Resets one request-scoped validator output object.
+ * It borrows 'out' and reallocates per-request plan storage.
+ * Side effects: frees/reinitializes plan buffers and clears error message/code.
+ * Error semantics: returns OK on success, ERR on invalid input or allocation
+ * failure.
+ */
+static int vq_out_reset(ValidateQueryOut *out) {
+  assert(out != NULL);
+  assert(out->plan.cols != NULL);
+
+  parr_destroy(out->plan.cols);
+  out->plan.cols = parr_create(sizeof(ValidatorColPlan));
+  if (!out->plan.cols)
+    return ERR;
+
+  pl_arena_clean(&out->plan.arena);
+  if (pl_arena_init(&out->plan.arena, NULL, NULL) != OK) {
+    parr_destroy(out->plan.cols);
+    out->plan.cols = NULL;
+    return ERR;
+  }
+
+  out->err.code = VERR_NONE;
+  sb_reset(&out->err.msg);
+  return OK;
+}
+
+/* Builds a canonical identifier (schema.table.column or table.column) for one
+ * sensitive column reference. It borrows query metadata and writes one
+ * arena-owned string into 'plan'. Side effects: allocates bytes in plan->arena
+ * and may set validator errors. Error semantics: returns OK on success, ERR on
+ * invalid input/alloc failures.
+ */
+static int validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
+                                           const QirColRef *cr,
+                                           ValidatorPlan *plan,
+                                           const char **out_id) {
+  assert(ctx != NULL);
+  assert(q != NULL);
+  assert(cr != NULL);
+  assert(plan != NULL);
+  assert(out_id != NULL);
+
+  *out_id = NULL;
+
+  const QirFromItem *fi = find_from_alias(q, cr->qualifier.name);
+  if (!fi || fi->kind != QIR_FROM_BASE_REL) {
+    const char *desc = qir_colref_to_str(cr, &ctx->scratch);
+    set_err(ctx, VERR_ANALYZE_FAIL,
+            "Unable to resolve sensitive column source for '%s'.", desc);
+    return ERR;
+  }
+
+  const char *schema = fi->u.rel.schema.name;
+  const char *table = fi->u.rel.name.name;
+  const char *col = cr->column.name;
+  if (!table || table[0] == '\0' || !col || col[0] == '\0') {
+    set_err(ctx, VERR_ANALYZE_FAIL,
+            "Unable to build sensitive identifier from query metadata.");
+    return ERR;
+  }
+
+  size_t need = 0;
+  if (schema && schema[0] != '\0') {
+    need = strlen(schema) + 1u + strlen(table) + 1u + strlen(col);
+  } else {
+    need = strlen(table) + 1u + strlen(col);
+  }
+  if (need > UINT32_MAX)
+    return ERR;
+
+  char *dst = (char *)pl_arena_alloc(&plan->arena, (uint32_t)need);
+  if (!dst)
+    return ERR;
+  if (schema && schema[0] != '\0') {
+    (void)snprintf(dst, need + 1u, "%s.%s.%s", schema, table, col);
+  } else {
+    (void)snprintf(dst, need + 1u, "%s.%s", table, col);
+  }
+
+  *out_id = dst;
+  return OK;
+}
+
+/* Builds the output column plan aligned with main SELECT output indexes.
+ * It borrows query and policy metadata and writes into 'out_plan'.
+ * Side effects: appends entries to out_plan->cols and may allocate col ids.
+ * Error semantics: returns OK on success, ERR on invalid input/allocation
+ * failures; may set validator errors.
+ */
+static int validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
+                                ValidatorPlan *out_plan) {
+  assert(ctx != NULL);
+  assert(q != NULL);
+  assert(out_plan != NULL);
+  assert(out_plan->cols != NULL);
+
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    assert(q->select_items != NULL);
+    const QirSelectItem *si = q->select_items[i];
+    if (!si || !si->value) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL SELECT item).");
+      return ERR;
+    }
+
+    ValidatorColPlan *slot = NULL;
+    size_t idx = parr_emplace(out_plan->cols, (void **)&slot);
+    if (idx == SIZE_MAX || !slot)
+      return ERR;
+    slot->kind = VCOL_OUT_PLAINTEXT;
+    slot->col_id = NULL;
+
+    if (si->value->kind != QIR_EXPR_COLREF)
+      continue;
+
+    int sens = colref_is_sensitive(q, ctx->cp, &si->value->u.colref);
+    if (sens == ERR) {
+      const char *desc = qir_colref_to_str(&si->value->u.colref, &ctx->scratch);
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Unable to analyze output column sensitivity for '%s'.", desc);
+      return ERR;
+    }
+    if (sens != YES)
+      continue;
+
+    const char *col_id = NULL;
+    if (validator_make_sensitive_col_id(ctx, q, &si->value->u.colref, out_plan,
+                                        &col_id) != OK) {
+      return ERR;
+    }
+    slot->kind = VCOL_OUT_TOKEN;
+    slot->col_id = col_id;
+  }
+
+  return OK;
 }
 
 // PASS A START
-static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q);
-
 /* Finds and return a QirFromItem using 'alias' in the given query. Returns
- * NULL on no match. */
+ * NULL on no match. This doesn't trace back the original table, use only if
+ * you're sure the alias of the column references to a base table in 'q''s
+ * scope*/
 static inline const QirFromItem *find_from_alias(const QirQuery *q,
                                                  const char *alias) {
   if (!q || !alias || alias[0] == '\0')
@@ -1300,14 +1446,50 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   return YES;
 }
 
-int validate_query(const ValidatorRequest *req, ValidatorErr *err) {
-  if (!req || !err)
+int vq_out_init(ValidateQueryOut *out) {
+  if (!out)
+    return ERR;
+
+  memset(out, 0, sizeof(*out));
+  sb_init(&out->err.msg);
+  out->plan.cols = parr_create(sizeof(ValidatorColPlan));
+  if (!out->plan.cols)
+    return ERR;
+
+  if (pl_arena_init(&out->plan.arena, NULL, NULL) != OK) {
+    parr_destroy(out->plan.cols);
+    out->plan.cols = NULL;
+    return ERR;
+  }
+
+  out->err.code = VERR_NONE;
+  return OK;
+}
+
+void vq_out_clean(ValidateQueryOut *out) {
+  if (!out)
+    return;
+  parr_destroy(out->plan.cols);
+  out->plan.cols = NULL;
+  pl_arena_clean(&out->plan.arena);
+  sb_clean(&out->err.msg);
+  out->err.code = VERR_NONE;
+}
+
+int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
+  if (!req || !out)
     return ERR;
   if (!req->db || !req->profile || !req->sql)
     return ERR;
+  if (vq_out_reset(out) != OK)
+    return ERR;
 
   ValidatorCtx ctx = {
-      .db = req->db, .cp = req->profile, .err = err, .scratch = {0}};
+      .db = req->db,
+      .cp = req->profile,
+      .err = &out->err,
+  };
+  sb_init(&ctx.scratch);
 
   QirQueryHandle h = {0};
   if (db_make_query_ir(req->db, req->sql, &h) != OK) {
@@ -1352,7 +1534,7 @@ int validate_query(const ValidatorRequest *req, ValidatorErr *err) {
   bool sensitive_mode = false;
   int rc = validate_sensitive_touches_scope(&ctx, tr, &sensitive_mode);
   if (rc != YES) {
-    if (rc == ERR && err->code == VERR_NONE) {
+    if (rc == ERR && out->err.code == VERR_NONE) {
       set_err(&ctx, VERR_ANALYZE_FAIL,
               "Unable to analyze columns. Every table must have an alias, and "
               "every column must be qualified as alias.column.");
@@ -1366,7 +1548,7 @@ int validate_query(const ValidatorRequest *req, ValidatorErr *err) {
   // Pass A/Pass B design. Read the start of validator.c for doc.
   rc = validate_query_pass_a(&ctx, q);
   if (rc != YES) {
-    if (rc == ERR && err->code == VERR_NONE) {
+    if (rc == ERR && out->err.code == VERR_NONE) {
       set_err(&ctx, VERR_ANALYZE_FAIL, "Unable to start query analysis.");
     }
     qir_touch_report_destroy(tr);
@@ -1378,7 +1560,7 @@ int validate_query(const ValidatorRequest *req, ValidatorErr *err) {
   if (sensitive_mode == YES) {
     rc = validate_query_pass_b(&ctx, q);
     if (rc != YES) {
-      if (rc == ERR && err->code == VERR_NONE) {
+      if (rc == ERR && out->err.code == VERR_NONE) {
         set_err(&ctx, VERR_ANALYZE_FAIL, "Unable to analyze sensitive query.");
       }
       qir_touch_report_destroy(tr);
@@ -1386,6 +1568,18 @@ int validate_query(const ValidatorRequest *req, ValidatorErr *err) {
       sb_clean(&ctx.scratch);
       return ERR;
     }
+  }
+
+  rc = validator_build_plan(&ctx, q, &out->plan);
+  if (rc != OK) {
+    if (out->err.code == VERR_NONE) {
+      set_err(&ctx, VERR_ANALYZE_FAIL,
+              "Unable to build output plan for validated query.");
+    }
+    qir_touch_report_destroy(tr);
+    qir_handle_destroy(&h);
+    sb_clean(&ctx.scratch);
+    return ERR;
   }
 
   qir_touch_report_destroy(tr);

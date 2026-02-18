@@ -48,7 +48,8 @@ static void test_frame_read_len(void) {
   BufChannel *bc = bufch_create(ch);
   ASSERT_TRUE(bc != NULL);
 
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   ASSERT_TRUE(frame_read_len(bc, &payload) == OK);
   ASSERT_TRUE(payload.len == 5);
   ASSERT_TRUE(memcmp(payload.data, "hello", 5) == 0);
@@ -71,7 +72,8 @@ static void test_frame_read_len_too_large(void) {
   BufChannel *bc = bufch_create(ch);
   ASSERT_TRUE(bc != NULL);
 
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   ASSERT_TRUE(frame_read_len(bc, &payload) == ERR);
 
   sb_clean(&payload);
@@ -107,7 +109,8 @@ static void test_frame_read_cl(void) {
   BufChannel *bc = bufch_create(ch);
   ASSERT_TRUE(bc != NULL);
 
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   ASSERT_TRUE(frame_read_cl(bc, &payload) == YES);
   ASSERT_TRUE(payload.len == 5);
   ASSERT_TRUE(memcmp(payload.data, "hello", 5) == 0);

@@ -46,7 +46,8 @@ static void test_read_small_ok(void) {
   const uint8_t payload[] = {'h', 'e', 'l', 'l', 'o'};
   char *path = write_tmp_file(payload, sizeof(payload));
 
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(fileio_sb_read_limit(path, 64, &out) == OK);
   ASSERT_TRUE(out.len == sizeof(payload));
   ASSERT_TRUE(memcmp(out.data, payload, sizeof(payload)) == 0);
@@ -61,7 +62,8 @@ static void test_read_exact_limit_ok(void) {
   const uint8_t payload[] = {1, 2, 3, 4};
   char *path = write_tmp_file(payload, sizeof(payload));
 
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(fileio_sb_read_limit(path, sizeof(payload), &out) == OK);
   ASSERT_TRUE(out.len == sizeof(payload));
   ASSERT_TRUE(memcmp(out.data, payload, sizeof(payload)) == 0);
@@ -76,7 +78,8 @@ static void test_read_over_limit_fails(void) {
   const uint8_t payload[] = {1, 2, 3, 4, 5, 6};
   char *path = write_tmp_file(payload, sizeof(payload));
 
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(sb_append_bytes(&out, "old", 3) == OK);
   ASSERT_TRUE(fileio_sb_read_limit(path, 5, &out) == ERR);
   ASSERT_TRUE(out.len == 0);
@@ -88,7 +91,8 @@ static void test_read_over_limit_fails(void) {
 
 /* Verifies missing file returns ERR and keeps output empty. */
 static void test_read_missing_file_fails(void) {
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(fileio_sb_read_limit("/tmp/does_not_exist_file_io", 16, &out) ==
               ERR);
   ASSERT_TRUE(out.len == 0);
@@ -102,7 +106,8 @@ static void test_read_resets_output(void) {
   char *p1 = write_tmp_file(first, sizeof(first));
   char *p2 = write_tmp_file(second, sizeof(second));
 
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(fileio_sb_read_limit(p1, 16, &out) == OK);
   ASSERT_TRUE(out.len == sizeof(first));
   ASSERT_TRUE(memcmp(out.data, first, sizeof(first)) == 0);
@@ -120,7 +125,8 @@ static void test_read_resets_output(void) {
 
 /* Verifies fileio_sb_read_up_to rejects invalid input and leaves output empty. */
 static void test_sb_read_up_to_bad_input(void) {
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(fileio_sb_read_up_to(NULL, 16, &out) == -1);
   ASSERT_TRUE(fileio_sb_read_up_to("/tmp/does_not_exist_file_io",
                                    STRBUF_MAX_BYTES + 1, &out) == -1);
@@ -137,7 +143,8 @@ static void test_sb_read_up_to_shorter_than_cap(void) {
   const uint8_t payload[] = {'q', 'w', 'e', 'r'};
   char *path = write_tmp_file(payload, sizeof(payload));
 
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(fileio_sb_read_up_to(path, 64, &out) == (ssize_t)sizeof(payload));
   ASSERT_TRUE(out.len == sizeof(payload));
   ASSERT_TRUE(memcmp(out.data, payload, sizeof(payload)) == 0);
@@ -154,7 +161,8 @@ static void test_sb_read_up_to_longer_than_cap(void) {
   const uint8_t payload[] = {'a', 'b', 'c', 'd', 'e', 'f'};
   char *path = write_tmp_file(payload, sizeof(payload));
 
-  StrBuf out = {0};
+  StrBuf out;
+  sb_init(&out);
   ASSERT_TRUE(fileio_sb_read_up_to(path, 3, &out) == 3);
   ASSERT_TRUE(out.len == 3);
   ASSERT_TRUE(memcmp(out.data, payload, 3) == 0);

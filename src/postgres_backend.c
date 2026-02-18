@@ -1078,7 +1078,8 @@ static int pg_parse_typename(const JsonGetter *jg, PlArena *a,
   char *parts[2] = {
       0}; // we only model schema.name; extra parts get folded into name
   uint32_t nparts = 0;
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   int use_sb = 0;
 
   JsonGetter elem = {0};

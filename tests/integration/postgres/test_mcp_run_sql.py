@@ -47,8 +47,9 @@ def test_run_sql_my_db():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == "req-3"
-        assert resp["result"]["columns"][0]["name"] == "height_cm"
-        assert resp["result"]["rows"] == [["220"]]
+        data = resp["result"]["structuredContent"]
+        assert data["columns"][0]["name"] == "height_cm"
+        assert data["rows"] == [["220"]]
     finally:
         stop_proc(server)
         stop_proc(broker)
@@ -75,7 +76,7 @@ def test_run_sql_another_db():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 4
-        rows = resp["result"]["rows"]
+        rows = resp["result"]["structuredContent"]["rows"]
         names = [row[0] for row in rows]
         assert "Bench Press" in names
         assert "Barbell Row" in names
@@ -170,7 +171,7 @@ def test_run_sql_sensitive():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == "seven"
-        assert resp["result"]["columns"][0]["name"] == "real_name"
+        assert resp["result"]["structuredContent"]["columns"][0]["name"] == "real_name"
 
         resp = send_tools_call(
             server,
@@ -180,7 +181,7 @@ def test_run_sql_sensitive():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 8
-        row = resp["result"]["rows"][0]
+        row = resp["result"]["structuredContent"]["rows"][0]
         # libpq can return numeric values as strings; accept both.
         assert any(str(v) == "40" or str(v) == "40.0" for v in row)
 

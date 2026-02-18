@@ -15,9 +15,24 @@
 
 /*
  * Format:
- *  {"jsonrpc":"2.0","id":<u|s>,"result":{"exec_ms":<U>,columns:["name":<s>,
- *  "type":<s>...]},rows [[]...],"rowcount":<u>,"resultTruncated":<s>}
- *  {"jsonrpc":"2.0","id":<u|s>,"error":{"exec_ms":<U>,"message":<s>}}
+ *  {"jsonrpc":"2.0","id":<u|s>,"result":{
+ *    "content":[{"type":"text","text":"..."}],
+ *    "structuredContent":{
+ *      "exec_ms":<U>,
+ *      "columns":[{"name":<s>,"type":<s>}...],
+ *      "rows":[[<s|null>... ]...],
+ *      "rowcount":<u>,
+ *      "resultTruncated":<bool>,
+ *      "warnings":[<s>...] // optional
+ *    }
+ *  }}
+ *
+ *  {"jsonrpc":"2.0","id":<u|s>,"result":{
+ *    "content":[{"type":"text","text":"..."}],
+ *    "isError":true
+ *  }}
+ *
+ *  {"jsonrpc":"2.0","id":<u|s>,"error":{"code":<int>,"message":<s>}}
  *
  * Returns:
  *  OK: success. *out_json points to a malloc'd buffer containing exactly

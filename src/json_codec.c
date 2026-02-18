@@ -358,7 +358,13 @@ int json_rpc_begin(StrBuf *sb) {
 
 /* --------------------------- encoding objects --------------------------- */
 
-static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
+/* Builds the structured payload for a successful run_sql_query tool result.
+ * It borrows 'sb' and 'qr' and does not allocate externally-owned memory.
+ * Side effects: appends a JSON object to 'sb'.
+ * Error semantics: returns OK on success, ERR on invalid input or append
+ * failures.
+ */
+static int json_qr_ok_structured(StrBuf *sb, const QueryResult *qr) {
   // nrows*ncols should fit in addressable range of cells
   uint64_t cell_count_u64 = 0;
   safe_mul_u32(qr->nrows, qr->ncols, &cell_count_u64);
@@ -448,6 +454,45 @@ static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
   return OK;
 }
 
+/* Tool success: emits a CallToolResult object with both content and
+ * structuredContent fields.
+ * It borrows 'sb' and 'qr' and does not transfer ownership.
+ * Side effects: appends a JSON object to 'sb'.
+ * Error semantics: returns OK on success, ERR on invalid input or append
+ * failures.
+ */
+static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
+  if (!sb || !qr)
+    return ERR;
+
+  if (json_obj_begin(sb) != OK)
+    return ERR;
+  if (json_kv_arr_begin(sb, "content") != OK)
+    return ERR;
+  if (json_obj_begin(sb) != OK)
+    return ERR;
+  if (json_kv_str(sb, "type", "text") != OK)
+    return ERR;
+  // MCP CallToolResult requires content[]; keep it compact and stable.
+  if (json_kv_str(sb, "text", "Query executed successfully.") != OK)
+    return ERR;
+  if (json_obj_end(sb) != OK)
+    return ERR;
+  if (json_arr_end(sb) != OK)
+    return ERR;
+
+  if (json_maybe_comma(sb) != OK)
+    return ERR;
+  if (json_append(sb, "\"structuredContent\":") != OK)
+    return ERR;
+  if (json_qr_ok_structured(sb, qr) != OK)
+    return ERR;
+
+  if (json_obj_end(sb) != OK)
+    return ERR;
+  return OK;
+}
+
 /* Protocol error: {"code":<int>,"message":"..."} */
 static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
   const char *msg = qr->err_msg ? qr->err_msg : "";
@@ -495,8 +540,8 @@ int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len) {
   if (!qr)
     return ERR;
 
-  StrBuf sb = {0};
-
+  StrBuf sb;
+  sb_init(&sb);
   // begin JSON-RPC envelope
   if (json_obj_begin(&sb) != OK)
     goto err;

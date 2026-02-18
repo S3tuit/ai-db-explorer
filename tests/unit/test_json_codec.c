@@ -86,6 +86,9 @@ static void test_json_basic_rows_and_nulls(void) {
   const char *cells[] = {"1", "alice", "10.50", "2", NULL, "99"};
 
   const char *expected = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{"
+                         "\"content\":[{\"type\":\"text\",\"text\":\"Query "
+                         "executed successfully.\"}],"
+                         "\"structuredContent\":{"
                          "\"exec_ms\":12,"
                          "\"columns\":["
                          "{\"name\":\"id\",\"type\":\"int4\"},"
@@ -98,7 +101,7 @@ static void test_json_basic_rows_and_nulls(void) {
                          "],"
                          "\"rowcount\":2,"
                          "\"resultTruncated\":true"
-                         "}}";
+                         "}}}";
 
   McpId id = id_u32(7);
   ENCODE_JSONRPC(
@@ -130,6 +133,9 @@ static void test_json_null_qrcolumn_safe_defaults(void) {
 
   /* If qr_get_col returns NULL, json uses empty strings "" in output */
   const char *expected = "{\"jsonrpc\":\"2.0\",\"id\":100,\"result\":{"
+                         "\"content\":[{\"type\":\"text\",\"text\":\"Query "
+                         "executed successfully.\"}],"
+                         "\"structuredContent\":{"
                          "\"exec_ms\":42,"
                          "\"columns\":["
                          "{\"name\":\"id\",\"type\":\"int4\"},"
@@ -138,7 +144,7 @@ static void test_json_null_qrcolumn_safe_defaults(void) {
                          "\"rows\":[[\"5\",\"abc\"]],"
                          "\"rowcount\":1,"
                          "\"resultTruncated\":false"
-                         "}}";
+                         "}}}";
 
   char *json = NULL;
   size_t json_len = 0;
@@ -170,12 +176,15 @@ static void test_json_escapes_strings(void) {
      0x01 -> \\u0001
   */
   const char *expected = "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{"
+                         "\"content\":[{\"type\":\"text\",\"text\":\"Query "
+                         "executed successfully.\"}],"
+                         "\"structuredContent\":{"
                          "\"exec_ms\":5,"
                          "\"columns\":[{\"name\":\"txt\",\"type\":\"text\"}],"
                          "\"rows\":[[\"a\\\"b\\\\c\\n\\td\\r\\u0001Z\"]],"
                          "\"rowcount\":1,"
                          "\"resultTruncated\":false"
-                         "}}";
+                         "}}}";
 
   McpId id = id_u32(9);
   ENCODE_JSONRPC(&id, 1, 1, 5, 0, 0, col_names, col_types, cells, expected);
@@ -184,12 +193,15 @@ static void test_json_escapes_strings(void) {
 static void test_json_empty_result(void) {
   /* 0 cols, 0 rows */
   const char *expected = "{\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{"
+                         "\"content\":[{\"type\":\"text\",\"text\":\"Query "
+                         "executed successfully.\"}],"
+                         "\"structuredContent\":{"
                          "\"exec_ms\":1,"
                          "\"columns\":[],"
                          "\"rows\":[],"
                          "\"rowcount\":0,"
                          "\"resultTruncated\":false"
-                         "}}";
+                         "}}}";
 
   McpId id = id_u32(42);
   ENCODE_JSONRPC(&id, 0, 0, 1, 0, 0, NULL, NULL, NULL, expected);
@@ -247,12 +259,15 @@ static void test_json_string_id(void) {
 
   const char *expected =
       "{\"jsonrpc\":\"2.0\",\"id\":\"req-xyz\",\"result\":{"
+      "\"content\":[{\"type\":\"text\",\"text\":\"Query executed "
+      "successfully.\"}],"
+      "\"structuredContent\":{"
       "\"exec_ms\":0,"
       "\"columns\":[{\"name\":\"message\",\"type\":\"text\"}],"
       "\"rows\":[[\"ok\"]],"
       "\"rowcount\":1,"
       "\"resultTruncated\":false"
-      "}}";
+      "}}}";
 
   char *json = NULL;
   size_t json_len = 0;
@@ -266,7 +281,8 @@ static void test_json_string_id(void) {
 }
 
 static void test_json_builder_object(void) {
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   ASSERT_TRUE(json_obj_begin(&sb) == OK);
   ASSERT_TRUE(json_kv_str(&sb, "a", "x") == OK);
   ASSERT_TRUE(json_kv_u64(&sb, "b", 2) == OK);
@@ -288,7 +304,8 @@ static void test_json_builder_object(void) {
 }
 
 static void test_json_builder_array(void) {
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   ASSERT_TRUE(json_arr_begin(&sb) == OK);
   ASSERT_TRUE(json_arr_elem_str(&sb, "x") == OK);
   ASSERT_TRUE(json_arr_elem_u64(&sb, 2) == OK);
@@ -303,7 +320,8 @@ static void test_json_builder_array(void) {
 }
 
 static void test_json_builder_nested(void) {
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   ASSERT_TRUE(json_obj_begin(&sb) == OK);
   ASSERT_TRUE(json_kv_obj_begin(&sb, "a") == OK);
   ASSERT_TRUE(json_kv_u64(&sb, "b", 1) == OK);

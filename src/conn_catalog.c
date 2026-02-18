@@ -895,7 +895,8 @@ static int parse_version(const JsonGetter *jg) {
 
 ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
   char *err_msg = NULL;
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   ConnCatalog *cat = NULL;
 
   if (err_out)

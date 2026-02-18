@@ -132,7 +132,8 @@ static int mcpser_read_broker_handshake_resp(McpServer *s,
   if (!s || !s->brok_bc.ch || !out)
     return ERR;
 
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   int rc = frame_read_len(&s->brok_bc, &payload);
   if (rc != OK) {
     sb_clean(&payload);
@@ -279,7 +280,8 @@ static int mcpser_send_error(McpServer *s, const McpId *id, long code,
   if (!s || !s->out_bc.ch || !msg)
     return ERR;
 
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   if (json_rpc_begin(&sb) != OK)
     goto err;
   if (id) {
@@ -380,7 +382,8 @@ static int mcpser_user_initialize_handshake(McpServer *s) {
   if (!s)
     return ERR;
 
-  StrBuf req = {0};
+  StrBuf req;
+  sb_init(&req);
   int rc = frame_read_cl(&s->in_bc, &req);
   if (rc != YES) {
     sb_clean(&req);
@@ -443,7 +446,8 @@ static int mcpser_user_initialize_handshake(McpServer *s) {
 
   sb_clean(&req);
 
-  StrBuf sb = {0};
+  StrBuf sb;
+  sb_init(&sb);
   if (json_rpc_begin(&sb) != OK)
     goto fail;
   if (id.kind == MCP_ID_STR) {
@@ -601,7 +605,8 @@ int mcpser_run(McpServer *s) {
 
   for (;;) {
     // McpServer reads JSON-RPC request
-    StrBuf req = {0};
+    StrBuf req;
+    sb_init(&req);
     int rc = frame_read_cl(&s->in_bc, &req);
     TLOG("INFO - frame_read_cl rc=%d len=%zu", rc, req.len);
     if (rc == NO) {
@@ -666,7 +671,8 @@ int mcpser_run(McpServer *s) {
 
     // McpServer reads broker response
     //
-    StrBuf resp = {0};
+    StrBuf resp;
+    sb_init(&resp);
     if (frame_read_len(&s->brok_bc, &resp) != OK) {
       fprintf(stderr, "McpServer: broker read failed\n");
       sb_clean(&resp);

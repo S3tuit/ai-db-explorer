@@ -44,6 +44,14 @@ char *dup_or_null(const char *s) {
 
 /* ------------------------- small growable buffer ------------------------- */
 
+void sb_init(StrBuf *sb) {
+  if (!sb)
+    return;
+  sb->data = NULL;
+  sb->len = 0;
+  sb->cap = 0;
+}
+
 void sb_clean(StrBuf *sb) {
   if (!sb)
     return;

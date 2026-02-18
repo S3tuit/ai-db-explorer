@@ -7,11 +7,13 @@
 #include "log.h"
 #include "packed_array.h"
 #include "query_result.h"
+#include "sensitive_tok.h"
 #include "stdio_byte_channel.h"
 #include "string_op.h"
 #include "utils.h"
 #include "validator.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <poll.h>
 #include <stdio.h>
@@ -27,6 +29,8 @@
 
 // Maximum size of a single request payload (bytes). Larger frames are rejected.
 #define MAX_REQ_LEN (8u * 1024u * 1024u)
+// Maximum number of token parameters accepted by run_sql_query_tokens.
+#define MAX_TOKEN_PARAMS 10u
 
 #ifdef ADBX_TEST_MODE
 // Keep test timeout small but non-zero so timeout paths stay deterministic.
@@ -54,6 +58,17 @@ struct Broker {
   uint32_t idle_ttl_secs;
   uint32_t abs_ttl_secs;
 };
+
+/* This entity stores the usefull data to communicate with each Client. */
+typedef struct BrokerMcpSession {
+  BufChannel bc;
+  int fd; // connection identity (owned by bc). -1 if disconnected but resumable
+  uint8_t resume_token[RESUME_TOKEN_LEN]; // can be used to resume the session
+  uint32_t generation;                    // session-wide token generation
+  PackedArray *db_stores;                 // owned array of DbTokenStore
+  time_t created_at;                      // for absolute TTL
+  time_t last_active;                     // for idle TTL
+} BrokerMcpSession;
 
 /* Resolves a positive TTL override from environment in test builds.
  * It borrows 'name' and does not allocate memory.
@@ -155,7 +170,8 @@ static int broker_read_handshake_req(BrokerMcpSession *sess,
   if (!sess || !out_req)
     return ERR;
 
-  StrBuf payload = {0};
+  StrBuf payload;
+  sb_init(&payload);
   int rc = frame_read_len(&sess->bc, &payload);
   if (rc != OK) {
     sb_clean(&payload);
@@ -261,6 +277,17 @@ static ssize_t broker_find_idle_by_token(const PackedArray *idle,
 
 /* --------------------------------- Sessions ------------------------------ */
 
+/* Releases BrokerMcpSession-owned dynamic members (excluding fd/channel).
+ * Side effects: destroys the per-session DbTokenStore array.
+ * Error semantics: none (cleanup helper, safe on NULL).
+ */
+static void session_owned_clean(BrokerMcpSession *s) {
+  if (!s)
+    return;
+  parr_destroy(s->db_stores);
+  s->db_stores = NULL;
+}
+
 /* Cleanup callback for active session slots.
  * It borrows 'obj' as a PackedArray-owned slot and does not allocate.
  * Side effects: closes/destroys the live buffered channel and clears fd.
@@ -273,6 +300,7 @@ static void active_sessions_cleanup(void *obj, void *ctx) {
     return;
   bufch_clean(&s->bc);
   s->fd = -1;
+  session_owned_clean(s);
 }
 
 /* Cleanup callback for idle session slots.
@@ -282,7 +310,8 @@ static void active_sessions_cleanup(void *obj, void *ctx) {
  */
 static void idle_sessions_cleanup(void *obj, void *ctx) {
   (void)ctx;
-  (void)obj;
+  BrokerMcpSession *s = (BrokerMcpSession *)obj;
+  session_owned_clean(s);
 }
 
 /* Moves ownership of a pending live session into the active session array.
@@ -307,10 +336,12 @@ static size_t sessions_add_from_pending(PackedArray *active,
   memset(dst, 0, sizeof(*dst));
   dst->bc = pending->bc;
   dst->fd = pending->fd;
+  dst->db_stores = pending->db_stores;
 
   // pending no longer owns channel/fd after transfer.
   pending->fd = -1;
   memset(&pending->bc, 0, sizeof(pending->bc));
+  pending->db_stores = NULL;
 
   if (out_sess)
     *out_sess = dst;
@@ -332,11 +363,14 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
   /* Save fields we need before the active slot is cleaned/overwritten. */
   uint8_t token[RESUME_TOKEN_LEN];
   memcpy(token, src->resume_token, RESUME_TOKEN_LEN);
+  uint32_t generation = src->generation;
+  PackedArray *db_stores = src->db_stores;
   time_t created = src->created_at;
 
   /* Tear down the live connection. */
   bufch_clean(&src->bc);
   src->fd = -1;
+  src->db_stores = NULL;
 
   /* Remove from active (cleanup callback is safe — bufch_clean is
    * idempotent). */
@@ -357,6 +391,8 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
   memset(dst, 0, sizeof(*dst));
   dst->fd = -1;
   memcpy(dst->resume_token, token, RESUME_TOKEN_LEN);
+  dst->generation = generation;
+  dst->db_stores = db_stores;
   dst->created_at = created;
   dst->last_active = time(NULL);
 }
@@ -486,17 +522,58 @@ void broker_destroy(Broker *b) {
 
 /*-------------------------------- Tools Call -------------------------------*/
 
+/* Resolves per-session store for the selected connection, lazily creating it.
+ * It borrows 'sess' and 'profile' and returns a borrowed pointer in
+ * '*out_store'.
+ * Side effects: may allocate the session store-array and one DbTokenStore.
+ * Error semantics: returns OK on success, ERR on invalid input or allocation
+ * failure.
+ */
+static int broker_get_or_init_store(BrokerMcpSession *sess,
+                                    const ConnProfile *profile,
+                                    DbTokenStore **out_store) {
+  if (!sess || !profile || !out_store)
+    return ERR;
+  if (!sess->db_stores) {
+    sess->db_stores = stok_store_array_create();
+    if (!sess->db_stores)
+      return ERR;
+  }
+  return stok_store_get_or_init(sess->db_stores, profile, out_store);
+}
+
+/* Borrowed context used by run_sql tool handlers.
+ * It bundles request-scoped entities so handlers keep narrow signatures.
+ */
+typedef struct BrokerRunSQLArgs {
+  Broker *b;
+  BrokerMcpSession *sess;
+  JsonGetter *jg;
+  McpId *id;
+} BrokerRunSQLArgs;
+
 /* Executes validated run_sql_query arguments and builds a QueryResult.
- * It borrows 'b', 'jg', and 'id'. It allocates temporary strings and may
- * allocate '*out_query'; caller owns/destroys '*out_query'.
- * Side effects: acquires/uses DB connection through ConnManager and records
- * connection usage on success.
+ * It borrows 'args' and allocates temporary strings and may allocate
+ * '*out_query'; caller owns/destroys '*out_query'. Side effects: acquires/uses
+ * DB connection through ConnManager and records connection usage on success.
  * Error semantics: this helper is fail-soft and returns void; it aims to set
  * '*out_query' to an error/result object and leaves it NULL only on
  * catastrophic allocation/copy failures.
  */
-static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
+static void broker_run_sql_query(const BrokerRunSQLArgs *args,
                                  QueryResult **out_query) {
+  assert(args != NULL);
+  assert(args->b != NULL);
+  assert(args->sess != NULL);
+  assert(args->jg != NULL);
+  assert(args->id != NULL);
+  assert(out_query != NULL);
+
+  Broker *b = args->b;
+  BrokerMcpSession *sess = args->sess;
+  JsonGetter *jg = args->jg;
+  McpId *id = args->id;
+
   char *conn_name = NULL;
   char *query = NULL;
   if (jsget_string_decode_alloc(jg, "params.arguments.connectionName",
@@ -518,22 +595,34 @@ static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
     goto free_n_return;
   }
 
-  StrBuf verr_msg = {0};
-  ValidatorErr verr = {.code = VERR_NONE, .msg = &verr_msg};
+  DbTokenStore *store = NULL;
+  if (broker_get_or_init_store(sess, cv.profile, &store) != OK || !store) {
+    TLOG("ERROR - failed to initialize session token store for %s", conn_name);
+    *out_query = qr_create_tool_err(
+        id, "Internal error while preparing sensitive token storage.");
+    goto free_n_return;
+  }
+
+  ValidateQueryOut vout = {0};
+  if (vq_out_init(&vout) != OK) {
+    *out_query = qr_create_tool_err(
+        id, "Internal error while preparing query validation.");
+    goto free_n_return;
+  }
   ValidatorRequest vreq = {.db = cv.db, .profile = cv.profile, .sql = query};
-  if (validate_query(&vreq, &verr) != OK) {
-    const char *err_desc = sb_to_cstr(verr.msg);
+  if (validate_query(&vreq, &vout) != OK) {
+    const char *err_desc = sb_to_cstr(&vout.err.msg);
     if (err_desc[0] == '\0') {
       err_desc = "Unknown error while validating the query. Please make sure "
                  "the query is valid and formatted correctly.";
     }
     *out_query = qr_create_tool_err(id, err_desc);
-    sb_clean(&verr_msg);
+    vq_out_clean(&vout);
     goto free_n_return;
   }
-  sb_clean(&verr_msg);
 
   if (db_exec(cv.db, query, out_query) != OK) {
+    vq_out_clean(&vout);
     TLOG("ERROR - error while communicating with %s", conn_name);
     *out_query = qr_create_tool_err(
         id, "Something went wrong while communicating with the database.");
@@ -542,10 +631,128 @@ static void broker_run_sql_query(Broker *b, JsonGetter *jg, McpId *id,
   // db_exec leaves the id zeroed; stamp it with the request id
   if (mcp_id_copy(&(*out_query)->id, id) != OK) {
     qr_destroy(*out_query);
+    vq_out_clean(&vout);
     *out_query = NULL;
     goto free_n_return;
   }
   connm_mark_used(b->cm, conn_name);
+  vq_out_clean(&vout);
+
+free_n_return:
+  free(conn_name);
+  free(query);
+}
+
+/* Handles the 'run_sql_query_tokens' tool call and produces a QueryResult at
+ * 'out_query'. It borrows 'args' and allocates temporary decoded token strings
+ * that are always freed before return. Side effects: parses hostile JSON token
+ * parameters and verifies session-bound token metadata (connection name +
+ * generation). Error semantics: fail-soft helper; writes '*out_query' with a
+ * protocol/tool error on malformed input and leaves '*out_query' NULL only on
+ * catastrophic allocation failures.
+ */
+static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
+                                        QueryResult **out_query) {
+  assert(args != NULL);
+  assert(args->b != NULL);
+  assert(args->sess != NULL);
+  assert(args->jg != NULL);
+  assert(args->id != NULL);
+  assert(out_query != NULL);
+
+  Broker *b = args->b;
+  BrokerMcpSession *sess = args->sess;
+  JsonGetter *jg = args->jg;
+  McpId *id = args->id;
+
+  char *conn_name = NULL;
+  char *query = NULL;
+  if (jsget_string_decode_alloc(jg, "params.arguments.connectionName",
+                                &conn_name) != YES ||
+      jsget_string_decode_alloc(jg, "params.arguments.query", &query) != YES) {
+    free(conn_name);
+    free(query);
+    *out_query = qr_create_err(id, QRERR_INPARAM, "Invalid tool arguments.");
+    return;
+  }
+
+  ConnView cv = {0};
+  int rc = connm_get_connection(b->cm, conn_name, &cv);
+  if (rc != YES || !cv.db || !cv.profile) {
+    *out_query = qr_create_err(id, QRERR_RESOURCE,
+                               "Unable to connect to the requested database.");
+    goto free_n_return;
+  }
+
+  DbTokenStore *store = NULL;
+  if (broker_get_or_init_store(sess, cv.profile, &store) != OK || !store) {
+    *out_query = qr_create_tool_err(
+        id, "Internal error while preparing sensitive token storage.");
+    goto free_n_return;
+  }
+
+  JsonArrIter it = {0};
+  int arc = jsget_array_strings_begin(jg, "params.arguments.parameters", &it);
+  if (arc != YES) {
+    *out_query = qr_create_err(id, QRERR_INPARAM,
+                               "Missing arguments.parameters array..");
+    goto free_n_return;
+  }
+  if (it.count <= 0 || (uint32_t)it.count > MAX_TOKEN_PARAMS) {
+    *out_query = qr_create_err(id, QRERR_INPARAM,
+                               "Token parameters must contain 1..10 entries.");
+    goto free_n_return;
+  }
+
+  JsonStrSpan sp = {0};
+  for (;;) {
+    int nrc = jsget_array_strings_next(jg, &it, &sp);
+    if (nrc == NO)
+      break;
+    if (nrc != YES) {
+      *out_query =
+          qr_create_err(id, QRERR_INPARAM, "Invalid token parameter entry.");
+      goto free_n_return;
+    }
+
+    char *tok = NULL;
+    if (json_span_decode_alloc(&sp, &tok) != OK || !tok) {
+      free(tok);
+      *out_query =
+          qr_create_err(id, QRERR_INPARAM, "Invalid token parameter entry.");
+      goto free_n_return;
+    }
+
+    ParsedTokView parsed = {0};
+    if (stok_parse_view_inplace(tok, &parsed) != OK) {
+      free(tok);
+      // TODO: log the wrong formatted token
+      *out_query = qr_create_err(id, QRERR_INPARAM,
+                                 "Invalid token format. Expected "
+                                 "tok_<connection>_<generation>_<index>.");
+      goto free_n_return;
+    }
+
+    if (strcmp(parsed.connection_name, conn_name) != 0) {
+      free(tok);
+      *out_query =
+          qr_create_err(id, QRERR_INPARAM, "Token connection mismatch.");
+      goto free_n_return;
+    }
+    if (parsed.generation != sess->generation) {
+      free(tok);
+      *out_query = qr_create_tool_err(
+          id, "Stale token generation. Please run a fresh sensitive query.");
+      goto free_n_return;
+    }
+
+    free(tok);
+  }
+
+  // Bound execution path will be added with validator plan + DB typed binds.
+  *out_query = qr_create_tool_err(
+      id, "run_sql_query_tokens is recognized, but bound execution is not "
+          "implemented yet.");
 
 free_n_return:
   free(conn_name);
@@ -613,9 +820,18 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
     goto return_res;
   }
 
+  BrokerRunSQLArgs run_args = {
+      .b = b,
+      .sess = sess,
+      .jg = &jg,
+      .id = &id,
+  };
+
   // Call the different tools
   if (STREQ(name_sp.ptr, name_sp.len, "run_sql_query")) {
-    broker_run_sql_query(b, &jg, &id, out_res);
+    broker_run_sql_query(&run_args, out_res);
+  } else if (STREQ(name_sp.ptr, name_sp.len, "run_sql_query_tokens")) {
+    broker_run_sql_query_tokens(&run_args, out_res);
 
     // Unknown tools
   } else {
@@ -681,7 +897,6 @@ static int broker_do_handshake(Broker *b, int cfd) {
   BrokerMcpSession pending = {0};
   BrokerMcpSession *active_sess = NULL;
   size_t active_idx = SIZE_MAX;
-  int keep_open = NO;
 
   pending.fd = -1;
   // The BufChannel owns the ByteChannel, which owns the fd.
@@ -774,13 +989,15 @@ static int broker_do_handshake(Broker *b, int cfd) {
       goto send_n_close;
     }
     memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
+    active_sess->generation = idle_sess->generation;
+    active_sess->db_stores = idle_sess->db_stores;
+    idle_sess->db_stores = NULL;
     active_sess->created_at = resume_created_at;
     active_sess->last_active = now;
 
     // Remove stale idle record.
     parr_drop_swap(b->idle_sessions, (size_t)idle_idx);
     status = HS_OK;
-    keep_open = YES;
   } else {
     // New session
     if (MAX_CLIENTS > 0 && parr_len(b->active_sessions) >= MAX_CLIENTS) {
@@ -806,29 +1023,37 @@ static int broker_do_handshake(Broker *b, int cfd) {
       goto send_n_close;
     }
     memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
+    active_sess->generation = 0;
+    // db_stores is lazily created on first sensitive-token usage.
     active_sess->created_at = now;
     active_sess->last_active = now;
     status = HS_OK;
-    keep_open = YES;
   }
 
 send_n_close: {
-  BrokerMcpSession *resp_sess = keep_open == YES ? active_sess : &pending;
+  BrokerMcpSession *resp_sess =
+      (active_idx != SIZE_MAX && active_sess) ? active_sess : &pending;
   const uint8_t *resp_token = (status == HS_OK) ? out_token : NULL;
   if (broker_write_handshake_resp(resp_sess, status, resp_token,
                                   b->idle_ttl_secs, b->abs_ttl_secs) != OK) {
-    // close the new session
-    if (keep_open && active_idx != SIZE_MAX)
+    // close whichever session object owns the channel at this point
+    if (active_idx != SIZE_MAX) {
       parr_drop_swap(b->active_sessions, active_idx);
-    bufch_clean(&pending.bc);
-    pending.fd = -1;
+    } else {
+      bufch_clean(&pending.bc);
+      pending.fd = -1;
+    }
     return ERR;
   }
 }
 
   if (status != HS_OK) {
-    bufch_clean(&pending.bc);
-    pending.fd = -1;
+    if (active_idx != SIZE_MAX) {
+      parr_drop_swap(b->active_sessions, active_idx);
+    } else {
+      bufch_clean(&pending.bc);
+      pending.fd = -1;
+    }
     return ERR;
   }
 
@@ -915,25 +1140,6 @@ int broker_run(Broker *b) {
       return -1;
     }
 
-    // accept new client
-    if (pfds[0].revents & POLLIN) { // if some fd has data to read
-      for (;;) {
-        int cfd = accept(b->listen_fd, NULL, NULL);
-        if (cfd < 0) {
-          if (errno == EINTR)
-            continue;
-          // accept error; keep running
-          break;
-        }
-        if (broker_do_handshake(b, cfd) != OK) {
-          TLOG("INFO - rejected client fd=%d during handshake", cfd);
-        }
-        break;
-        // TODO: For now we accept one at a time; loop accepts multiple
-        // if queued
-      }
-    }
-
     // Handle client I/O for the sessions we polled this iteration.
     for (size_t i = 0; i < nsessions; /* increment inside */) {
       struct pollfd *pfd = &pfds[1 + i];
@@ -950,7 +1156,8 @@ int broker_run(Broker *b) {
       if (pfd->revents & POLLIN) {
         BrokerMcpSession *sess = parr_at(b->active_sessions, i);
 
-        StrBuf req = {0};
+        StrBuf req;
+        sb_init(&req);
         QueryResult *q_res = NULL;
         uint64_t t0 = now_ms_monotonic();
         int rr = frame_read_len(&sess->bc, &req);
@@ -1009,6 +1216,27 @@ int broker_run(Broker *b) {
       }
 
       i++;
+    }
+
+    // Accept one queued client after processing session events. This avoids
+    // transient HS_ERR_FULL when an active client disconnected in the same poll
+    // cycle.
+    if (pfds[0].revents & POLLIN) {
+      for (;;) {
+        int cfd = accept(b->listen_fd, NULL, NULL);
+        if (cfd < 0) {
+          if (errno == EINTR)
+            continue;
+          // accept error; keep running
+          break;
+        }
+        if (broker_do_handshake(b, cfd) != OK) {
+          TLOG("INFO - rejected client fd=%d during handshake", cfd);
+        }
+        break;
+        // TODO: For now we accept one at a time; loop accepts multiple
+        // if queued
+      }
     }
   }
 
