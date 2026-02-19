@@ -3,38 +3,60 @@
 #include "rapidhash.h"
 #include "utils.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 typedef struct HashSlot {
-  const char *key;   // borrowed
-  uint32_t key_len;  // key length in bytes
-  uint64_t hash;     // hash of key bytes
+  const void *key;   // borrowed
+  uint32_t key_len;  // used by byte-key mode
+  uint64_t hash;     // hash of key
   const void *value; // borrowed payload pointer
   uint8_t used;      // 1 when occupied, 0 when empty
 } HashSlot;
+
+typedef enum HtMode {
+  HT_MODE_NONE = 0,
+  HT_MODE_BYTES = 1,
+  HT_MODE_CUSTOM = 2,
+} HtMode;
 
 struct HashTable {
   HashSlot *slots; // owned
   size_t cap;      // number of slots, power of two
   size_t len;      // occupied slots
   size_t grow_at;  // resize threshold
+  HtMode mode;     // key semantics for put/get
+  HtHashFn hash_fn;
+  HtEqFn eq_fn;
+  void *ops_ctx;
 };
 
 #define HT_MIN_CAP 16u
 #define HT_LOAD_NUM 7u
 #define HT_LOAD_DEN 10u
 
-/* Hashes key bytes using rapidhash.
- * It borrows 'key' and does not allocate memory.
- * Side effects: none.
- * Error semantics: returns a deterministic non-zero hash for valid input.
+uint64_t inline ht_hash_bytes(const void *data, size_t len) {
+  return rapidhash(data, len);
+}
+
+uint64_t inline ht_hash_bytes_withSeed(const void *key, size_t len,
+                                       uint64_t seed) {
+  return rapidhash_withSeed(key, len, seed);
+}
+
+/* Hashes a custom key using caller-provided callback.
+ * It borrows 'ht' and 'key' and does not allocate memory.
+ * Side effects: invokes caller callback.
+ * Error semantics: returns callback hash as-is; 0 means invalid key.
  */
-static uint64_t ht_hash_bytes(const char *key, uint32_t key_len) {
-  uint64_t h = rapidhash((const void *)key, (size_t)key_len);
-  // Keep 0 reserved as an impossible hash for easier defensive checks.
-  return (h == 0) ? 1 : h;
+static inline uint64_t ht_hash_custom(const HashTable *ht, const void *key) {
+  assert(ht);
+  assert(key);
+  assert(ht->mode == HT_MODE_CUSTOM);
+  assert(ht->hash_fn);
+  return ht->hash_fn(key, ht->ops_ctx);
 }
 
 /* Computes next power-of-two capacity at least min_slots and >= HT_MIN_CAP.
@@ -72,7 +94,7 @@ static size_t ht_calc_grow_at(size_t cap) {
 
 /* Resets table metadata to the empty/uninitialized state.
  * It borrows 'ht' and does not allocate memory.
- * Side effects: zeroes metadata pointers/counters.
+ * Side effects: zeroes metadata pointers/counters and key-mode callbacks.
  * Error semantics: none (safe on NULL).
  */
 static void ht_zero(HashTable *ht) {
@@ -82,6 +104,10 @@ static void ht_zero(HashTable *ht) {
   ht->cap = 0;
   ht->len = 0;
   ht->grow_at = 0;
+  ht->mode = HT_MODE_NONE;
+  ht->hash_fn = NULL;
+  ht->eq_fn = NULL;
+  ht->ops_ctx = NULL;
 }
 
 /* Compares a slot key with (key,key_len) using hash+length+bytes.
@@ -89,8 +115,8 @@ static void ht_zero(HashTable *ht) {
  * Side effects: none.
  * Error semantics: returns YES on match, NO on mismatch.
  */
-static int ht_slot_key_eq(const HashSlot *slot, uint64_t hash, const char *key,
-                          uint32_t key_len) {
+static int ht_slot_key_eq_bytes(const HashSlot *slot, uint64_t hash,
+                                const char *key, uint32_t key_len) {
   if (!slot || !key || !slot->used)
     return NO;
   if (slot->hash != hash || slot->key_len != key_len)
@@ -100,14 +126,35 @@ static int ht_slot_key_eq(const HashSlot *slot, uint64_t hash, const char *key,
   return (memcmp(slot->key, key, key_len) == 0) ? YES : NO;
 }
 
+/* Compares a slot key with a custom lookup key using callback semantics.
+ * It borrows 'ht', 'slot', and 'key' and does not allocate memory.
+ * Side effects: invokes caller eq callback.
+ * Error semantics: returns YES on match, NO on mismatch/invalid input.
+ */
+static int ht_slot_key_eq_custom(const HashTable *ht, const HashSlot *slot,
+                                 uint64_t hash, const void *key) {
+  assert(ht);
+  assert(ht->eq_fn);
+  if (!slot || !key || !slot->used)
+    return NO;
+  if (slot->hash != hash)
+    return NO;
+
+  return ht->eq_fn(slot->key, key, ht->ops_ctx);
+}
+
 /* Inserts one slot into a table that is guaranteed to have free capacity.
  * It borrows table memory and does not allocate.
  * Side effects: mutates one slot and increments len.
  * Returns OK on success, ERR on invalid input.
  */
-static int ht_insert_no_grow(HashTable *ht, const char *key, uint32_t key_len,
+static int ht_insert_no_grow(HashTable *ht, const void *key, uint32_t key_len,
                              uint64_t hash, const void *value) {
-  if (!ht || !ht->slots || ht->cap == 0 || !key || hash == 0)
+  assert(ht);
+  assert(ht->slots);
+  assert(value);
+  assert(key);
+  if (ht->cap == 0)
     return ERR;
 
   size_t mask = ht->cap - 1;
@@ -135,7 +182,9 @@ static int ht_insert_no_grow(HashTable *ht, const char *key, uint32_t key_len,
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
 static int ht_rehash(HashTable *ht, size_t new_cap) {
-  if (!ht || !ht->slots || ht->cap == 0)
+  assert(ht);
+  assert(ht->slots);
+  if (ht->cap == 0)
     return ERR;
   if (new_cap < HT_MIN_CAP || (new_cap & (new_cap - 1)) != 0)
     return ERR;
@@ -150,6 +199,7 @@ static int ht_rehash(HashTable *ht, size_t new_cap) {
   ht->cap = new_cap;
   ht->len = 0;
   ht->grow_at = ht_calc_grow_at(new_cap);
+  assert(ht->grow_at != 0);
 
   for (size_t i = 0; i < old_cap; i++) {
     HashSlot *slot = &old_slots[i];
@@ -175,8 +225,9 @@ static int ht_rehash(HashTable *ht, size_t new_cap) {
  * Returns OK on success, ERR on invalid input or allocation/overflow failure.
  */
 static int ht_ensure_room(HashTable *ht) {
-  if (!ht || !ht->slots || ht->cap == 0)
-    return ERR;
+  assert(ht);
+  assert(ht->slots);
+  assert(ht->cap != 0);
   if (ht->len < ht->grow_at)
     return OK;
   if (ht->cap > SIZE_MAX / 2)
@@ -184,20 +235,30 @@ static int ht_ensure_room(HashTable *ht) {
   return ht_rehash(ht, ht->cap * 2);
 }
 
-int ht_init_with_capacity(HashTable *ht, size_t min_slots) {
+/* Initializes hash table internals with requested key mode/callbacks.
+ * It borrows 'ht' and mutates it in-place.
+ * Side effects: allocates internal slot storage and resets callbacks/mode.
+ * Error semantics: returns OK on success, ERR on invalid input/allocation
+ * failure.
+ */
+static int ht_init_common(HashTable *ht, size_t min_slots, HtMode mode,
+                          HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
   if (!ht)
     return ERR;
+  if (mode != HT_MODE_BYTES && mode != HT_MODE_CUSTOM)
+    return ERR;
+  if (mode == HT_MODE_CUSTOM && (!hash_fn || !eq_fn))
+    return ERR;
 
-  if (ht->slots) {
+  if (ht->slots)
     free(ht->slots);
-  }
   ht_zero(ht);
 
   size_t cap = ht_next_cap(min_slots);
   if (cap == 0)
     return ERR;
 
-  HashSlot *slots = (HashSlot *)calloc(cap, sizeof(*slots));
+  HashSlot *slots = (HashSlot *)xcalloc(cap, sizeof(*slots));
   if (!slots)
     return ERR;
 
@@ -205,24 +266,65 @@ int ht_init_with_capacity(HashTable *ht, size_t min_slots) {
   ht->cap = cap;
   ht->len = 0;
   ht->grow_at = ht_calc_grow_at(cap);
+  ht->mode = mode;
+  if (mode == HT_MODE_CUSTOM) {
+    ht->hash_fn = hash_fn;
+    ht->eq_fn = eq_fn;
+    ht->ops_ctx = ctx;
+  }
   return OK;
+}
+
+int ht_init_with_capacity(HashTable *ht, size_t min_slots) {
+  return ht_init_common(ht, min_slots, HT_MODE_BYTES, NULL, NULL, NULL);
 }
 
 int ht_init(HashTable *ht) { return ht_init_with_capacity(ht, HT_MIN_CAP); }
 
-HashTable *ht_create_with_capacity(size_t min_slots) {
-  HashTable *ht = (HashTable *)malloc(sizeof(*ht));
-  if (!ht)
-    return NULL;
+int ht_init_custom_with_capacity(HashTable *ht, size_t min_slots,
+                                 HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
+  return ht_init_common(ht, min_slots, HT_MODE_CUSTOM, hash_fn, eq_fn, ctx);
+}
+
+int ht_init_custom(HashTable *ht, HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
+  return ht_init_custom_with_capacity(ht, HT_MIN_CAP, hash_fn, eq_fn, ctx);
+}
+
+/* Allocates a hash-table object and initializes it for the selected key mode.
+ * Ownership: caller owns returned table and must call ht_destroy().
+ * Side effects: heap allocation.
+ * Error semantics: returns initialized table on success, NULL on failure.
+ */
+static HashTable *ht_create_common(size_t min_slots, HtMode mode,
+                                   HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
+  HashTable *ht = (HashTable *)xmalloc(sizeof(*ht));
   ht_zero(ht);
-  if (ht_init_with_capacity(ht, min_slots) != OK) {
+
+  int rc =
+      (mode == HT_MODE_CUSTOM)
+          ? ht_init_custom_with_capacity(ht, min_slots, hash_fn, eq_fn, ctx)
+          : ht_init_with_capacity(ht, min_slots);
+  if (rc != OK) {
     free(ht);
     return NULL;
   }
   return ht;
 }
 
+HashTable *ht_create_with_capacity(size_t min_slots) {
+  return ht_create_common(min_slots, HT_MODE_BYTES, NULL, NULL, NULL);
+}
+
 HashTable *ht_create(void) { return ht_create_with_capacity(HT_MIN_CAP); }
+
+HashTable *ht_create_custom_with_capacity(size_t min_slots, HtHashFn hash_fn,
+                                          HtEqFn eq_fn, void *ctx) {
+  return ht_create_common(min_slots, HT_MODE_CUSTOM, hash_fn, eq_fn, ctx);
+}
+
+HashTable *ht_create_custom(HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
+  return ht_create_custom_with_capacity(HT_MIN_CAP, hash_fn, eq_fn, ctx);
+}
 
 void ht_clean(HashTable *ht) {
   if (!ht)
@@ -246,9 +348,10 @@ size_t ht_len(const HashTable *ht) {
 
 int ht_put(HashTable *ht, const char *key, uint32_t key_len,
            const void *value) {
-  if (!ht || !ht->slots || ht->cap == 0 || !key || !value)
+  if (!ht || ht->mode != HT_MODE_BYTES || !key || !value)
     return ERR;
-
+  assert(ht->slots);
+  assert(ht->cap != 0);
   if (ht_ensure_room(ht) != OK)
     return ERR;
 
@@ -266,7 +369,7 @@ int ht_put(HashTable *ht, const char *key, uint32_t key_len,
       ht->len++;
       return OK;
     }
-    if (ht_slot_key_eq(slot, hash, key, key_len) == YES) {
+    if (ht_slot_key_eq_bytes(slot, hash, key, key_len) == YES) {
       slot->value = value;
       return OK;
     }
@@ -277,8 +380,10 @@ int ht_put(HashTable *ht, const char *key, uint32_t key_len,
 }
 
 const void *ht_get(const HashTable *ht, const char *key, uint32_t key_len) {
-  if (!ht || !ht->slots || ht->cap == 0 || !key)
+  if (!ht || ht->mode != HT_MODE_BYTES || !key)
     return NULL;
+  assert(ht->slots);
+  assert(ht->cap != 0);
 
   uint64_t hash = ht_hash_bytes(key, key_len);
   size_t mask = ht->cap - 1;
@@ -287,7 +392,66 @@ const void *ht_get(const HashTable *ht, const char *key, uint32_t key_len) {
     const HashSlot *slot = &ht->slots[idx];
     if (!slot->used)
       return NULL;
-    if (ht_slot_key_eq(slot, hash, key, key_len) == YES)
+    if (ht_slot_key_eq_bytes(slot, hash, key, key_len) == YES)
+      return slot->value;
+    idx = (idx + 1) & mask;
+  }
+
+  return NULL;
+}
+
+int ht_put_custom(HashTable *ht, const void *key, const void *value) {
+  if (!ht || ht->mode != HT_MODE_CUSTOM || !key || !value)
+    return ERR;
+  assert(ht->slots);
+  assert(ht->cap != 0);
+  if (ht_ensure_room(ht) != OK)
+    return ERR;
+
+  uint64_t hash = ht_hash_custom(ht, key);
+  if (hash == 0)
+    return ERR;
+
+  size_t mask = ht->cap - 1;
+  size_t idx = (size_t)hash & mask;
+  for (size_t steps = 0; steps < ht->cap; steps++) {
+    HashSlot *slot = &ht->slots[idx];
+    if (!slot->used) {
+      slot->used = 1;
+      slot->key = key;
+      slot->key_len = 0;
+      slot->hash = hash;
+      slot->value = value;
+      ht->len++;
+      return OK;
+    }
+    if (ht_slot_key_eq_custom(ht, slot, hash, key) == YES) {
+      slot->value = value;
+      return OK;
+    }
+    idx = (idx + 1) & mask;
+  }
+
+  return ERR;
+}
+
+const void *ht_get_custom(const HashTable *ht, const void *key) {
+  if (!ht || ht->mode != HT_MODE_CUSTOM || !key)
+    return NULL;
+  assert(ht->slots);
+  assert(ht->cap != 0);
+
+  uint64_t hash = ht_hash_custom(ht, key);
+  if (hash == 0)
+    return NULL;
+
+  size_t mask = ht->cap - 1;
+  size_t idx = (size_t)hash & mask;
+  for (size_t steps = 0; steps < ht->cap; steps++) {
+    const HashSlot *slot = &ht->slots[idx];
+    if (!slot->used)
+      return NULL;
+    if (ht_slot_key_eq_custom(ht, slot, hash, key) == YES)
       return slot->value;
     idx = (idx + 1) & mask;
   }
