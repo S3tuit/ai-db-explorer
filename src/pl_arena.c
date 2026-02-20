@@ -43,8 +43,8 @@ int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
     return ERR;
 
   // resolve defaults
-  uint32_t size = (size_p == NULL || *size_p == 0) ? 1024u : *size_p; // ~1KB
-  uint32_t cap = (cap_p == NULL || *cap_p == 0) ? 1048000u : *cap_p;  // ~1MB
+  uint32_t size = (size_p == NULL || *size_p == 0) ? 2024u : *size_p; // ~2KB
+  uint32_t cap = (cap_p == NULL || *cap_p == 0) ? 2048000u : *cap_p;  // ~2MB
 
   // Validate alignment
   if (!pl_is_power_of_two_u32((uint32_t)alignof(max_align_t)))
@@ -106,6 +106,58 @@ void pl_arena_clean(PlArena *ar) {
   ar->used = 0;
   ar->cap = 0;
   ar->block_sz = 0;
+}
+
+int pl_arena_is_zeroed(const PlArena *ar) {
+  if (!ar)
+    return ERR;
+  if (ar->head || ar->tail || ar->used != 0 || ar->cap != 0 ||
+      ar->block_sz != 0) {
+    return NO;
+  }
+  return YES;
+}
+
+int pl_arena_is_ok(const PlArena *ar) {
+  if (!ar)
+    return ERR;
+
+  int zeroed = pl_arena_is_zeroed(ar);
+  if (zeroed == YES)
+    return NO;
+  if (zeroed == ERR)
+    return ERR;
+
+  if (!ar->head || !ar->tail)
+    return NO;
+  if (ar->cap == 0 || ar->block_sz == 0)
+    return NO;
+  if (ar->used > ar->cap)
+    return NO;
+
+  const PlArenaBlock *b = ar->head;
+  const PlArenaBlock *last = NULL;
+  uint64_t used_sum = 0;
+  while (b) {
+    if (b->cap == 0)
+      return NO;
+    if (b->used > b->cap)
+      return NO;
+
+    used_sum += b->used;
+    if (used_sum > ar->cap)
+      return NO;
+
+    last = b;
+    b = b->next;
+  }
+
+  if (last != ar->tail)
+    return NO;
+  if (used_sum != ar->used)
+    return NO;
+
+  return YES;
 }
 
 /* Ensure 'extra' bytes available, growing by adding blocks if needed.

@@ -727,6 +727,13 @@ static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
     set_parse_err(err_out, "%s.connectionName: expected string.", db_path);
     goto error;
   }
+  if (strlen(conn_name) > CONN_NAME_MAX_LEN) {
+    set_parse_err(
+        err_out,
+        "%s.connectionName: must be shorter than 32 bytes (max 31 bytes).",
+        db_path);
+    goto error;
+  }
   if (jsget_string_decode_alloc(jg, "host", &host) != YES) {
     set_parse_err(err_out, "%s.host: expected string.", db_path);
     goto error;

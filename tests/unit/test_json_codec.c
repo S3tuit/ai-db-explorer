@@ -25,6 +25,16 @@ static McpId id_u32(uint32_t v) {
   return id;
 }
 
+static int set_col_plain(QueryResultBuilder *qb, uint32_t col,
+                         const char *name, const char *type) {
+  return qb_set_col(qb, col, name, type, 0);
+}
+
+static int set_cell_plain(QueryResultBuilder *qb, uint32_t row, uint32_t col,
+                          const char *value) {
+  return qb_set_cell(qb, row, col, value, value ? strlen(value) : 0u);
+}
+
 /* builds a QueryResult, fills cols/cells, encode into JSON, compares payload.
  */
 static void
@@ -37,6 +47,8 @@ encode_jsonrpc_impl(const McpId *id, uint32_t ncols, uint32_t nrows,
   QueryResult *qr =
       qr_create_ok(id, ncols, nrows, result_truncated, max_query_bytes);
   ASSERT_TRUE_AT(qr != NULL, file, line);
+  QueryResultBuilder qb = {0};
+  ASSERT_TRUE_AT(qb_init(&qb, qr, NULL, NULL, 0) == OK, file, line);
 
   qr->exec_ms = exec_ms;
 
@@ -49,7 +61,7 @@ encode_jsonrpc_impl(const McpId *id, uint32_t ncols, uint32_t nrows,
       ASSERT_TRUE_AT(tp == NULL, file, line);
       continue;
     }
-    int rc = qr_set_col(qr, c, nm, tp);
+    int rc = set_col_plain(&qb, c, nm, tp);
     ASSERT_TRUE_AT(rc == OK, file, line);
   }
 
@@ -58,7 +70,7 @@ encode_jsonrpc_impl(const McpId *id, uint32_t ncols, uint32_t nrows,
     for (uint32_t c = 0; c < ncols; ++c) {
       size_t idx = (size_t)r * (size_t)ncols + (size_t)c;
       const char *val = cells ? cells[idx] : NULL;
-      int rc = qr_set_cell(qr, r, c, val);
+      int rc = set_cell_plain(&qb, r, c, val);
       ASSERT_TRUE_AT(rc == YES, file, line);
     }
   }
@@ -118,18 +130,20 @@ static void test_json_null_qrcolumn_safe_defaults(void) {
   McpId id = id_u32(100);
   QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
+  QueryResultBuilder qb = {0};
+  ASSERT_TRUE(qb_init(&qb, qr, NULL, NULL, 0) == OK);
 
   qr->exec_ms = 42;
 
   /* Set only column 0 */
-  ASSERT_TRUE(qr_set_col(qr, 0, "id", "int4") == OK);
+  ASSERT_TRUE(set_col_plain(&qb, 0, "id", "int4") == OK);
 
   /* Column 1 is completely unset */
   ASSERT_TRUE(qr_get_col(qr, 1) == NULL);
 
   /* Set cells anyway (json must not rely on column metadata existing) */
-  ASSERT_TRUE(qr_set_cell(qr, 0, 0, "5") == YES);
-  ASSERT_TRUE(qr_set_cell(qr, 0, 1, "abc") == YES);
+  ASSERT_TRUE(set_cell_plain(&qb, 0, 0, "5") == YES);
+  ASSERT_TRUE(set_cell_plain(&qb, 0, 1, "abc") == YES);
 
   /* If qr_get_col returns NULL, json uses empty strings "" in output */
   const char *expected = "{\"jsonrpc\":\"2.0\",\"id\":100,\"result\":{"

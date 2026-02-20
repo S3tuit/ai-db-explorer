@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* A swap-remove packed array. This module is responsible for the ownership of
  * the objects it contains.
@@ -61,10 +62,10 @@ size_t parr_len(const PackedArray *a);
  * - The returned pointer becomes invalid if the array grows.
  * - The object at idx may change after parr_drop_swap().
  */
-void *parr_at(PackedArray *a, size_t idx);
+void *parr_at(PackedArray *a, uint32_t idx);
 
 /* Const version of parr_at(). */
-const void *parr_cat(const PackedArray *a, size_t idx);
+const void *parr_cat(const PackedArray *a, uint32_t idx);
 
 /* Allocates a new object slot at the end and return:
  * - the new object's index, and
@@ -72,9 +73,9 @@ const void *parr_cat(const PackedArray *a, size_t idx);
  *
  * The memory is uninitialized.
  * This may grow the internal buffer, invalidating previously borrowed pointers.
- * Returns SIZE_MAX on failure.
+ * Returns UINT32_MAX on failure.
  */
-size_t parr_emplace(PackedArray *a, void **out_ptr);
+uint32_t parr_emplace(PackedArray *a, void **out_ptr);
 
 /* Remove the object at idx in O(1) by swapping the last element into idx.
  * Order is not preserved.
@@ -84,6 +85,6 @@ size_t parr_emplace(PackedArray *a, void **out_ptr);
  *
  * idx must be < parr_len(a).
  */
-void parr_drop_swap(PackedArray *a, size_t idx);
+void parr_drop_swap(PackedArray *a, uint32_t idx);
 
 #endif

@@ -6,9 +6,19 @@
 
 #include "mcp_id.h"
 
+typedef struct ValidatorPlan ValidatorPlan;
+typedef struct DbTokenStore DbTokenStore;
+
+typedef enum QRColValueType {
+  QRCOL_V_PLAINTEXT = 0,
+  QRCOL_V_TOKEN = 1,
+} QRColType;
+
 typedef struct QRColumn {
   char *name;
   char *type; // type name in text format like "int4", "text", "date"
+  QRColType value_type;
+  uint32_t pg_oid; // db-specific metadata used for tokenized binds
 } QRColumn;
 
 typedef enum QRStatus { QR_OK = 0, QR_ERROR = 1, QR_TOOL_ERROR = 2 } QRStatus;
@@ -55,6 +65,47 @@ typedef struct QueryResult {
 
 } QueryResult;
 
+/* Builder context used while populating one QueryResult.
+ * Ownership:
+ * - qr is borrowed and mutated.
+ * - plan is borrowed and read-only.
+ * - store is borrowed and may be mutated when token values are created.
+ */
+typedef struct QueryResultBuilder {
+  QueryResult *qr;
+  const ValidatorPlan *plan;
+  DbTokenStore *store;
+  uint32_t generation;
+} QueryResultBuilder;
+
+/* Initializes one QueryResultBuilder context.
+ * It borrows all inputs; ownership stays with caller.
+ * Returns OK on success, ERR on invalid input.
+ */
+int qb_init(QueryResultBuilder *qb, QueryResult *qr, const ValidatorPlan *plan,
+            DbTokenStore *store, uint32_t generation);
+
+/* Copies one column metadata entry into qb->qr at position 'col'.
+ * If type is NULL it's stored as "unknown".
+ * Side effects: mutates qb->qr columns and sets sensitive metadata from plan.
+ * Returns OK on success, ERR on bad input or out-of-bounds.
+ */
+int qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
+               const char *type, uint32_t pg_oid);
+
+/* Stores one cell value in qb->qr at [row,col].
+ * If the output column is sensitive, this function stores a token string
+ * instead of plaintext and updates qb->store.
+ * If value is NULL, stores SQL NULL.
+ *
+ * Returns:
+ *  YES -> success
+ *  NO  -> max_query_bytes reached; caller must stop populating rows
+ *  ERR -> bad input or out-of-bounds
+ */
+int qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
+                const char *value, size_t v_len);
+
 /* Creates a QueryResult with allocated storage for cells (all NULL).
  * If 'id' is non-NULL, makes an internal copy (string ids are duplicated).
  * If 'id' is NULL, the id field is zeroed; caller can set it later.
@@ -80,25 +131,9 @@ QueryResult *qr_create_msg(const McpId *id, const char *msg);
 /* Frees all owned memory, 'qr' itself too. */
 void qr_destroy(QueryResult *qr);
 
-/* Copies 'name' and 'type' inside the column metadata of 'qr' at position
- * 'col'. If type is NULL it's stored as "unknown". Returns OK on success, ERR
- * on bad input or out-of-bounds. */
-int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
-               const char *type);
-
 /* Returns the QRColumn at 'col' inside 'qr'. Returns NULL on bad input or if
  * that column is unset. */
 const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col);
-
-/* Copies 'value' inside the cell of 'qr' located based on 'row' and 'col'.
- * Overwrites existing value in that cell. If value is NULL stores SQL NULL.
- *
- * Returns:
- *  YES -> success
- *  NO  -> max_query_bytes reached; caller must stop setting cells
- *  ERR -> bad input or out-of-bounds
- */
-int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col, const char *value);
 
 /* Returns pointer to cell string (owned by qr) or NULL if SQL NULL/out of
  * range. */

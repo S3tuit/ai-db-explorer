@@ -468,10 +468,59 @@ static void test_validator_from_notes(void) {
   catalog_destroy(cat);
 }
 
+static void test_validator_plan_col_id_len(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  ValidateQueryOut out = {0};
+  ASSERT_TRUE(vq_out_init(&out) == OK);
+  ValidatorRequest req = {
+      .db = db,
+      .profile = cp,
+      .sql =
+          "SELECT u.fiscal_code, u.name FROM users u WHERE u.fiscal_code = $1 "
+          "LIMIT 10;",
+  };
+  ASSERT_TRUE(validate_query(&req, &out) == OK);
+  ASSERT_TRUE(out.err.code == VERR_NONE);
+
+  ASSERT_TRUE(out.plan.cols != NULL);
+  ASSERT_TRUE(parr_len(out.plan.cols) == 2);
+
+  const ValidatorColPlan *c0 =
+      (const ValidatorColPlan *)parr_cat(out.plan.cols, 0);
+  const ValidatorColPlan *c1 =
+      (const ValidatorColPlan *)parr_cat(out.plan.cols, 1);
+  ASSERT_TRUE(c0 != NULL);
+  ASSERT_TRUE(c1 != NULL);
+
+  ASSERT_TRUE(c0->kind == VCOL_OUT_TOKEN);
+  ASSERT_TRUE(c0->col_id != NULL);
+  ASSERT_TRUE(c0->col_id_len > 0);
+  ASSERT_TRUE(strlen(c0->col_id) == c0->col_id_len);
+  ASSERT_STREQ(c0->col_id, "users.fiscal_code");
+
+  ASSERT_TRUE(c1->kind == VCOL_OUT_PLAINTEXT);
+  ASSERT_TRUE(c1->col_id == NULL);
+  ASSERT_TRUE(c1->col_id_len == 0);
+
+  vq_out_clean(&out);
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
 int main(void) {
   test_validator_accepts();
   test_validator_rejects_rules();
   test_validator_from_notes();
+  test_validator_plan_col_id_len();
   fprintf(stderr, "OK: test_validator\n");
   return 0;
 }

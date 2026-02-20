@@ -49,6 +49,17 @@ void pl_arena_destroy(PlArena *ar);
 /* Frees the memory used by 'ar' but not the arena itself. */
 void pl_arena_clean(PlArena *ar);
 
+/* Checks whether 'ar' is in the canonical zeroed/uninitialized state.
+ * Returns YES when zeroed, NO when any field is non-zero, ERR on invalid input.
+ */
+int pl_arena_is_zeroed(const PlArena *ar);
+
+/* Validates basic arena structural consistency for initialized arenas.
+ * Returns YES when valid, NO when inconsistent (or zeroed), ERR on bad input.
+ * Should not be used for normal build since it's pretty slow.
+ */
+int pl_arena_is_ok(const PlArena *ar);
+
 /* Ensure 'extra' bytes available, growing if needed.
  * Returns OK on success, ERR if cap reached or errors occurred. */
 int pl_arena_ensure(PlArena *ar, uint32_t extra);

@@ -1,7 +1,11 @@
 #include "query_result.h"
+#include "sensitive_tok.h"
 #include "string_op.h"
 #include "utils.h"
+#include "validator.h"
 
+#include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +25,93 @@ static inline int idx_ok_get(const QueryResult *qr, uint32_t row,
   return (qr && qr->cols && qr->cells && row < qr->nrows && col < qr->ncols)
              ? YES
              : NO;
+}
+
+/* Duplicates exactly 'len' bytes from 's' and appends trailing NUL.
+ * It borrows 's' and allocates returned storage that caller must free.
+ * Side effects: heap allocation.
+ * Error semantics: returns owned C-string on success, NULL on invalid input or
+ * allocation failure.
+ */
+static char *dup_n_or_null(const char *s, size_t len) {
+  if (!s)
+    return NULL;
+  if (len > SIZE_MAX - 1u)
+    return NULL;
+
+  char *dst = (char *)xmalloc(len + 1u);
+  memcpy(dst, s, len);
+  dst[len] = '\0';
+  return dst;
+}
+
+/* Copies one column metadata entry into QueryResult storage.
+ * It borrows inputs and mutates caller-owned 'qr'.
+ * Side effects: allocates/frees column metadata strings.
+ * Error semantics: returns OK on success, ERR on invalid input/out-of-bounds.
+ */
+static int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
+                      const char *type, QRColType value_type, uint32_t pg_oid) {
+  if (!qr || !qr->cols || col >= qr->ncols || !name)
+    return ERR;
+
+  char *new_name = dup_or_null(name);
+  const char *safe_type = type ? type : "unknown";
+  char *new_type = dup_or_null(safe_type);
+  if (!new_name || !new_type) {
+    free(new_name);
+    free(new_type);
+    return ERR;
+  }
+
+  free(qr->cols[col].name);
+  free(qr->cols[col].type);
+
+  qr->cols[col].name = new_name;
+  qr->cols[col].type = new_type;
+  qr->cols[col].value_type = value_type;
+  qr->cols[col].pg_oid = pg_oid;
+  return OK;
+}
+
+/* Stores a cell value while enforcing max_query_bytes.
+ * It borrows 'value' and mutates caller-owned 'qr'.
+ * Side effects: allocates/frees cell strings and updates used_query_bytes.
+ * Error semantics: returns YES on success, NO when byte cap would be exceeded,
+ * ERR on invalid input/out-of-bounds/allocation failure.
+ */
+static int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
+                       const char *value, size_t v_len) {
+  if (!qr)
+    return ERR;
+  if (!idx_ok_set(qr, row, col))
+    return ERR;
+  if (!value && v_len != 0)
+    return ERR;
+
+  size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
+  size_t val_len = value ? v_len : 0;
+
+  size_t prev_len = 0;
+  if (qr->cells[idx])
+    prev_len = strlen(qr->cells[idx]);
+
+  if (qr->max_query_bytes > 0) {
+    uint64_t next_used = qr->used_query_bytes - (uint64_t)prev_len;
+    if (next_used + (uint64_t)val_len > qr->max_query_bytes) {
+      return NO;
+    }
+  }
+
+  char *copy = value ? dup_n_or_null(value, val_len) : NULL;
+  if (value && !copy)
+    return ERR;
+
+  free(qr->cells[idx]);
+  qr->cells[idx] = copy;
+  qr->used_query_bytes =
+      (qr->used_query_bytes - (uint64_t)prev_len) + (uint64_t)val_len;
+  return YES;
 }
 
 QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
@@ -55,8 +146,7 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
 
 /* Shared helper for QR_ERROR and QR_TOOL_ERROR. */
 static QueryResult *qr_create_err_impl(const McpId *id, QRStatus status,
-                                        QrErrorCode code,
-                                        const char *err_msg) {
+                                       QrErrorCode code, const char *err_msg) {
   QueryResult *qr = xmalloc(sizeof(*qr));
 
   if (id) {
@@ -90,8 +180,14 @@ QueryResult *qr_create_tool_err(const McpId *id, const char *err_msg) {
 
 QueryResult *qr_create_msg(const McpId *id, const char *msg) {
   QueryResult *qr = qr_create_ok(id, 1, 1, 0, 0);
-  qr_set_col(qr, 0, "message", "text");
-  qr_set_cell(qr, 0, 0, msg ? msg : "");
+  if (!qr)
+    return NULL;
+
+  if (qr_set_col(qr, 0, "message", "text", QRCOL_V_PLAINTEXT, 0) != OK ||
+      qr_set_cell(qr, 0, 0, msg ? msg : "", msg ? strlen(msg) : 0) != YES) {
+    qr_destroy(qr);
+    return NULL;
+  }
   return qr;
 }
 
@@ -128,80 +224,92 @@ void qr_destroy(QueryResult *qr) {
   free(qr);
 }
 
-int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
-               const char *type) {
-  if (!qr)
+int qb_init(QueryResultBuilder *qb, QueryResult *qr, const ValidatorPlan *plan,
+            DbTokenStore *store, uint32_t generation) {
+  if (!qb || !qr)
     return ERR;
-
-  // out-of-bounds
-  if (!qr->cols || col >= qr->ncols)
-    return ERR;
-
-  // name is required, only type can be NULL
-  if (!name)
-    return ERR;
-
-  // we must not change 'name' and 'type' because qr should outlive them
-  char *new_name = dup_or_null(name);
-  // type can be NULL
-  const char *safe_type = type ? type : "unknown";
-  char *new_type = dup_or_null(safe_type);
-
-  // free if that col was already populated
-  free(qr->cols[col].name);
-  free(qr->cols[col].type);
-
-  qr->cols[col].name = new_name;
-  qr->cols[col].type = new_type;
+  qb->qr = qr;
+  qb->plan = plan;
+  qb->store = store;
+  qb->generation = generation;
   return OK;
+}
+
+int qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
+               const char *type, uint32_t pg_oid) {
+  if (!qb || !qb->qr)
+    return ERR;
+
+  QRColType kind = QRCOL_V_PLAINTEXT;
+  if (qb->plan) {
+    const ValidatorColPlan *vcol =
+        (const ValidatorColPlan *)parr_cat(qb->plan->cols, col);
+    if (!vcol)
+      return ERR;
+    kind = (vcol->kind == VCOL_OUT_TOKEN) ? QRCOL_V_TOKEN : QRCOL_V_PLAINTEXT;
+  }
+  return qr_set_col(qb->qr, col, name, type, kind, pg_oid);
 }
 
 const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col) {
   if (!qr || col >= qr->ncols)
     return NULL;
+  assert(qr->cols);
 
-  // since cols are allocated using calloc, they're all 0. Returns NULL if
-  // they're all 0
-  QRColumn zero = {0};
-  if (memcmp(&qr->cols[col], &zero, sizeof(QRColumn)) == 0)
+  // since a QRColumn must have name valorized, returns NULL if it's not
+  if (!qr->cols[col].name)
     return NULL;
   return &qr->cols[col];
 }
 
-/* Stores a cell value while enforcing max_query_bytes; on NO the caller must
- * stop populating rows to keep a fully-formed result set. */
-int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
-                const char *value) {
-  if (!qr)
+int qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
+                const char *value, size_t v_len) {
+  if (!qb || !qb->qr)
     return ERR;
-  if (!idx_ok_set(qr, row, col))
+  if (!value && v_len != 0)
     return ERR;
 
-  size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;
+  if (!qb->plan)
+    return qr_set_cell(qb->qr, row, col, value, v_len);
 
-  // account for previous value before overwriting
-  if (qr->cells[idx]) {
-    qr->used_query_bytes -= strlen(qr->cells[idx]);
+  const ValidatorColPlan *vcol =
+      (const ValidatorColPlan *)parr_cat(qb->plan->cols, col);
+  if (!vcol)
+    return ERR;
+  if (vcol->kind != VCOL_OUT_TOKEN) {
+    // not sensitive
+    return qr_set_cell(qb->qr, row, col, value, v_len);
   }
 
-  size_t val_len = value ? strlen(value) : 0;
-  if (qr->max_query_bytes > 0 &&
-      qr->used_query_bytes + val_len > qr->max_query_bytes) {
-    // do not overwrite when the cap would be exceeded
-    if (qr->cells[idx]) {
-      qr->used_query_bytes += strlen(qr->cells[idx]);
-    }
-    return NO;
-  }
+  // SQL NULL stays NULL even on sensitive columns.
+  if (!value)
+    return qr_set_cell(qb->qr, row, col, NULL, 0);
+  if (!qb->store)
+    return ERR;
+  if (!vcol->col_id || vcol->col_id[0] == '\0')
+    return ERR;
+  if (vcol->col_id_len == 0)
+    return ERR;
+  if (v_len > UINT32_MAX)
+    return ERR;
 
-  // Overwrite existing value
-  free(qr->cells[idx]);
+  const QRColumn *qcol = qr_get_col(qb->qr, col);
+  if (!qcol)
+    return ERR;
 
-  // value may be NULL and it's ok to store NULL, it means SQL NULL
-  char *copy = dup_or_null(value);
-  qr->cells[idx] = copy;
-  qr->used_query_bytes += val_len;
-  return YES;
+  SensitiveTokIn in = {
+      .value = value,
+      .value_len = (uint32_t)v_len,
+      .col_ref = vcol->col_id,
+      .col_ref_len = vcol->col_id_len,
+      .pg_oid = qcol->pg_oid,
+  };
+  char tok[SENSITIVE_TOK_BUFSZ];
+  int tok_len = stok_store_create_token(qb->store, qb->generation, &in, tok);
+  if (tok_len < 0)
+    return ERR;
+
+  return qr_set_cell(qb->qr, row, col, tok, (size_t)tok_len);
 }
 
 const char *qr_get_cell(const QueryResult *qr, uint32_t row, uint32_t col) {

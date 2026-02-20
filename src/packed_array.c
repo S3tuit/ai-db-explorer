@@ -9,7 +9,7 @@
 
 struct PackedArray {
   unsigned char *buf; /* raw storage */
-  size_t len;         /* live objects */
+  uint32_t len;       /* live objects */
   size_t cap;         /* capacity in objects */
   size_t obj_sz;      /* requested object size */
   size_t stride;      /* padded size per slot */
@@ -38,11 +38,11 @@ static size_t round_up(size_t n, size_t multiple) {
   return n + add;
 }
 
-static inline void *slot_ptr(PackedArray *a, size_t idx) {
+static inline void *slot_ptr(PackedArray *a, uint32_t idx) {
   return (void *)(a->buf + (idx * a->stride));
 }
 
-static inline const void *slot_cptr(const PackedArray *a, size_t idx) {
+static inline const void *slot_cptr(const PackedArray *a, uint32_t idx) {
   return (const void *)(a->buf + (idx * a->stride));
 }
 
@@ -96,7 +96,7 @@ static inline int parr_is_usable(const PackedArray *a) {
  * Side effects: none.
  * Error semantics: returns YES for in-range index, NO otherwise.
  */
-static inline int parr_idx_in_range(const PackedArray *a, size_t idx) {
+static inline int parr_idx_in_range(const PackedArray *a, uint32_t idx) {
   if (!a)
     return NO;
   return (idx < a->len) ? YES : NO;
@@ -158,7 +158,7 @@ size_t parr_len(const PackedArray *a) {
   return a->len;
 }
 
-void *parr_at(PackedArray *a, size_t idx) {
+void *parr_at(PackedArray *a, uint32_t idx) {
   if (!parr_is_usable(a))
     return NULL;
   if (!parr_idx_in_range(a, idx))
@@ -166,7 +166,7 @@ void *parr_at(PackedArray *a, size_t idx) {
   return slot_ptr(a, idx);
 }
 
-const void *parr_cat(const PackedArray *a, size_t idx) {
+const void *parr_cat(const PackedArray *a, uint32_t idx) {
   if (!parr_is_usable(a))
     return NULL;
   if (!parr_idx_in_range(a, idx))
@@ -174,15 +174,15 @@ const void *parr_cat(const PackedArray *a, size_t idx) {
   return slot_cptr(a, idx);
 }
 
-size_t parr_emplace(PackedArray *a, void **out_ptr) {
+uint32_t parr_emplace(PackedArray *a, void **out_ptr) {
   if (out_ptr)
     *out_ptr = NULL;
   if (!parr_is_usable(a))
-    return SIZE_MAX;
+    return UINT32_MAX;
   if (ensure_cap(a, a->len + 1) != OK)
-    return SIZE_MAX;
+    return UINT32_MAX;
 
-  size_t idx = a->len;
+  uint32_t idx = (uint32_t)a->len;
   void *ptr = slot_ptr(a, idx);
 
   /* Intentionally uninitialized: caller owns initialization. */
@@ -193,7 +193,7 @@ size_t parr_emplace(PackedArray *a, void **out_ptr) {
   return idx;
 }
 
-void parr_drop_swap(PackedArray *a, size_t idx) {
+void parr_drop_swap(PackedArray *a, uint32_t idx) {
   if (!parr_is_usable(a))
     return;
   if (!parr_idx_in_range(a, idx))
@@ -206,7 +206,7 @@ void parr_drop_swap(PackedArray *a, size_t idx) {
     a->cleanup(victim, a->cleanup_ctx);
   }
 
-  size_t last_idx = a->len - 1;
+  uint32_t last_idx = (uint32_t)(a->len - 1);
   if (idx != last_idx) {
     void *last = slot_ptr(a, last_idx);
     /* Copy only obj_sz bytes; padding is irrelevant. */

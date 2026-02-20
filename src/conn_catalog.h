@@ -7,6 +7,8 @@
 #include <stdint.h>
 
 #define CURR_CONN_CAT_VERSION "1.0"
+/* Max bytes allowed for ConnProfile.connection_name (excluding NUL). */
+#define CONN_NAME_MAX_LEN 31u
 
 typedef enum {
   DB_KIND_POSTGRES = 1,

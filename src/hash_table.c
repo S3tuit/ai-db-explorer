@@ -37,11 +37,11 @@ struct HashTable {
 #define HT_LOAD_NUM 7u
 #define HT_LOAD_DEN 10u
 
-uint64_t inline ht_hash_bytes(const void *data, size_t len) {
+inline uint64_t ht_hash_bytes(const void *data, size_t len) {
   return rapidhash(data, len);
 }
 
-uint64_t inline ht_hash_bytes_withSeed(const void *key, size_t len,
+inline uint64_t ht_hash_bytes_withSeed(const void *key, size_t len,
                                        uint64_t seed) {
   return rapidhash_withSeed(key, len, seed);
 }
@@ -129,14 +129,16 @@ static int ht_slot_key_eq_bytes(const HashSlot *slot, uint64_t hash,
 /* Compares a slot key with a custom lookup key using callback semantics.
  * It borrows 'ht', 'slot', and 'key' and does not allocate memory.
  * Side effects: invokes caller eq callback.
- * Error semantics: returns YES on match, NO on mismatch/invalid input.
+ * Error semantics: returns YES on match, NO on mismatch.
  */
 static int ht_slot_key_eq_custom(const HashTable *ht, const HashSlot *slot,
                                  uint64_t hash, const void *key) {
   assert(ht);
   assert(ht->eq_fn);
-  if (!slot || !key || !slot->used)
-    return NO;
+  assert(slot->key);
+  assert(slot);
+  assert(slot->used);
+  assert(key);
   if (slot->hash != hash)
     return NO;
 

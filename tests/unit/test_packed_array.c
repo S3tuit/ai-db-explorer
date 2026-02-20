@@ -29,8 +29,8 @@ static void test_basic_emplace_and_at(void) {
 
   Item *p0 = NULL;
   Item *p1 = NULL;
-  size_t i0 = parr_emplace(a, (void **)&p0);
-  size_t i1 = parr_emplace(a, (void **)&p1);
+  uint32_t i0 = parr_emplace(a, (void **)&p0);
+  uint32_t i1 = parr_emplace(a, (void **)&p1);
   ASSERT_TRUE(i0 == 0);
   ASSERT_TRUE(i1 == 1);
   ASSERT_TRUE(parr_len(a) == 2);
@@ -151,16 +151,16 @@ static void test_emplace_failure(void) {
   ASSERT_TRUE(a != NULL);
 
   Item *p = NULL;
-  size_t idx = SIZE_MAX;
+  uint32_t idx = UINT32_MAX;
   size_t i = 0;
   for (;;) {
     idx = parr_emplace(a, (void **)&p);
-    if (idx == SIZE_MAX)
+    if (idx == UINT32_MAX)
       break;
     p->id = (int)i;
     i++;
   }
-  ASSERT_TRUE(idx == SIZE_MAX);
+  ASSERT_TRUE(idx == UINT32_MAX);
 
   parr_destroy(a);
 }
@@ -172,16 +172,16 @@ static void test_upper_bound(void) {
   ASSERT_TRUE(a != NULL);
 
   Item *p = NULL;
-  size_t i0 = parr_emplace(a, (void **)&p);
+  uint32_t i0 = parr_emplace(a, (void **)&p);
   ASSERT_TRUE(i0 == 0);
   p->id = 1;
 
-  size_t i1 = parr_emplace(a, (void **)&p);
+  uint32_t i1 = parr_emplace(a, (void **)&p);
   ASSERT_TRUE(i1 == 1);
   p->id = 2;
 
-  size_t i2 = parr_emplace(a, (void **)&p);
-  ASSERT_TRUE(i2 == SIZE_MAX);
+  uint32_t i2 = parr_emplace(a, (void **)&p);
+  ASSERT_TRUE(i2 == UINT32_MAX);
 
   parr_destroy(a);
 }
@@ -200,7 +200,7 @@ static void test_upper_bound_non_power_of_two_capacity(void) {
   ASSERT_TRUE(parr_emplace(a, (void **)&p) == 2);
   p->id = 3;
 
-  ASSERT_TRUE(parr_emplace(a, (void **)&p) == SIZE_MAX);
+  ASSERT_TRUE(parr_emplace(a, (void **)&p) == UINT32_MAX);
   ASSERT_TRUE(parr_len(a) == 3);
 
   parr_destroy(a);

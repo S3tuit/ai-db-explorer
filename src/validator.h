@@ -45,6 +45,7 @@ typedef enum ValidatorColOutKind {
 typedef struct ValidatorColPlan {
   ValidatorColOutKind kind;
   const char *col_id; // arena-owned canonical column id; NULL for plaintext
+  uint32_t col_id_len;
 } ValidatorColPlan;
 
 typedef struct ValidatorPlan {

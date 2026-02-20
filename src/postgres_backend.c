@@ -2403,6 +2403,11 @@ static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
       pg_set_err(p, "qr_create_ok error");
       goto fail;
     }
+    QueryResultBuilder qb = {0};
+    if (qb_init(&qb, qr, NULL, NULL, 0) != OK) {
+      pg_set_err(p, "qb_init failed");
+      goto fail;
+    }
 
     // Column metadata
     for (uint32_t c = 0; c < out_cols; c++) {
@@ -2416,8 +2421,8 @@ static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
       // materialize Oid to a textual representation
       snprintf(typebuf, sizeof(typebuf), "%u", (unsigned)oid);
 
-      if (qr_set_col(qr, c, name, typebuf) < 0) {
-        pg_set_err(p, "qr_set_col failed");
+      if (qb_set_col(&qb, c, name, typebuf, (uint32_t)oid) != OK) {
+        pg_set_err(p, "qb_set_col failed");
         goto fail;
       }
     }
@@ -2428,12 +2433,15 @@ static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
       for (uint32_t c = 0; c < (uint32_t)ncols; c++) {
 
         char *val;
+        size_t val_len = 0;
         if (PQgetisnull(res, r, c))
           val = NULL;
-        else
+        else {
           val = PQgetvalue(res, (int)r, (int)c);
+          val_len = (size_t)PQgetlength(res, (int)r, (int)c);
+        }
 
-        int src = qr_set_cell(qr, r, c, val);
+        int src = qb_set_cell(&qb, r, c, val, val_len);
         if (src == NO) {
           qr->result_truncated = 1;
           qr->nrows = r;
@@ -2441,7 +2449,7 @@ static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
           break;
         }
         if (src == ERR) {
-          pg_set_err(p, "qr_set_cell failed");
+          pg_set_err(p, "qb_set_cell failed");
           goto fail;
         }
       }

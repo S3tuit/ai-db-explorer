@@ -6,6 +6,7 @@
 #include "json_codec.h"
 #include "log.h"
 #include "packed_array.h"
+#include "pl_arena.h"
 #include "query_result.h"
 #include "sensitive_tok.h"
 #include "stdio_byte_channel.h"
@@ -31,6 +32,8 @@
 #define MAX_REQ_LEN (8u * 1024u * 1024u)
 // Maximum number of token parameters accepted by run_sql_query_tokens.
 #define MAX_TOKEN_PARAMS 10u
+// Per-session storage cap for sensitive token values/keys.
+#define SESSION_TOKEN_ARENA_CAP_BYTES (64u * 1024u * 1024u)
 
 #ifdef ADBX_TEST_MODE
 // Keep test timeout small but non-zero so timeout paths stay deterministic.
@@ -65,9 +68,10 @@ typedef struct BrokerMcpSession {
   int fd; // connection identity (owned by bc). -1 if disconnected but resumable
   uint8_t resume_token[RESUME_TOKEN_LEN]; // can be used to resume the session
   uint32_t generation;                    // session-wide token generation
-  PackedArray *db_stores;                 // owned array of DbTokenStore
-  time_t created_at;                      // for absolute TTL
-  time_t last_active;                     // for idle TTL
+  PlArena arena;          // stores per-session token value bytes
+  PackedArray *db_stores; // owned array of DbTokenStore*
+  time_t created_at;      // for absolute TTL
+  time_t last_active;     // for idle TTL
 } BrokerMcpSession;
 
 /* Resolves a positive TTL override from environment in test builds.
@@ -238,13 +242,13 @@ static int broker_reap_one_idle_session(PackedArray *idle) {
 
   size_t n = parr_len(idle);
   for (size_t i = 0; i < n; i++) {
-    BrokerMcpSession *sess = (BrokerMcpSession *)parr_at(idle, i);
+    BrokerMcpSession *sess = (BrokerMcpSession *)parr_at(idle, (uint32_t)i);
     if (!sess)
       continue;
 
     // Idle sessions are expected to have no live fd.
     if (sess->fd < 0) {
-      parr_drop_swap(idle, i);
+      parr_drop_swap(idle, (uint32_t)i);
       return OK;
     }
   }
@@ -263,7 +267,8 @@ static ssize_t broker_find_idle_by_token(const PackedArray *idle,
 
   size_t n = parr_len(idle);
   for (size_t i = 0; i < n; i++) {
-    const BrokerMcpSession *sess = (const BrokerMcpSession *)parr_cat(idle, i);
+    const BrokerMcpSession *sess =
+        (const BrokerMcpSession *)parr_cat(idle, (uint32_t)i);
     if (!sess)
       continue;
     int eq = bytes_equal_ct(token, sess->resume_token, RESUME_TOKEN_LEN);
@@ -278,14 +283,14 @@ static ssize_t broker_find_idle_by_token(const PackedArray *idle,
 /* --------------------------------- Sessions ------------------------------ */
 
 /* Releases BrokerMcpSession-owned dynamic members (excluding fd/channel).
- * Side effects: destroys the per-session DbTokenStore array.
- * Error semantics: none (cleanup helper, safe on NULL).
  */
 static void session_owned_clean(BrokerMcpSession *s) {
   if (!s)
     return;
   parr_destroy(s->db_stores);
   s->db_stores = NULL;
+  pl_arena_clean(&s->arena);
+  s->arena = (PlArena){0};
 }
 
 /* Cleanup callback for active session slots.
@@ -318,29 +323,31 @@ static void idle_sessions_cleanup(void *obj, void *ctx) {
  * It transfers pending->bc and pending->fd to "active"-owned storage on
  * success; pending keeps ownership on failure.
  * Side effects: mutates 'active' and session metadata.
- * Returns inserted index on success, SIZE_MAX on failure.
+ * Returns inserted index on success, UINT32_MAX on failure.
  */
-static size_t sessions_add_from_pending(PackedArray *active,
-                                        BrokerMcpSession *pending,
-                                        BrokerMcpSession **out_sess) {
+static uint32_t sessions_add_from_pending(PackedArray *active,
+                                          BrokerMcpSession *pending,
+                                          BrokerMcpSession **out_sess) {
   if (!active || !pending)
-    return SIZE_MAX;
+    return UINT32_MAX;
   if (out_sess)
     *out_sess = NULL;
 
   BrokerMcpSession *dst = NULL;
-  size_t idx = parr_emplace(active, (void **)&dst);
-  if (idx == SIZE_MAX || !dst)
-    return SIZE_MAX;
+  uint32_t idx = parr_emplace(active, (void **)&dst);
+  if (idx == UINT32_MAX || !dst)
+    return UINT32_MAX;
 
   memset(dst, 0, sizeof(*dst));
   dst->bc = pending->bc;
   dst->fd = pending->fd;
+  dst->arena = pending->arena;
   dst->db_stores = pending->db_stores;
 
   // pending no longer owns channel/fd after transfer.
   pending->fd = -1;
   memset(&pending->bc, 0, sizeof(pending->bc));
+  pending->arena = (PlArena){0};
   pending->db_stores = NULL;
 
   if (out_sess)
@@ -355,7 +362,7 @@ static size_t sessions_add_from_pending(PackedArray *active,
  * existing idle session, and refreshes last_active timestamp.
  */
 static void session_move_to_idle(PackedArray *active, PackedArray *idle,
-                                 size_t active_idx) {
+                                 uint32_t active_idx) {
   BrokerMcpSession *src = parr_at(active, active_idx);
   if (!src)
     return;
@@ -364,12 +371,14 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
   uint8_t token[RESUME_TOKEN_LEN];
   memcpy(token, src->resume_token, RESUME_TOKEN_LEN);
   uint32_t generation = src->generation;
+  PlArena arena = src->arena;
   PackedArray *db_stores = src->db_stores;
   time_t created = src->created_at;
 
   /* Tear down the live connection. */
   bufch_clean(&src->bc);
   src->fd = -1;
+  src->arena = (PlArena){0};
   src->db_stores = NULL;
 
   /* Remove from active (cleanup callback is safe — bufch_clean is
@@ -384,14 +393,15 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
 
   /* Insert into idle. */
   BrokerMcpSession *dst = NULL;
-  size_t idx = parr_emplace(idle, (void **)&dst);
-  if (idx == SIZE_MAX || !dst)
+  uint32_t idx = parr_emplace(idle, (void **)&dst);
+  if (idx == UINT32_MAX || !dst)
     return;
 
   memset(dst, 0, sizeof(*dst));
   dst->fd = -1;
   memcpy(dst->resume_token, token, RESUME_TOKEN_LEN);
   dst->generation = generation;
+  dst->arena = arena;
   dst->db_stores = db_stores;
   dst->created_at = created;
   dst->last_active = time(NULL);
@@ -522,24 +532,84 @@ void broker_destroy(Broker *b) {
 
 /*-------------------------------- Tools Call -------------------------------*/
 
+/* Cleans one packed-array slot that stores a DbTokenStore.
+ * It borrows 'obj' and does not allocate memory.
+ * Side effects: releases token-store owned arrays/hash/pools.
+ * Error semantics: none (void cleanup callback).
+ */
+static void broker_db_store_cleanup(void *obj, void *ctx) {
+  (void)ctx;
+  DbTokenStore **slot = (DbTokenStore **)obj;
+  if (!slot)
+    return;
+  stok_store_destroy(*slot);
+  *slot = NULL;
+}
+
+/* Finds one DbTokenStore by exact connection name.
+ * It borrows 'stores' and 'connection_name'; no allocations.
+ * Side effects: none.
+ * Error semantics: returns mutable store pointer on match, NULL otherwise.
+ */
+static DbTokenStore *broker_find_store(PackedArray *stores,
+                                       const char *connection_name) {
+  if (!stores || !connection_name)
+    return NULL;
+
+  size_t n = parr_len(stores);
+  for (size_t i = 0; i < n; i++) {
+    DbTokenStore **slot = (DbTokenStore **)parr_at(stores, (uint32_t)i);
+    if (!slot || !*slot)
+      continue;
+    int eq = stok_store_matches_conn_name(*slot, connection_name);
+    if (eq == YES)
+      return *slot;
+  }
+  return NULL;
+}
+
 /* Resolves per-session store for the selected connection, lazily creating it.
  * It borrows 'sess' and 'profile' and returns a borrowed pointer in
  * '*out_store'.
- * Side effects: may allocate the session store-array and one DbTokenStore.
+ * Side effects: may append one DbTokenStore to an already-initialized session.
  * Error semantics: returns OK on success, ERR on invalid input or allocation
  * failure.
  */
 static int broker_get_or_init_store(BrokerMcpSession *sess,
                                     const ConnProfile *profile,
                                     DbTokenStore **out_store) {
-  if (!sess || !profile || !out_store)
+  if (out_store)
+    *out_store = NULL;
+  if (!sess || !profile || !profile->connection_name || !out_store)
     return ERR;
-  if (!sess->db_stores) {
-    sess->db_stores = stok_store_array_create();
-    if (!sess->db_stores)
-      return ERR;
+  if (!sess->db_stores || sess->arena.head == NULL || sess->arena.tail == NULL)
+    return ERR;
+
+  assert(sess->arena.cap > 0);
+  assert(sess->arena.block_sz > 0);
+
+  DbTokenStore *found =
+      broker_find_store(sess->db_stores, profile->connection_name);
+  if (found) {
+    *out_store = found;
+    return OK;
   }
-  return stok_store_get_or_init(sess->db_stores, profile, out_store);
+
+  DbTokenStore **slot = NULL;
+  uint32_t idx = parr_emplace(sess->db_stores, (void **)&slot);
+  if (idx == UINT32_MAX || !slot)
+    return ERR;
+  *slot = NULL;
+
+  DbTokenStore *store = stok_store_create(profile, &sess->arena);
+  if (!store) {
+    parr_drop_swap(sess->db_stores, idx);
+    return ERR;
+  }
+
+  *slot = store;
+  *out_store = store;
+  return OK;
 }
 
 /* Borrowed context used by run_sql tool handlers.
@@ -873,6 +943,45 @@ static int verify_peer_uid(int cfd) {
 #endif
 }
 
+/* Initializes token-state containers for one broker session.
+ * It borrows and mutates 'sess'; ownership of created members stays in the
+ * session and is later released by session cleanup callbacks.
+ * Side effects: allocate/init the per-session PlArena and db_stores array.
+ * Error semantics: returns OK when state is ready, ERR on invalid input,
+ * inconsistent partial state, or allocation failure.
+ */
+static int broker_session_token_state_init(BrokerMcpSession *sess) {
+  if (!sess)
+    return ERR;
+
+  // session should be empty/zeroed during initialization
+  assert(pl_arena_is_zeroed(&sess->arena) == YES);
+  assert(!sess->db_stores);
+
+  uint32_t cap = SESSION_TOKEN_ARENA_CAP_BYTES;
+  if (pl_arena_init(&sess->arena, NULL, &cap) != OK)
+    return ERR;
+
+  sess->db_stores = parr_create(sizeof(DbTokenStore *));
+  if (!sess->db_stores) {
+    pl_arena_clean(&sess->arena);
+    return ERR;
+  }
+  parr_set_cleanup(sess->db_stores, broker_db_store_cleanup, NULL);
+
+  return OK;
+}
+
+/* Checks whether 'sess' has correctly initialized the token-store containers
+ * and is ready to store/retrieve tokens. */
+inline static int broker_session_token_state_ok(BrokerMcpSession *sess) {
+  if (!sess)
+    return ERR;
+  if (!sess->db_stores || pl_arena_is_ok(&sess->arena) != YES)
+    return NO;
+  return YES;
+}
+
 /* Performs broker-side handshake.
  * Takes ownership of 'cfd'. On success ownership moves into active_sessions;
  * on failure the fd/channel are closed before return.
@@ -896,9 +1005,8 @@ static int broker_do_handshake(Broker *b, int cfd) {
   uint8_t out_token[RESUME_TOKEN_LEN] = {0};
   BrokerMcpSession pending = {0};
   BrokerMcpSession *active_sess = NULL;
-  size_t active_idx = SIZE_MAX;
+  uint32_t active_idx = UINT32_MAX;
 
-  pending.fd = -1;
   // The BufChannel owns the ByteChannel, which owns the fd.
   if (bufch_stdio_openfd_init(&pending.bc, cfd, cfd) != OK) {
     return ERR;
@@ -952,7 +1060,7 @@ static int broker_do_handshake(Broker *b, int cfd) {
     }
 
     BrokerMcpSession *idle_sess =
-        (BrokerMcpSession *)parr_at(b->idle_sessions, (size_t)idle_idx);
+        (BrokerMcpSession *)parr_at(b->idle_sessions, (uint32_t)idle_idx);
     if (!idle_sess) {
       status = HS_ERR_INTERNAL;
       goto send_n_close;
@@ -962,7 +1070,7 @@ static int broker_do_handshake(Broker *b, int cfd) {
     int exp = broker_session_is_expired(idle_sess, now, b->idle_ttl_secs,
                                         b->abs_ttl_secs);
     if (exp == YES) {
-      parr_drop_swap(b->idle_sessions, (size_t)idle_idx);
+      parr_drop_swap(b->idle_sessions, (uint32_t)idle_idx);
       status = HS_ERR_TOKEN_EXPIRED;
       goto send_n_close;
     }
@@ -976,6 +1084,16 @@ static int broker_do_handshake(Broker *b, int cfd) {
       goto send_n_close;
     }
 
+    // Normalize token-state before ownership transfer to keep idle slot valid
+    // if any later step fails.
+    assert(broker_session_token_state_ok(idle_sess) == YES);
+    if (broker_session_token_state_ok(idle_sess) != YES) {
+      status = HS_ERR_INTERNAL;
+      parr_drop_swap(b->idle_sessions, (uint32_t)idle_idx);
+      TLOG("ERROR - found one half-initialized idle session.");
+      goto send_n_close;
+    }
+
     // we rotate new token on successful resume
     if (fill_random(out_token, RESUME_TOKEN_LEN) != OK) {
       status = HS_ERR_INTERNAL;
@@ -984,19 +1102,23 @@ static int broker_do_handshake(Broker *b, int cfd) {
 
     active_idx =
         sessions_add_from_pending(b->active_sessions, &pending, &active_sess);
-    if (active_idx == SIZE_MAX || !active_sess) {
+    if (active_idx == UINT32_MAX || !active_sess) {
       status = HS_ERR_INTERNAL;
       goto send_n_close;
     }
     memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
     active_sess->generation = idle_sess->generation;
+    active_sess->arena = idle_sess->arena;
     active_sess->db_stores = idle_sess->db_stores;
-    idle_sess->db_stores = NULL;
     active_sess->created_at = resume_created_at;
     active_sess->last_active = now;
 
+    // idle session lost owenership of these entities
+    idle_sess->arena = (PlArena){0};
+    idle_sess->db_stores = NULL;
+
     // Remove stale idle record.
-    parr_drop_swap(b->idle_sessions, (size_t)idle_idx);
+    parr_drop_swap(b->idle_sessions, (uint32_t)idle_idx);
     status = HS_OK;
   } else {
     // New session
@@ -1018,13 +1140,16 @@ static int broker_do_handshake(Broker *b, int cfd) {
 
     active_idx =
         sessions_add_from_pending(b->active_sessions, &pending, &active_sess);
-    if (active_idx == SIZE_MAX || !active_sess) {
+    if (active_idx == UINT32_MAX || !active_sess) {
       status = HS_ERR_INTERNAL;
       goto send_n_close;
     }
     memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
     active_sess->generation = 0;
-    // db_stores is lazily created on first sensitive-token usage.
+    if (broker_session_token_state_init(active_sess) != OK) {
+      status = HS_ERR_INTERNAL;
+      goto send_n_close;
+    }
     active_sess->created_at = now;
     active_sess->last_active = now;
     status = HS_OK;
@@ -1032,12 +1157,12 @@ static int broker_do_handshake(Broker *b, int cfd) {
 
 send_n_close: {
   BrokerMcpSession *resp_sess =
-      (active_idx != SIZE_MAX && active_sess) ? active_sess : &pending;
+      (active_idx != UINT32_MAX && active_sess) ? active_sess : &pending;
   const uint8_t *resp_token = (status == HS_OK) ? out_token : NULL;
   if (broker_write_handshake_resp(resp_sess, status, resp_token,
                                   b->idle_ttl_secs, b->abs_ttl_secs) != OK) {
     // close whichever session object owns the channel at this point
-    if (active_idx != SIZE_MAX) {
+    if (active_idx != UINT32_MAX) {
       parr_drop_swap(b->active_sessions, active_idx);
     } else {
       bufch_clean(&pending.bc);
@@ -1048,7 +1173,7 @@ send_n_close: {
 }
 
   if (status != HS_OK) {
-    if (active_idx != SIZE_MAX) {
+    if (active_idx != UINT32_MAX) {
       parr_drop_swap(b->active_sessions, active_idx);
     } else {
       bufch_clean(&pending.bc);
@@ -1124,7 +1249,7 @@ int broker_run(Broker *b) {
     pfds[0].events = POLLIN;
 
     for (size_t i = 0; i < nsessions; i++) {
-      BrokerMcpSession *sess = parr_at(b->active_sessions, i);
+      BrokerMcpSession *sess = parr_at(b->active_sessions, (uint32_t)i);
       if (!sess)
         continue;
       pfds[1 + i].fd = sess->fd;
@@ -1148,13 +1273,14 @@ int broker_run(Broker *b) {
       // squash the next structures and fills the empty slot of the
       // removed session
       if (pfd->revents & (POLLHUP | POLLERR | POLLNVAL)) {
-        session_move_to_idle(b->active_sessions, b->idle_sessions, i);
+        session_move_to_idle(b->active_sessions, b->idle_sessions,
+                             (uint32_t)i);
         nsessions--;
         continue;
       }
 
       if (pfd->revents & POLLIN) {
-        BrokerMcpSession *sess = parr_at(b->active_sessions, i);
+        BrokerMcpSession *sess = parr_at(b->active_sessions, (uint32_t)i);
 
         StrBuf req;
         sb_init(&req);
@@ -1166,7 +1292,7 @@ int broker_run(Broker *b) {
           TLOG("ERROR - drop client: frame_read_len rc=%d len=%zu", rr,
                req.len);
           sb_clean(&req);
-          parr_drop_swap(b->active_sessions, i);
+          parr_drop_swap(b->active_sessions, (uint32_t)i);
           nsessions--;
           continue;
         }
@@ -1190,7 +1316,7 @@ int broker_run(Broker *b) {
           // Something bad happend, drop client
           fprintf(stderr, "Broker: request handling failed\n");
           sb_clean(&req);
-          parr_drop_swap(b->active_sessions, i);
+          parr_drop_swap(b->active_sessions, (uint32_t)i);
           nsessions--;
           continue;
         }
@@ -1206,7 +1332,7 @@ int broker_run(Broker *b) {
           TLOG("ERROR - drop client: failed to write response");
           sb_clean(&req);
           qr_destroy(q_res);
-          parr_drop_swap(b->active_sessions, i);
+          parr_drop_swap(b->active_sessions, (uint32_t)i);
           nsessions--;
           continue;
         }

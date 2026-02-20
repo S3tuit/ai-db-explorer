@@ -100,6 +100,21 @@ static void test_hash_bytes_edge_cases(void) {
   ASSERT_TRUE(h_bin_1 == h_bin_2);
 }
 
+static void test_hash_bytes_with_seed_edge_cases(void) {
+  const char *s = "alpha";
+  uint64_t h1 = ht_hash_bytes_withSeed(s, 5, 123u);
+  uint64_t h2 = ht_hash_bytes_withSeed(s, 5, 123u);
+  uint64_t h3 = ht_hash_bytes_withSeed(s, 5, 124u);
+  ASSERT_TRUE(h1 != 0);
+  ASSERT_TRUE(h1 == h2);
+  ASSERT_TRUE(h1 != h3);
+
+  uint64_t h_empty_1 = ht_hash_bytes_withSeed("", 0, 77u);
+  uint64_t h_empty_2 = ht_hash_bytes_withSeed(NULL, 0, 77u);
+  ASSERT_TRUE(h_empty_1 != 0);
+  ASSERT_TRUE(h_empty_1 == h_empty_2);
+}
+
 static void test_basic_put_get(void) {
   HashTable *ht = ht_create();
   ASSERT_TRUE(ht != NULL);
@@ -329,6 +344,7 @@ static void test_invalid_inputs(void) {
 
 int main(void) {
   test_hash_bytes_edge_cases();
+  test_hash_bytes_with_seed_edge_cases();
   test_basic_put_get();
   test_byte_keys_binary_and_empty();
   test_update_existing_key();

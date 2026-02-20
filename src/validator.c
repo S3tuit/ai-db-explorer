@@ -135,14 +135,17 @@ static int vq_out_reset(ValidateQueryOut *out) {
 static int validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
                                            const QirColRef *cr,
                                            ValidatorPlan *plan,
-                                           const char **out_id) {
+                                           const char **out_id,
+                                           uint32_t *out_id_len) {
   assert(ctx != NULL);
   assert(q != NULL);
   assert(cr != NULL);
   assert(plan != NULL);
   assert(out_id != NULL);
+  assert(out_id_len != NULL);
 
   *out_id = NULL;
+  *out_id_len = 0;
 
   const QirFromItem *fi = find_from_alias(q, cr->qualifier.name);
   if (!fi || fi->kind != QIR_FROM_BASE_REL) {
@@ -180,6 +183,7 @@ static int validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
   }
 
   *out_id = dst;
+  *out_id_len = (uint32_t)need;
   return OK;
 }
 
@@ -206,11 +210,12 @@ static int validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
     }
 
     ValidatorColPlan *slot = NULL;
-    size_t idx = parr_emplace(out_plan->cols, (void **)&slot);
-    if (idx == SIZE_MAX || !slot)
+    uint32_t idx = parr_emplace(out_plan->cols, (void **)&slot);
+    if (idx == UINT32_MAX || !slot)
       return ERR;
     slot->kind = VCOL_OUT_PLAINTEXT;
     slot->col_id = NULL;
+    slot->col_id_len = 0;
 
     if (si->value->kind != QIR_EXPR_COLREF)
       continue;
@@ -226,12 +231,14 @@ static int validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
       continue;
 
     const char *col_id = NULL;
+    uint32_t col_id_len = 0;
     if (validator_make_sensitive_col_id(ctx, q, &si->value->u.colref, out_plan,
-                                        &col_id) != OK) {
+                                        &col_id, &col_id_len) != OK) {
       return ERR;
     }
     slot->kind = VCOL_OUT_TOKEN;
     slot->col_id = col_id;
+    slot->col_id_len = col_id_len;
   }
 
   return OK;

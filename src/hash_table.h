@@ -29,12 +29,11 @@ typedef int (*HtEqFn)(const void *a, const void *b, void *ctx);
  * functions signals an error, however, we skip the 0 check in this func because
  * it's near impossible that it'll return exactly 0.
  */
-uint64_t inline ht_hash_bytes(const void *data, size_t len);
+uint64_t ht_hash_bytes(const void *data, size_t len);
 
-/* Same as 'ht_hash_bytes' but uses a caller-defined 'seed'. Usefull to create
+/* Same as 'ht_hash_bytes' but uses a caller-defined 'seed'. Useful to create
  * one hash from 2+ non contiguos values. */
-uint64_t inline ht_hash_bytes_withSeed(const void *key, size_t len,
-                                       uint64_t seed);
+uint64_t ht_hash_bytes_withSeed(const void *key, size_t len, uint64_t seed);
 
 /* Allocates a caller-owned hash table with default capacity.
  * Ownership: caller owns the returned table and must call ht_destroy().
