@@ -24,20 +24,6 @@ int mcp_id_init_str_copy(McpId *id, const char *s) {
   return OK;
 }
 
-/* Deep-copies 'src' into 'dst'. Ownership: allocates when src is string.
- * Returns OK/ERR. */
-int mcp_id_copy(McpId *dst, const McpId *src) {
-  if (!dst || !src)
-    return ERR;
-  if (src->kind == MCP_ID_INT) {
-    mcp_id_init_u32(dst, src->u32);
-    return OK;
-  }
-  if (!src->str)
-    return ERR;
-  return mcp_id_init_str_copy(dst, src->str);
-}
-
 /* Releases any owned memory inside 'id'. Safe to call multiple times. */
 void mcp_id_clean(McpId *id) {
   if (!id)

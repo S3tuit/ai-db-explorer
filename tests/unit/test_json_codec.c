@@ -48,7 +48,7 @@ encode_jsonrpc_impl(const McpId *id, uint32_t ncols, uint32_t nrows,
       qr_create_ok(id, ncols, nrows, result_truncated, max_query_bytes);
   ASSERT_TRUE_AT(qr != NULL, file, line);
   QueryResultBuilder qb = {0};
-  ASSERT_TRUE_AT(qb_init(&qb, qr, NULL, NULL, 0) == OK, file, line);
+  ASSERT_TRUE_AT(qb_init(&qb, qr, NULL) == OK, file, line);
 
   qr->exec_ms = exec_ms;
 
@@ -131,7 +131,7 @@ static void test_json_null_qrcolumn_safe_defaults(void) {
   QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
   QueryResultBuilder qb = {0};
-  ASSERT_TRUE(qb_init(&qb, qr, NULL, NULL, 0) == OK);
+  ASSERT_TRUE(qb_init(&qb, qr, NULL) == OK);
 
   qr->exec_ms = 42;
 

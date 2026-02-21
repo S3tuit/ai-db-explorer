@@ -74,7 +74,7 @@ static DbBackend *pg_connect_impl(const SafetyPolicy *policy, const char *file,
 static QueryResult *pg_exec_impl(DbBackend *pg, const char *sql,
                                  const char *file, int line) {
   QueryResult *qr = NULL;
-  int rc = db_exec(pg, sql, &qr);
+  int rc = db_exec(pg, sql, NULL, &qr);
 
   /* Contract: backend returns OK and always produces a QueryResult (OK or
    * ERROR) */

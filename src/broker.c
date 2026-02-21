@@ -691,7 +691,13 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
     goto free_n_return;
   }
 
-  if (db_exec(cv.db, query, out_query) != OK) {
+  QueryResultBuildPolicy qb_policy = {
+      .plan = &vout.plan,
+      .store = store,
+      .generation = sess->generation,
+  };
+
+  if (db_exec(cv.db, query, &qb_policy, out_query) != OK) {
     vq_out_clean(&vout);
     TLOG("ERROR - error while communicating with %s", conn_name);
     *out_query = qr_create_tool_err(
@@ -699,7 +705,7 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
     goto free_n_return;
   }
   // db_exec leaves the id zeroed; stamp it with the request id
-  if (mcp_id_copy(&(*out_query)->id, id) != OK) {
+  if (qr_set_id(*out_query, id) != OK) {
     qr_destroy(*out_query);
     vq_out_clean(&vout);
     *out_query = NULL;
@@ -1273,8 +1279,7 @@ int broker_run(Broker *b) {
       // squash the next structures and fills the empty slot of the
       // removed session
       if (pfd->revents & (POLLHUP | POLLERR | POLLNVAL)) {
-        session_move_to_idle(b->active_sessions, b->idle_sessions,
-                             (uint32_t)i);
+        session_move_to_idle(b->active_sessions, b->idle_sessions, (uint32_t)i);
         nsessions--;
         continue;
       }

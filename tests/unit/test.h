@@ -4,7 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "conn_catalog.h"
+#include "postgres_backend.h"
 #include "utils.h"
+#include "validator.h"
 
 /* -------------------------------- ASSERTIONS ----------------------------- */
 #define ASSERT_TRUE_AT(cond, file, line)                                       \
@@ -30,52 +33,41 @@
 
 #define ASSERT_STREQ(a, b) ASSERT_STREQ_AT(a, b, __FILE__, __LINE__)
 
-/* ----------------------------- IN-MEMORY I/O -------------------------------
- */
+/* ----------------------------- IN-MEMORY I/O ----------------------------- */
 
 /* Creates a memfile with the 'input' content and asserts it's being created. */
-FILE *memfile_impl(const char *input, const char *file, int line) {
-  (void)file;
-  (void)line;
-#if defined(_GNU_SOURCE)
-  FILE *f = fmemopen((void *)input, strlen(input), "r");
-  ASSERT_TRUE_AT(f != NULL, file, line);
-  return f;
-#else
-  /* portable fallback: tmpfile */
-  FILE *f = tmpfile();
-  if (!f)
-    return NULL;
-  fwrite(input, 1, strlen(input), f);
-  fflush(f);
-  fseek(f, 0, SEEK_SET);
-  ASSERT_TRUE_AT(f != NULL, file, line);
-  return f;
-#endif
-}
+FILE *memfile_impl(const char *input, const char *file, int line);
 #define MEMFILE_IN(input) memfile_impl((input), __FILE__, __LINE__)
 
 /* Output a memfile with write+read permission. */
-FILE *memfile_out_impl(const char *file, int line) {
-  FILE *f = tmpfile();
-  ASSERT_TRUE_AT(f != NULL, file, line);
-  return f;
-}
+FILE *memfile_out_impl(const char *file, int line);
 #define MEMFILE_OUT() memfile_out_impl(__FILE__, __LINE__)
 
 /* Returns a pointer to a buffer with all the bytes of 'f'. Caller should free
  * the returned pointer. */
-char *read_all(FILE *f) {
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  ASSERT_TRUE(sz >= 0);
+char *read_all(FILE *f);
 
-  char *buf = xmalloc((size_t)sz + 1);
+/* --------------------------------- HELPERS ------------------------------- */
 
-  size_t n = fread(buf, 1, (size_t)sz, f);
-  buf[n] = '\0';
-  return buf;
-}
+/* Writes JSON content to a temp file and returns its path.
+ * Caller owns the returned path string and must unlink it. */
+char *write_tmp_config(const char *json);
+
+/* Builds a catalog with the test policy and returns it.
+ * Ownership: caller owns the catalog and must destroy it. */
+ConnCatalog *load_test_catalog(void);
+
+/* Builds one minimal ConnProfile.
+ * It returns a stack value that borrows 'connection_name'.
+ * Side effects: none.
+ * Error semantics: none (test helper).
+ */
+ConnProfile make_profile(const char *connection_name,
+                         SafetyColumnStrategy mode);
+
+/* Runs 'sql' against a pre-defined ConnCatalog and populates 'out'.
+ * Propagates validate_query() return value to caller. Caller must call
+ * vq_out_clean on 'out'. */
+int get_validate_query_out(ValidateQueryOut *out, char *sql);
 
 #endif

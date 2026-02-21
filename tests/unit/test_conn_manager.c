@@ -58,9 +58,12 @@ static void fake_destroy(DbBackend *db) {
  * Side effects: none.
  * Error semantics: always returns ERR because these tests don't execute SQL.
  */
-static int fake_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
+static int fake_exec(DbBackend *db, const char *sql,
+                     const QueryResultBuildPolicy *qb_policy,
+                     QueryResult **out_qr) {
   (void)db;
   (void)sql;
+  (void)qb_policy;
   (void)out_qr;
   return ERR;
 }

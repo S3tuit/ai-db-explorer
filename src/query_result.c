@@ -114,6 +114,27 @@ static int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
   return YES;
 }
 
+int qr_set_id(QueryResult *qr, const McpId *id) {
+  if (!qr || !id)
+    return ERR;
+
+  McpId tmp = {0};
+  if (id->kind == MCP_ID_INT) {
+    mcp_id_init_u32(&tmp, id->u32);
+  } else if (id->kind == MCP_ID_STR) {
+    if (!id->str)
+      return ERR;
+    if (mcp_id_init_str_copy(&tmp, id->str) != OK)
+      return ERR;
+  } else {
+    return ERR;
+  }
+
+  mcp_id_clean(&qr->id);
+  qr->id = tmp;
+  return OK;
+}
+
 QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
                           uint8_t result_truncated, uint64_t max_query_bytes) {
   QueryResult *qr = xmalloc(sizeof(*qr));
@@ -122,15 +143,14 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
   qr->cols = (QRColumn *)xcalloc(ncols, sizeof(QRColumn));
   qr->cells = (char **)xcalloc(ncells, sizeof(char *));
 
+  qr->id = (McpId){0};
   if (id) {
-    if (mcp_id_copy(&qr->id, id) != OK) {
+    if (qr_set_id(qr, id) != OK) {
       free(qr->cells);
       free(qr->cols);
       free(qr);
       return NULL;
     }
-  } else {
-    qr->id = (McpId){0};
   }
   qr->status = QR_OK;
   qr->ncols = ncols;
@@ -149,13 +169,12 @@ static QueryResult *qr_create_err_impl(const McpId *id, QRStatus status,
                                        QrErrorCode code, const char *err_msg) {
   QueryResult *qr = xmalloc(sizeof(*qr));
 
+  qr->id = (McpId){0};
   if (id) {
-    if (mcp_id_copy(&qr->id, id) != OK) {
+    if (qr_set_id(qr, id) != OK) {
       free(qr);
       return NULL;
     }
-  } else {
-    qr->id = (McpId){0};
   }
   qr->status = status;
   qr->exec_ms = 0;
@@ -224,14 +243,20 @@ void qr_destroy(QueryResult *qr) {
   free(qr);
 }
 
-int qb_init(QueryResultBuilder *qb, QueryResult *qr, const ValidatorPlan *plan,
-            DbTokenStore *store, uint32_t generation) {
+int qb_init(QueryResultBuilder *qb, QueryResult *qr,
+            const QueryResultBuildPolicy *policy) {
   if (!qb || !qr)
     return ERR;
   qb->qr = qr;
-  qb->plan = plan;
-  qb->store = store;
-  qb->generation = generation;
+  if (policy) {
+    qb->plan = policy->plan;
+    qb->store = policy->store;
+    qb->generation = policy->generation;
+  } else {
+    qb->plan = NULL;
+    qb->store = NULL;
+    qb->generation = 0;
+  }
   return OK;
 }
 

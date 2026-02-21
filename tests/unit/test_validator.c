@@ -9,66 +9,6 @@
 #include "test.h"
 #include "validator.h"
 
-/* Writes JSON content to a temp file and returns its path.
- * Caller owns the returned path string and must unlink it. */
-static char *write_tmp_config(const char *json) {
-  char tmpl[] = "/tmp/adbxcfgXXXXXX";
-  int fd = mkstemp(tmpl);
-  ASSERT_TRUE(fd >= 0);
-
-  size_t len = strlen(json);
-  ssize_t n = write(fd, json, len);
-  ASSERT_TRUE(n == (ssize_t)len);
-  close(fd);
-
-  return strdup(tmpl);
-}
-
-/* Builds a catalog with the test policy and returns it.
- * Ownership: caller owns the catalog and must destroy it. */
-static ConnCatalog *load_test_catalog(void) {
-  const char *json = "{"
-                     "  \"version\": \"1.0\","
-                     "  \"safetyPolicy\": {"
-                     "    \"columnPolicy\": {"
-                     "      \"mode\": \"pseudonymize\","
-                     "      \"strategy\": \"deterministic\""
-                     "    }"
-                     "  },"
-                     "  \"databases\": ["
-                     "    {"
-                     "      \"type\": \"postgres\","
-                     "      \"connectionName\": \"TestDb\","
-                     "      \"host\": \"localhost\","
-                     "      \"port\": 5432,"
-                     "      \"username\": \"postgres\","
-                     "      \"database\": \"postgres\","
-                     "      \"safeFunctions\": ["
-                     "        \"users.calc_balance\","
-                     "        \"transfer_amount\""
-                     "      ],"
-                     "      \"sensitiveColumns\": ["
-                     "        \"users.fiscal_code\","
-                     "        \"users.card_code\","
-                     "        \"private.cards.balance\","
-                     "        \"expenses.receiver\""
-                     "      ]"
-                     "    }"
-                     "  ]"
-                     "}";
-
-  char *path = write_tmp_config(json);
-  char *err = NULL;
-  ConnCatalog *cat = catalog_load_from_file(path, &err);
-  ASSERT_TRUE(cat != NULL);
-  ASSERT_TRUE(err == NULL);
-  free(err);
-
-  unlink(path);
-  free(path);
-  return cat;
-}
-
 /* Runs a single validation and checks for accept/reject + error code.
  * Side effects: initializes and cleans one request-scoped validator output. */
 static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
@@ -138,6 +78,97 @@ static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
 #define ASSERT_VALIDATE_MSG(db, cp, policy, sql, ok, code, substr)             \
   assert_validate_at((db), (cp), (sql), (ok), (code), (substr), __FILE__,      \
                      __LINE__)
+
+/* Runs one validation expected to succeed and checks full ValidatorPlan shape.
+ * It borrows all inputs and owns temporary ValidateQueryOut for this call.
+ */
+static void assert_validate_plan_at(DbBackend *db, const ConnProfile *cp,
+                                    const char *sql,
+                                    const ValidatorColOutKind *exp_kinds,
+                                    const char *const *exp_col_ids,
+                                    uint32_t exp_ncols, const char *file,
+                                    int line) {
+  ValidateQueryOut out = {0};
+  ASSERT_TRUE_AT(vq_out_init(&out) == OK, file, line);
+
+  ValidatorRequest req = {
+      .db = db,
+      .profile = cp,
+      .sql = sql,
+  };
+
+  int rc = validate_query(&req, &out);
+  if (rc != OK) {
+    fprintf(stderr, "validate_query failed: code=%d msg=", (int)out.err.code);
+    if (out.err.msg.data && out.err.msg.len > 0) {
+      fprintf(stderr, "%.*s", (int)out.err.msg.len, out.err.msg.data);
+    } else {
+      fprintf(stderr, "(null)");
+    }
+    fprintf(stderr, "\n");
+  }
+  ASSERT_TRUE_AT(rc == OK, file, line);
+  ASSERT_TRUE_AT(out.err.code == VERR_NONE, file, line);
+  ASSERT_TRUE_AT(out.plan.cols != NULL, file, line);
+  ASSERT_TRUE_AT(parr_len(out.plan.cols) == exp_ncols, file, line);
+
+  for (uint32_t i = 0; i < exp_ncols; i++) {
+    const ValidatorColPlan *col =
+        (const ValidatorColPlan *)parr_cat(out.plan.cols, i);
+    ASSERT_TRUE_AT(col != NULL, file, line);
+    ASSERT_TRUE_AT(col->kind == exp_kinds[i], file, line);
+
+    if (exp_kinds[i] == VCOL_OUT_PLAINTEXT) {
+      ASSERT_TRUE_AT(col->col_id == NULL, file, line);
+      ASSERT_TRUE_AT(col->col_id_len == 0, file, line);
+      continue;
+    }
+
+    ASSERT_TRUE_AT(col->col_id != NULL, file, line);
+    ASSERT_TRUE_AT(col->col_id_len > 0, file, line);
+    ASSERT_TRUE_AT(strlen(col->col_id) == col->col_id_len, file, line);
+    if (exp_col_ids && exp_col_ids[i]) {
+      ASSERT_TRUE_AT(strcmp(col->col_id, exp_col_ids[i]) == 0, file, line);
+    }
+  }
+
+  vq_out_clean(&out);
+}
+#define ASSERT_VALIDATE_PLAN(db, cp, sql, exp_kinds, exp_ids, exp_ncols)       \
+  assert_validate_plan_at((db), (cp), (sql), (exp_kinds), (exp_ids),           \
+                          (exp_ncols), __FILE__, __LINE__)
+
+/* Runs one validation expected to fail and asserts that the output plan is
+ * empty after failure.
+ * It borrows all inputs and owns temporary ValidateQueryOut for this call.
+ * Side effects: executes validate_query() and allocates/frees per-call output.
+ * Error semantics: test helper (asserts on mismatch and does not return ERR).
+ */
+static void assert_validate_reject_empty_plan_at(DbBackend *db,
+                                                 const ConnProfile *cp,
+                                                 const char *sql,
+                                                 ValidatorErrCode expect_code,
+                                                 const char *file, int line) {
+  ValidateQueryOut out = {0};
+  ASSERT_TRUE_AT(vq_out_init(&out) == OK, file, line);
+
+  ValidatorRequest req = {
+      .db = db,
+      .profile = cp,
+      .sql = sql,
+  };
+
+  int rc = validate_query(&req, &out);
+  ASSERT_TRUE_AT(rc == ERR, file, line);
+  ASSERT_TRUE_AT(out.err.code == expect_code, file, line);
+  ASSERT_TRUE_AT(out.plan.cols != NULL, file, line);
+  ASSERT_TRUE_AT(parr_len(out.plan.cols) == 0, file, line);
+
+  vq_out_clean(&out);
+}
+#define ASSERT_VALIDATE_REJECT_EMPTY_PLAN(db, cp, sql, code)                   \
+  assert_validate_reject_empty_plan_at((db), (cp), (sql), (code), __FILE__,    \
+                                       __LINE__)
 
 /* Basic validation cases for the policy rules and error codes. */
 static void test_validator_accepts(void) {
@@ -468,7 +499,10 @@ static void test_validator_from_notes(void) {
   catalog_destroy(cat);
 }
 
-static void test_validator_plan_col_id_len(void) {
+/* Verifies ValidatorPlan output-column mapping for plaintext/token columns,
+ * canonical token identifiers, reset semantics, and failure-plan invariants.
+ */
+static void test_validator_plan(void) {
   ConnCatalog *cat = load_test_catalog();
   ASSERT_TRUE(cat != NULL);
 
@@ -479,34 +513,203 @@ static void test_validator_plan_col_id_len(void) {
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
 
+  // all plaintext
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+    };
+    const char *ids[] = {NULL, NULL, NULL, NULL};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT u.name, u.age, u.eye_color, u.hair_color FROM users u WHERE "
+        "u.id = 1;",
+        kinds, ids, 4);
+  }
+
+  // all plaintext (aggregates with mixed casing)
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+    };
+    const char *ids[] = {NULL, NULL, NULL, NULL};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT u.country, COUNT(*), count(u.name), CounT(*) FROM users u "
+        "INNER "
+        "JOIN expenses e ON e.user_id = u.id WHERE u.status = true GROUP BY "
+        "u.country;",
+        kinds, ids, 4);
+  }
+
+  // one tokenized output (unqualified table)
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_TOKEN,
+        VCOL_OUT_PLAINTEXT,
+    };
+    const char *ids[] = {NULL, "users.fiscal_code", NULL};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT u.eye_color, u.fiscal_code, u.name FROM users u WHERE u.id = "
+        "1 LIMIT 10;",
+        kinds, ids, 3);
+  }
+
+  // one tokenized output (schema-qualified base relation)
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_TOKEN,
+    };
+    const char *ids[] = {NULL, "private.users.fiscal_code"};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT u.eye_color, u.fiscal_code FROM private.users u WHERE u.id = "
+        "1 LIMIT 10;",
+        kinds, ids, 2);
+  }
+
+  // tokenized output from join rhs (private schema)
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_TOKEN,
+    };
+    const char *ids[] = {NULL, NULL, NULL, "private.users.fiscal_code"};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT e.amount, e.date, u.name, u.fiscal_COde FROM expenses e INNER "
+        "JOIN private.users u ON e.user_id = u.id LIMIT 10;",
+        kinds, ids, 4);
+  }
+
+  // tokenized output from secondary join alias (users)
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_TOKEN,
+    };
+    const char *ids[] = {NULL, NULL, NULL, "users.fiscal_code"};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT e.amount, e.date, u2.name, u1.fiscal_COde FROM expenses e "
+        "INNER JOIN private.users u2 ON e.user_id = u2.id INNER JOIN users u1 "
+        "ON u1.id = u2.id LIMIT 10;",
+        kinds, ids, 4);
+  }
+
+  // duplicate sensitive column appears twice in output plan
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_TOKEN,
+        VCOL_OUT_TOKEN,
+    };
+    const char *ids[] = {"users.fiscal_code", "users.fiscal_code"};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT u.fiscal_code, u.fiscal_code FROM users u WHERE u.id = 1 "
+        "LIMIT 10;",
+        kinds, ids, 2);
+  }
+
+  // output alias should not alter canonical source identifier
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_TOKEN,
+        VCOL_OUT_PLAINTEXT,
+    };
+    const char *ids[] = {"users.fiscal_code", NULL};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT u.fiscal_code AS fc, u.name FROM users u WHERE u.id = 1 LIMIT "
+        "10;",
+        kinds, ids, 2);
+  }
+
+  // sensitive outputs from two different configured sources
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_TOKEN,
+        VCOL_OUT_TOKEN,
+    };
+    const char *ids[] = {"users.fiscal_code", "expenses.receiver"};
+    ASSERT_VALIDATE_PLAN(
+        db, cp,
+        "SELECT u.fiscal_code, e.receiver FROM users u INNER JOIN expenses e "
+        "ON e.user_id = u.id LIMIT 10;",
+        kinds, ids, 2);
+  }
+
+  // non-colref SELECT expressions are always plaintext in the plan
+  {
+    const ValidatorColOutKind kinds[] = {
+        VCOL_OUT_PLAINTEXT,
+        VCOL_OUT_PLAINTEXT,
+    };
+    const char *ids[] = {NULL, NULL};
+    ASSERT_VALIDATE_PLAN(
+        db, cp, "SELECT LOWER(u.name), u.name FROM users u WHERE u.id = 1;",
+        kinds, ids, 2);
+  }
+
+  // sensitive mode at LIMIT boundary keeps plaintext output mapping
+  {
+    const ValidatorColOutKind kinds[] = {VCOL_OUT_PLAINTEXT};
+    const char *ids[] = {NULL};
+    ASSERT_VALIDATE_PLAN(
+        db, cp, "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 200;",
+        kinds, ids, 1);
+  }
+
+  // failure paths must not leave partial plan state
+  ASSERT_VALIDATE_REJECT_EMPTY_PLAN(
+      db, cp, "SELECT u.fiscal_code FROM users u;", VERR_LIMIT_REQUIRED);
+  ASSERT_VALIDATE_REJECT_EMPTY_PLAN(
+      db, cp, "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 201;",
+      VERR_LIMIT_EXCEEDS);
+
+  // reuse the same ValidateQueryOut to ensure reset removes old token plan.
   ValidateQueryOut out = {0};
   ASSERT_TRUE(vq_out_init(&out) == OK);
-  ValidatorRequest req = {
+  ValidatorRequest req_token = {
       .db = db,
       .profile = cp,
-      .sql =
-          "SELECT u.fiscal_code, u.name FROM users u WHERE u.fiscal_code = $1 "
-          "LIMIT 10;",
+      .sql = "SELECT u.fiscal_code FROM users u WHERE u.id = 1 LIMIT 10;",
   };
-  ASSERT_TRUE(validate_query(&req, &out) == OK);
+  ASSERT_TRUE(validate_query(&req_token, &out) == OK);
   ASSERT_TRUE(out.err.code == VERR_NONE);
-
   ASSERT_TRUE(out.plan.cols != NULL);
-  ASSERT_TRUE(parr_len(out.plan.cols) == 2);
-
+  ASSERT_TRUE(parr_len(out.plan.cols) == 1);
   const ValidatorColPlan *c0 =
       (const ValidatorColPlan *)parr_cat(out.plan.cols, 0);
-  const ValidatorColPlan *c1 =
-      (const ValidatorColPlan *)parr_cat(out.plan.cols, 1);
   ASSERT_TRUE(c0 != NULL);
-  ASSERT_TRUE(c1 != NULL);
-
   ASSERT_TRUE(c0->kind == VCOL_OUT_TOKEN);
   ASSERT_TRUE(c0->col_id != NULL);
-  ASSERT_TRUE(c0->col_id_len > 0);
-  ASSERT_TRUE(strlen(c0->col_id) == c0->col_id_len);
   ASSERT_STREQ(c0->col_id, "users.fiscal_code");
 
+  ValidatorRequest req_plain = {
+      .db = db,
+      .profile = cp,
+      .sql = "SELECT u.name FROM users u WHERE u.id = 1;",
+  };
+  ASSERT_TRUE(validate_query(&req_plain, &out) == OK);
+  ASSERT_TRUE(out.err.code == VERR_NONE);
+  ASSERT_TRUE(out.plan.cols != NULL);
+  ASSERT_TRUE(parr_len(out.plan.cols) == 1);
+  const ValidatorColPlan *c1 =
+      (const ValidatorColPlan *)parr_cat(out.plan.cols, 0);
+  ASSERT_TRUE(c1 != NULL);
   ASSERT_TRUE(c1->kind == VCOL_OUT_PLAINTEXT);
   ASSERT_TRUE(c1->col_id == NULL);
   ASSERT_TRUE(c1->col_id_len == 0);
@@ -520,7 +723,7 @@ int main(void) {
   test_validator_accepts();
   test_validator_rejects_rules();
   test_validator_from_notes();
-  test_validator_plan_col_id_len();
+  test_validator_plan();
   fprintf(stderr, "OK: test_validator\n");
   return 0;
 }

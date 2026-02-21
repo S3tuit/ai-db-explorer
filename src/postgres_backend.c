@@ -2310,7 +2310,9 @@ static void pg_destroy(DbBackend *db) {
   free(db);
 }
 
-static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
+static int pg_exec(DbBackend *db, const char *sql,
+                   const QueryResultBuildPolicy *qb_policy,
+                   QueryResult **out_qr) {
 
   const char *err_msg;
   QueryResult *qr = NULL;
@@ -2404,7 +2406,7 @@ static int pg_exec(DbBackend *db, const char *sql, QueryResult **out_qr) {
       goto fail;
     }
     QueryResultBuilder qb = {0};
-    if (qb_init(&qb, qr, NULL, NULL, 0) != OK) {
+    if (qb_init(&qb, qr, qb_policy) != OK) {
       pg_set_err(p, "qb_init failed");
       goto fail;
     }

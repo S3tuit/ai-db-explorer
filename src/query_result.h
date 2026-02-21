@@ -78,12 +78,24 @@ typedef struct QueryResultBuilder {
   uint32_t generation;
 } QueryResultBuilder;
 
+/* Optional tokenization policy used while building one QueryResult.
+ * Ownership:
+ * - plan is borrowed and read-only.
+ * - store is borrowed and may be mutated when token values are created.
+ */
+typedef struct QueryResultBuildPolicy {
+  const ValidatorPlan *plan;
+  DbTokenStore *store;
+  uint32_t generation;
+} QueryResultBuildPolicy;
+
 /* Initializes one QueryResultBuilder context.
  * It borrows all inputs; ownership stays with caller.
+ * If 'policy' is NULL, builder stores plaintext values only.
  * Returns OK on success, ERR on invalid input.
  */
-int qb_init(QueryResultBuilder *qb, QueryResult *qr, const ValidatorPlan *plan,
-            DbTokenStore *store, uint32_t generation);
+int qb_init(QueryResultBuilder *qb, QueryResult *qr,
+            const QueryResultBuildPolicy *policy);
 
 /* Copies one column metadata entry into qb->qr at position 'col'.
  * If type is NULL it's stored as "unknown".
@@ -105,6 +117,13 @@ int qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
  */
 int qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
                 const char *value, size_t v_len);
+
+/* Replaces the id stored in 'qr' with a deep copy of 'id'.
+ * It borrows both pointers; any previous id storage in 'qr' is released.
+ * Side effects: may allocate and free memory when ids are string-backed.
+ * Returns OK on success, ERR on invalid input or allocation failure.
+ */
+int qr_set_id(QueryResult *qr, const McpId *id);
 
 /* Creates a QueryResult with allocated storage for cells (all NULL).
  * If 'id' is non-NULL, makes an internal copy (string ids are duplicated).

@@ -6,19 +6,6 @@
 #include "sensitive_tok.h"
 #include "test.h"
 
-/* Builds one minimal ConnProfile for token-store tests.
- * It returns a stack value that borrows 'connection_name'.
- * Side effects: none.
- * Error semantics: none (test helper).
- */
-static ConnProfile make_profile(const char *connection_name,
-                                SafetyColumnStrategy mode) {
-  ConnProfile cp = {0};
-  cp.connection_name = connection_name;
-  cp.safe_policy.column_strategy = mode;
-  return cp;
-}
-
 /* Initializes a bounded arena used by token-store tests.
  * It borrows 'arena' and mutates it in-place.
  * Side effects: allocates first arena block.
@@ -282,7 +269,8 @@ static void test_create_token_null_value_deterministic(void) {
   pl_arena_clean(&arena);
 }
 
-/* Verifies token creation rejects oversized connection names (>CONN_NAME_MAX_LEN). */
+/* Verifies token creation rejects oversized connection names
+ * (>CONN_NAME_MAX_LEN). */
 static void test_create_token_connection_name_too_long(void) {
   PlArena arena = {0};
   init_test_arena(&arena);

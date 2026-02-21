@@ -38,6 +38,7 @@ PG_DUMP_AST_SRC := py_utils/pg_dump_ast.c
 # Unit tests: each tests/unit/test_foo.c -> build/tests/unit/test_foo
 UNIT_TEST_SRC := $(wildcard tests/unit/test_*.c)
 UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
+TEST_HELPER_OBJ := build/tests/unit/test.o
 
 # Integration tests: tests/integration/*/test_foo.c -> build/tests/integration/*/test_foo
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
@@ -98,8 +99,8 @@ build/testobj/%.o: src/%.c
 
 TEST_APP_OBJ := $(APP_SRC:src/%.c=build/testobj/%.o)
 
-# Link each test binary from its test object + sanitized app objects
-build/tests/%: build/tests/%.o $(TEST_APP_OBJ) $(LIBPG_QUERY_LIB)
+# Link each test binary from its test object + shared test helper + sanitized app objects
+build/tests/%: build/tests/%.o $(TEST_HELPER_OBJ) $(TEST_APP_OBJ) $(LIBPG_QUERY_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $^ -o $@ $(TLDFLAGS)
 
