@@ -543,15 +543,26 @@ static void test_jsget_top_level_validation(void) {
   const char *json_extra = "{\"a\":1,\"b\":2,\"c\":3}";
   JsonGetter jg;
   const char *allowed[] = {"a", "b"};
+  JsonStrSpan unknown = {0};
 
   ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
-  ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2) == YES);
+  ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2, &unknown) ==
+              YES);
+  ASSERT_TRUE(unknown.ptr == NULL);
+  ASSERT_TRUE(unknown.len == 0);
 
   ASSERT_TRUE(jsget_init(&jg, json_extra, strlen(json_extra)) == OK);
-  ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2) == NO);
+  ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2, &unknown) ==
+              NO);
+  ASSERT_TRUE(unknown.ptr != NULL);
+  ASSERT_TRUE(unknown.len == 1);
+  ASSERT_TRUE(strncmp(unknown.ptr, "c", 1) == 0);
 
   ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
-  ASSERT_TRUE(jsget_top_level_validation(&jg, "missing", allowed, 2) == NO);
+  ASSERT_TRUE(jsget_top_level_validation(&jg, "missing", allowed, 2,
+                                         &unknown) == NO);
+  ASSERT_TRUE(unknown.ptr == NULL);
+  ASSERT_TRUE(unknown.len == 0);
 }
 
 static void test_jsget_exists_nonnull(void) {

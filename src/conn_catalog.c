@@ -4,6 +4,7 @@
 #include "string_op.h"
 #include "utils.h"
 
+#include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -26,14 +27,15 @@ static inline void str_lower_inplace(char *s) {
 /* Sets an allocated error message once.
  * Ownership: allocates *err_out once; caller must free it.
  * Side effects: heap allocation for the formatted message.
- * Error semantics: returns ERR in all cases; if allocation fails, *err_out
- * remains unchanged.
+ * Error semantics: no return value; if allocation fails, *err_out remains
+ * unchanged.
  */
-static int set_parse_err(char **err_out, const char *fmt, ...) {
-  if (!err_out || !fmt)
-    return ERR;
+static void set_parse_err(char **err_out, const char *fmt, ...) {
+  assert(err_out);
+  assert(fmt);
+
   if (*err_out)
-    return ERR;
+    return;
 
   char buf[512];
   va_list ap;
@@ -41,7 +43,7 @@ static int set_parse_err(char **err_out, const char *fmt, ...) {
   int n = vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   if (n < 0)
-    return ERR;
+    return;
 
   size_t len = (size_t)n;
   if (len >= sizeof(buf))
@@ -49,11 +51,33 @@ static int set_parse_err(char **err_out, const char *fmt, ...) {
 
   char *msg = (char *)malloc(len + 1);
   if (!msg)
-    return ERR;
+    return;
   memcpy(msg, buf, len);
   msg[len] = '\0';
   *err_out = msg;
-  return ERR;
+}
+
+/* Sets an unknown-key parse error using the first offending key when present.
+ * Borrows all inputs, allocates '*err_out'.
+ */
+static void set_parse_unknown_key_err(char **err_out, const char *path_prefix,
+                                      const JsonStrSpan *unknown_key,
+                                      const char *scope_suffix) {
+  assert(path_prefix);
+  assert(scope_suffix);
+
+  char *decoded = NULL;
+  if (unknown_key && unknown_key->ptr && unknown_key->len > 0 &&
+      json_span_decode_alloc(unknown_key, &decoded) == YES && decoded &&
+      decoded[0] != '\0') {
+    set_parse_err(err_out, "%s: unknown key \"%s\" %s.", path_prefix, decoded,
+                  scope_suffix);
+    free(decoded);
+    return;
+  }
+
+  free(decoded);
+  set_parse_err(err_out, "%s: unknown key %s.", path_prefix, scope_suffix);
 }
 
 /* Splits a decoded column path into schema/table/column components.
@@ -195,9 +219,9 @@ static int parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
   if (rc == NO)
     return OK;
   if (rc != YES) {
-    return set_parse_err(err_out,
-                         "%s.sensitiveColumns: expected an array of strings.",
-                         path_prefix);
+    set_parse_err(err_out, "%s.sensitiveColumns: expected an array of strings.",
+                  path_prefix);
+    return ERR;
   }
 
   ColumnRuleTmp *tmp = NULL;
@@ -395,14 +419,15 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
   if (rc == NO)
     return OK;
   if (rc != YES) {
-    return set_parse_err(err_out,
-                         "%s.safeFunctions: expected an array of strings.",
-                         path_prefix);
+    set_parse_err(err_out, "%s.safeFunctions: expected an array of strings.",
+                  path_prefix);
+    return ERR;
   }
 
   if (pl_arena_init(&out->safe_funcs.arena, NULL, NULL) != OK) {
-    return set_parse_err(
-        err_out, "%s.safeFunctions: internal allocation error.", path_prefix);
+    set_parse_err(err_out, "%s.safeFunctions: internal allocation error.",
+                  path_prefix);
+    return ERR;
   }
 
   SafeFuncRuleTmp *tmp = NULL;
@@ -566,14 +591,18 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
   const char *const keys[] = {"readOnly", "statementTimeoutMs",
                               "maxRowReturned", "maxPayloadKiloBytes",
                               "columnPolicy"};
-  if (jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys)) != YES) {
-    return set_parse_err(err_out, "%s: unknown key in object.", path_prefix);
+  JsonStrSpan unknown = {0};
+  if (jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys), &unknown) !=
+      YES) {
+    set_parse_unknown_key_err(err_out, path_prefix, &unknown, "in object");
+    return ERR;
   }
 
   JsonStrSpan ro = {0};
   int rrc = jsget_string_span(jg, "readOnly", &ro);
   if (rrc == ERR) {
-    return set_parse_err(err_out, "%s.readOnly: expected string.", path_prefix);
+    set_parse_err(err_out, "%s.readOnly: expected string.", path_prefix);
+    return ERR;
   }
   if (rrc == YES) {
     if (ro.len == 3 && strncasecmp(ro.ptr, "yes", 3) == 0) {
@@ -581,76 +610,87 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
     } else if (ro.len == 9 && strncasecmp(ro.ptr, "no unsafe", 9) == 0) {
       out->read_only = 0;
     } else {
-      return set_parse_err(err_out,
-                           "%s.readOnly: expected \"yes\" or \"no unsafe\".",
-                           path_prefix);
+      set_parse_err(err_out, "%s.readOnly: expected \"yes\" or \"no unsafe\".",
+                    path_prefix);
+      return ERR;
     }
   }
 
   uint32_t timeout_ms = 0;
   int trc = jsget_u32(jg, "statementTimeoutMs", &timeout_ms);
-  if (trc == ERR)
-    return set_parse_err(err_out, "%s.statementTimeoutMs: expected uint32.",
-                         path_prefix);
+  if (trc == ERR) {
+    set_parse_err(err_out, "%s.statementTimeoutMs: expected uint32.",
+                  path_prefix);
+    return ERR;
+  }
   if (trc == YES)
     out->statement_timeout_ms = timeout_ms;
 
   uint32_t max_rows = 0;
   int mrc = jsget_u32(jg, "maxRowReturned", &max_rows);
-  if (mrc == ERR)
-    return set_parse_err(err_out, "%s.maxRowReturned: expected uint32.",
-                         path_prefix);
+  if (mrc == ERR) {
+    set_parse_err(err_out, "%s.maxRowReturned: expected uint32.", path_prefix);
+    return ERR;
+  }
   if (mrc == YES)
     out->max_rows = max_rows;
 
   uint32_t max_payload_kb = 0;
   int qrc = jsget_u32(jg, "maxPayloadKiloBytes", &max_payload_kb);
-  if (qrc == ERR)
-    return set_parse_err(err_out, "%s.maxPayloadKiloBytes: expected uint32.",
-                         path_prefix);
+  if (qrc == ERR) {
+    set_parse_err(err_out, "%s.maxPayloadKiloBytes: expected uint32.",
+                  path_prefix);
+    return ERR;
+  }
   if (qrc == YES) {
     if (max_payload_kb > (UINT32_MAX / 1024u)) {
-      return set_parse_err(err_out, "%s.maxPayloadKiloBytes: value too large.",
-                           path_prefix);
+      set_parse_err(err_out, "%s.maxPayloadKiloBytes: value too large.",
+                    path_prefix);
+      return ERR;
     }
     out->max_payload_bytes = max_payload_kb * 1024u;
   }
 
   JsonGetter col = {0};
   int crc = jsget_object(jg, "columnPolicy", &col);
-  if (crc == ERR)
-    return set_parse_err(err_out, "%s.columnPolicy: expected object.",
-                         path_prefix);
+  if (crc == ERR) {
+    set_parse_err(err_out, "%s.columnPolicy: expected object.", path_prefix);
+    return ERR;
+  }
   if (crc == YES) {
     const char *const ckeys[] = {"mode", "strategy"};
-    if (jsget_top_level_validation(&col, NULL, ckeys, ARRLEN(ckeys)) != YES) {
-      return set_parse_err(err_out, "%s.columnPolicy: unknown key in object.",
-                           path_prefix);
+    JsonStrSpan c_unknown = {0};
+    if (jsget_top_level_validation(&col, NULL, ckeys, ARRLEN(ckeys),
+                                   &c_unknown) != YES) {
+      char cpol_path[96];
+      snprintf(cpol_path, sizeof(cpol_path), "%s.columnPolicy", path_prefix);
+      set_parse_unknown_key_err(err_out, cpol_path, &c_unknown, "in object");
+      return ERR;
     }
 
     JsonStrSpan mode = {0};
     int mrc2 = jsget_string_span(&col, "mode", &mode);
     if (mrc2 != YES) {
-      return set_parse_err(err_out,
-                           "%s.columnPolicy.mode: expected \"pseudonymize\".",
-                           path_prefix);
+      set_parse_err(err_out, "%s.columnPolicy.mode: expected \"pseudonymize\".",
+                    path_prefix);
+      return ERR;
     }
     if (!(mode.len == strlen("pseudonymize") &&
           strncasecmp(mode.ptr, "pseudonymize", mode.len) == 0)) {
-      return set_parse_err(err_out,
-                           "%s.columnPolicy.mode: expected \"pseudonymize\".",
-                           path_prefix);
+      set_parse_err(err_out, "%s.columnPolicy.mode: expected \"pseudonymize\".",
+                    path_prefix);
+      return ERR;
     }
     out->column_mode = SAFETY_COLMODE_PSEUDONYMIZE;
 
     JsonStrSpan strat = {0};
     int src = jsget_string_span(&col, "strategy", &strat);
     if (src != YES) {
-      return set_parse_err(
-          err_out,
-          "%s.columnPolicy.strategy: expected \"deterministic\" or "
-          "\"randomized\".",
-          path_prefix);
+      set_parse_err(err_out,
+                    "%s.columnPolicy.strategy: expected \"deterministic\" or "
+                    "\"randomized\".",
+                    path_prefix);
+      return ERR;
     }
 
     if (strat.len == strlen("deterministic") &&
@@ -660,11 +700,11 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
                strncasecmp(strat.ptr, "randomized", strat.len) == 0) {
       out->column_strategy = SAFETY_COLSTRAT_RANDOMIZED;
     } else {
-      return set_parse_err(
-          err_out,
-          "%s.columnPolicy.strategy: expected \"deterministic\" or "
-          "\"randomized\".",
-          path_prefix);
+      set_parse_err(err_out,
+                    "%s.columnPolicy.strategy: expected \"deterministic\" or "
+                    "\"randomized\".",
+                    path_prefix);
+      return ERR;
     }
   }
 
@@ -701,10 +741,11 @@ static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
       "type",          "connectionName", "host",    "port",
       "username",      "database",       "options", "sensitiveColumns",
       "safeFunctions", "safetyPolicy"};
-  int vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys));
+  JsonStrSpan unknown = {0};
+  int vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys), &unknown);
   if (vrc != YES) {
-    return set_parse_err(err_out, "%s: unknown key in database entry.",
-                         db_path);
+    set_parse_unknown_key_err(err_out, db_path, &unknown, "in database entry");
+    return ERR;
   }
 
   char *type = NULL;
@@ -821,18 +862,20 @@ static int parse_databases(const JsonGetter *jg, ConnCatalog *cat,
   JsonArrIter it;
   int rc = jsget_array_objects_begin(jg, "databases", &it);
   if (rc != YES) {
-    return set_parse_err(err_out, "$.databases: expected array of objects.");
+    set_parse_err(err_out, "$.databases: expected array of objects.");
+    return ERR;
   }
 
   if (it.count <= 0) {
-    return set_parse_err(err_out,
-                         "$.databases: at least one entry is required.");
+    set_parse_err(err_out, "$.databases: at least one entry is required.");
+    return ERR;
   }
 
   if (it.count < 0 || (size_t)it.count > CONFIG_MAX_CONNECTIONS) {
-    return set_parse_err(
+    set_parse_err(
         err_out,
         "$.databases: too many entries (exceeds configured connection cap).");
+    return ERR;
   }
 
   size_t n = (size_t)it.count;
@@ -928,9 +971,10 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
 
   // make sure these 2 objects are present in the config file
   const char *const root_keys[] = {"version", "safetyPolicy", "databases"};
-  if (jsget_top_level_validation(&jg, NULL, root_keys, ARRLEN(root_keys)) !=
-      YES) {
-    set_parse_err(&err_msg, "$: unknown key at top level.");
+  JsonStrSpan root_unknown = {0};
+  if (jsget_top_level_validation(&jg, NULL, root_keys, ARRLEN(root_keys),
+                                 &root_unknown) != YES) {
+    set_parse_unknown_key_err(&err_msg, "$", &root_unknown, "at top level");
     goto error;
   }
 

@@ -220,6 +220,8 @@ static void test_policy_legacy_payload_key_fails(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat == NULL);
   ASSERT_TRUE(err != NULL);
+  ASSERT_TRUE(
+      strstr(err, "unknown key \"maxQueryKiloBytes\" in object") != NULL);
 
   free(err);
   unlink(path);
@@ -276,6 +278,8 @@ static void test_db_entry_unknown_key_fails(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat == NULL);
   ASSERT_TRUE(err != NULL);
+  ASSERT_TRUE(strstr(err, "unknown key \"unknownKey\" in database entry") !=
+              NULL);
 
   free(err);
   unlink(path);
@@ -344,6 +348,7 @@ static void test_db_safety_policy_unknown_key_fails(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat == NULL);
   ASSERT_TRUE(err != NULL);
+  ASSERT_TRUE(strstr(err, "unknown key \"unknown\" in object") != NULL);
 
   free(err);
   unlink(path);

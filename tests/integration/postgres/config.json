@@ -27,7 +27,17 @@
       "host": "db",
       "port": 5432,
       "username": "my_user",
-      "database": "my_db"
+      "database": "my_db",
+      "safetyPolicy": {
+        "columnPolicy": {
+          "mode": "pseudonymize",
+          "strategy": "randomized"
+        }
+      },
+      "sensitiveColumns": [
+        "zfighter_intel.scouter_serial",
+        "zfighter_intel.home_coordinates"
+      ]
     },
     {
       "type": "postgres",

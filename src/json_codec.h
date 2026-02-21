@@ -205,8 +205,11 @@ int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
 
 /* Makes sure the json object identified by 'obj_key' only contains the
  * 'allowed' top-level keys. If obj_key is NULL, the root object is used.
+ * When the function returns NO because of an unknown key and
+ * 'out_unknown_key' is non-NULL, it writes the first unknown key span there.
  * Returns YES/NO/ERR. */
 int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
-                               const char *const *allowed, size_t n_allowed);
+                               const char *const *allowed, size_t n_allowed,
+                               JsonStrSpan *out_unknown_key);
 
 #endif

@@ -1415,9 +1415,14 @@ int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
 }
 
 int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
-                               const char *const *allowed, size_t n_allowed) {
+                               const char *const *allowed, size_t n_allowed,
+                               JsonStrSpan *out_unknown_key) {
   if (!jg || !allowed)
     return ERR;
+  if (out_unknown_key) {
+    out_unknown_key->ptr = NULL;
+    out_unknown_key->len = 0;
+  }
 
   int obj_idx = jg->root;
   if (obj_key) {
@@ -1450,8 +1455,13 @@ int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
         break;
       }
     }
-    if (!ok)
+    if (!ok) {
+      if (out_unknown_key) {
+        out_unknown_key->ptr = jg->json + tkey->start;
+        out_unknown_key->len = (size_t)(tkey->end - tkey->start);
+      }
       return NO;
+    }
 
     int val_i = i + 1;
     int next = skip_token(jg->toks, jg->ntok, val_i);
