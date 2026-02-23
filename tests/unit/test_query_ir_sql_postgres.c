@@ -125,6 +125,25 @@ static void test_pg_in_list_params(void) {
   qir_handle_destroy(&h);
 }
 
+/* 2b. Param $0 is emitted by Postgres AST without ParamRef.number, so the
+ * parser must omit the predicate from QIR; later validation rejects the query.
+ */
+static void test_pg_param_zero_omitted_number(void) {
+  const char *sql = "SELECT p.id AS pid "
+                    "FROM private.people AS p "
+                    "WHERE p.region = $0 "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->where == NULL);
+
+  qir_handle_destroy(&h);
+}
+
 /* 3. DISTINCT ON. */
 static void test_pg_distinct_on(void) {
   const char *sql =
@@ -373,6 +392,7 @@ static void test_pg_bitwise_op_rejected(void) {
 int main(void) {
   test_pg_params_predicates();
   test_pg_in_list_params();
+  test_pg_param_zero_omitted_number();
   test_pg_distinct_on();
   test_pg_casts();
   test_pg_copy_rejected();

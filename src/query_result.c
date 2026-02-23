@@ -1,6 +1,5 @@
 #include "query_result.h"
 #include "sensitive_tok.h"
-#include "string_op.h"
 #include "utils.h"
 #include "validator.h"
 
@@ -27,22 +26,41 @@ static inline int idx_ok_get(const QueryResult *qr, uint32_t row,
              : NO;
 }
 
-/* Duplicates exactly 'len' bytes from 's' and appends trailing NUL.
- * It borrows 's' and allocates returned storage that caller must free.
- * Side effects: heap allocation.
- * Error semantics: returns owned C-string on success, NULL on invalid input or
- * allocation failure.
+/* Picks one initial size and one hard cap for QueryResult text arena.
+ * It borrows no dynamic memory and writes caller-owned outputs.
+ * Error semantics: returns OK on success, ERR on invalid output pointers.
  */
-static char *dup_n_or_null(const char *s, size_t len) {
-  if (!s)
-    return NULL;
-  if (len > SIZE_MAX - 1u)
-    return NULL;
+static int qr_pick_text_arena_sizes(uint32_t ncols, uint32_t nrows,
+                                    uint64_t max_query_bytes,
+                                    uint32_t *out_init_sz, uint32_t *out_cap) {
+  if (!out_init_sz || !out_cap)
+    return ERR;
 
-  char *dst = (char *)xmalloc(len + 1u);
-  memcpy(dst, s, len);
-  dst[len] = '\0';
-  return dst;
+  // Reserve some space for column metadata strings even for empty result sets.
+  uint64_t meta_est = 512u + ((uint64_t)ncols * 64u);
+
+  uint64_t cap64 = UINT32_MAX;
+  if (max_query_bytes > 0) {
+    cap64 = meta_est + max_query_bytes + 4096u;
+    if (cap64 > UINT32_MAX)
+      cap64 = UINT32_MAX;
+  }
+
+  uint64_t init64 =
+      meta_est + ((uint64_t)nrows * (uint64_t)ncols * (uint64_t)24u);
+  if (init64 < 4096u)
+    init64 = 4096u;
+  if (init64 > 262144u)
+    init64 = 262144u;
+  if (init64 > cap64)
+    init64 = cap64;
+
+  if (cap64 == 0)
+    return ERR;
+
+  *out_init_sz = (uint32_t)init64;
+  *out_cap = (uint32_t)cap64;
+  return OK;
 }
 
 /* Copies one column metadata entry into QueryResult storage.
@@ -55,17 +73,13 @@ static int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
   if (!qr || !qr->cols || col >= qr->ncols || !name)
     return ERR;
 
-  char *new_name = dup_or_null(name);
+  char *new_name = arena_add_nul(&qr->text_arena, (void *)name, strlen(name));
   const char *safe_type = type ? type : "unknown";
-  char *new_type = dup_or_null(safe_type);
+  char *new_type =
+      arena_add_nul(&qr->text_arena, (void *)safe_type, strlen(safe_type));
   if (!new_name || !new_type) {
-    free(new_name);
-    free(new_type);
     return ERR;
   }
-
-  free(qr->cols[col].name);
-  free(qr->cols[col].type);
 
   qr->cols[col].name = new_name;
   qr->cols[col].type = new_type;
@@ -103,11 +117,11 @@ static int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
     }
   }
 
-  char *copy = value ? dup_n_or_null(value, val_len) : NULL;
+  char *copy =
+      value ? arena_add_nul(&qr->text_arena, (void *)value, val_len) : NULL;
   if (value && !copy)
     return ERR;
 
-  free(qr->cells[idx]);
   qr->cells[idx] = copy;
   qr->used_query_bytes =
       (qr->used_query_bytes - (uint64_t)prev_len) + (uint64_t)val_len;
@@ -139,13 +153,28 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
                           uint8_t result_truncated, uint64_t max_query_bytes) {
   QueryResult *qr = xmalloc(sizeof(*qr));
   size_t ncells = (size_t)ncols * (size_t)nrows;
+  uint32_t arena_init_sz = 0;
+  uint32_t arena_cap = 0;
+
+  if (qr_pick_text_arena_sizes(ncols, nrows, max_query_bytes, &arena_init_sz,
+                               &arena_cap) != OK) {
+    free(qr);
+    return NULL;
+  }
 
   qr->cols = (QRColumn *)xcalloc(ncols, sizeof(QRColumn));
   qr->cells = (char **)xcalloc(ncells, sizeof(char *));
+  if (arena_init(&qr->text_arena, &arena_init_sz, &arena_cap) != OK) {
+    free(qr->cells);
+    free(qr->cols);
+    free(qr);
+    return NULL;
+  }
 
   qr->id = (McpId){0};
   if (id) {
     if (qr_set_id(qr, id) != OK) {
+      arena_clean(&qr->text_arena);
       free(qr->cells);
       free(qr->cols);
       free(qr);
@@ -223,23 +252,9 @@ void qr_destroy(QueryResult *qr) {
     return;
   }
 
-  // free all the storage for cells
-  if (qr->cells && qr->ncols > 0 && qr->nrows_alloc > 0) {
-    size_t ncells = (size_t)qr->ncols * (size_t)qr->nrows_alloc;
-    for (size_t i = 0; i < ncells; i++) {
-      free(qr->cells[i]);
-    }
-  }
   free(qr->cells);
-
-  // free all the storage for cols
-  if (qr->cols) {
-    for (uint32_t c = 0; c < qr->ncols; c++) {
-      free(qr->cols[c].name);
-      free(qr->cols[c].type);
-    }
-  }
   free(qr->cols);
+  arena_clean(&qr->text_arena);
   free(qr);
 }
 
@@ -310,12 +325,6 @@ int qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
   if (!value)
     return qr_set_cell(qb->qr, row, col, NULL, 0);
   if (!qb->store)
-    return ERR;
-  if (!vcol->col_id || vcol->col_id[0] == '\0')
-    return ERR;
-  if (vcol->col_id_len == 0)
-    return ERR;
-  if (v_len > UINT32_MAX)
     return ERR;
 
   const QRColumn *qcol = qr_get_col(qb->qr, col);

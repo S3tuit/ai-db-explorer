@@ -1,12 +1,12 @@
 #define _GNU_SOURCE
 
 #include "broker.h"
+#include "arena.h"
 #include "frame_codec.h"
 #include "handshake_codec.h"
 #include "json_codec.h"
 #include "log.h"
 #include "packed_array.h"
-#include "arena.h"
 #include "query_result.h"
 #include "sensitive_tok.h"
 #include "stdio_byte_channel.h"
@@ -68,7 +68,7 @@ typedef struct BrokerMcpSession {
   int fd; // connection identity (owned by bc). -1 if disconnected but resumable
   uint8_t resume_token[RESUME_TOKEN_LEN]; // can be used to resume the session
   uint32_t generation;                    // session-wide token generation
-  Arena arena;          // stores per-session token value bytes
+  Arena arena;            // stores per-session token value bytes
   PackedArray *db_stores; // owned array of DbTokenStore*
   time_t created_at;      // for absolute TTL
   time_t last_active;     // for idle TTL
@@ -679,7 +679,13 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
         id, "Internal error while preparing query validation.");
     goto free_n_return;
   }
-  ValidatorRequest vreq = {.db = cv.db, .profile = cv.profile, .sql = query};
+  ValidatorRequest vreq = {
+      .db = cv.db,
+      .profile = cv.profile,
+      .sql = query,
+      .params = NULL,
+      .nparams = 0,
+  };
   if (validate_query(&vreq, &vout) != OK) {
     const char *err_desc = sb_to_cstr(&vout.err.msg);
     if (err_desc[0] == '\0') {
@@ -770,8 +776,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   JsonArrIter it = {0};
   int arc = jsget_array_strings_begin(jg, "params.arguments.parameters", &it);
   if (arc != YES) {
-    *out_query = qr_create_err(id, QRERR_INPARAM,
-                               "Missing arguments.parameters array..");
+    *out_query =
+        qr_create_err(id, QRERR_INPARAM, "Missing arguments.parameters array.");
     goto free_n_return;
   }
   if (it.count <= 0 || (uint32_t)it.count > MAX_TOKEN_PARAMS) {
@@ -780,6 +786,11 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     goto free_n_return;
   }
 
+  SensitiveTok vparams[MAX_TOKEN_PARAMS];
+  memset(vparams, 0, sizeof(vparams));
+  uint32_t nparams = 0;
+
+  // loop over all the parameters of the request
   JsonStrSpan sp = {0};
   for (;;) {
     int nrc = jsget_array_strings_next(jg, &it, &sp);
@@ -822,8 +833,48 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
       goto free_n_return;
     }
 
+    const SensitiveTok *bound = stok_store_get(store, parsed.index);
+    if (!bound) {
+      free(tok);
+      *out_query = qr_create_err(id, QRERR_INPARAM, "Unknown token index.");
+      goto free_n_return;
+    }
+
+    if (nparams >= MAX_TOKEN_PARAMS) {
+      free(tok);
+      *out_query = qr_create_err(
+          id, QRERR_INPARAM, "Token parameters must contain 1..10 entries.");
+      goto free_n_return;
+    }
+    vparams[nparams++] = *bound;
+
     free(tok);
   }
+
+  ValidateQueryOut vout = {0};
+  if (vq_out_init(&vout) != OK) {
+    *out_query = qr_create_tool_err(
+        id, "Internal error while preparing query validation.");
+    goto free_n_return;
+  }
+  ValidatorRequest vreq = {
+      .db = cv.db,
+      .profile = cv.profile,
+      .sql = query,
+      .params = vparams,
+      .nparams = nparams,
+  };
+  if (validate_query(&vreq, &vout) != OK) {
+    const char *err_desc = sb_to_cstr(&vout.err.msg);
+    if (err_desc[0] == '\0') {
+      err_desc = "Unknown error while validating the query. Please make sure "
+                 "the query is valid and formatted correctly.";
+    }
+    *out_query = qr_create_tool_err(id, err_desc);
+    vq_out_clean(&vout);
+    goto free_n_return;
+  }
+  vq_out_clean(&vout);
 
   // Bound execution path will be added with validator plan + DB typed binds.
   *out_query = qr_create_tool_err(

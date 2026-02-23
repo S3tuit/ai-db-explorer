@@ -1,10 +1,11 @@
 #ifndef VALIDATOR_H
 #define VALIDATOR_H
 
+#include "arena.h"
 #include "conn_catalog.h"
 #include "db_backend.h"
 #include "packed_array.h"
-#include "arena.h"
+#include "sensitive_tok.h"
 #include "string_op.h"
 
 typedef enum ValidatorErrCode {
@@ -25,11 +26,14 @@ typedef enum ValidatorErrCode {
   VERR_WHERE_NOT_CONJ,  /* WHERE not AND-only */
   VERR_JOIN_NOT_INNER,  /* non-INNER join */
   VERR_JOIN_ON_INVALID, /* JOIN ON not AND/= or invalid operands */
-  VERR_JOIN_ON_SENSITIVE,  /* JOIN ON references sensitive columns */
-  VERR_DISTINCT_SENSITIVE, /* DISTINCT in sensitive mode */
-  VERR_OFFSET_SENSITIVE,   /* OFFSET in sensitive mode */
-  VERR_LIMIT_REQUIRED,     /* LIMIT missing in sensitive mode */
-  VERR_LIMIT_EXCEEDS       /* LIMIT too high in sensitive mode */
+  VERR_JOIN_ON_SENSITIVE,    /* JOIN ON references sensitive columns */
+  VERR_PARAM_IDX_RANGE,      /* $n index outside provided parameter list */
+  VERR_PARAM_SCOPE_MISMATCH, /* token parameter scope mismatch */
+  VERR_PARAM_UNUSED,         /* provided token parameter not referenced */
+  VERR_DISTINCT_SENSITIVE,   /* DISTINCT in sensitive mode */
+  VERR_OFFSET_SENSITIVE,     /* OFFSET in sensitive mode */
+  VERR_LIMIT_REQUIRED,       /* LIMIT missing in sensitive mode */
+  VERR_LIMIT_EXCEEDS         /* LIMIT too high in sensitive mode */
 } ValidatorErrCode;
 
 typedef struct ValidatorErr {
@@ -50,7 +54,7 @@ typedef struct ValidatorColPlan {
 
 typedef struct ValidatorPlan {
   PackedArray *cols; // entries are ValidatorColPlan, index-aligned with SELECT
-  Arena arena;     // owns ValidatorColPlan.col_id strings
+  Arena arena;       // owns ValidatorColPlan.col_id strings
 } ValidatorPlan;
 
 /* Output contract for validate_query().
@@ -71,6 +75,8 @@ typedef struct ValidatorRequest {
   DbBackend *db;
   const ConnProfile *profile;
   const char *sql;
+  const SensitiveTok *params; // borrowed positional list; params[i] => $(i+1)
+  uint32_t nparams;
 } ValidatorRequest;
 
 /* Initializes one ValidateQueryOut.

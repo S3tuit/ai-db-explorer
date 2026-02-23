@@ -9,20 +9,31 @@
 #include "test.h"
 #include "validator.h"
 
+/* Builds one SensitiveTok test input containing only scope metadata.
+ * The returned value is stack-owned and safe to copy by value.
+ */
+static SensitiveTok make_param_scope(const char *col_ref) {
+  SensitiveTok t = {0};
+  t.col_ref = col_ref;
+  t.col_ref_len = (uint32_t)strlen(col_ref);
+  return t;
+}
+
 /* Runs a single validation and checks for accept/reject + error code.
  * Side effects: initializes and cleans one request-scoped validator output. */
 static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
                                const char *sql, int expect_ok,
                                ValidatorErrCode expect_code,
-                               const char *expect_substr, const char *file,
-                               int line) {
+                               const char *expect_substr,
+                               const SensitiveTok *params, uint32_t nparams,
+                               const char *file, int line) {
   ValidateQueryOut out = {0};
   ASSERT_TRUE(vq_out_init(&out) == OK);
-  ValidatorRequest req = {
-      .db = db,
-      .profile = cp,
-      .sql = sql,
-  };
+  ValidatorRequest req = {.db = db,
+                          .profile = cp,
+                          .sql = sql,
+                          .params = params,
+                          .nparams = nparams};
 
   int rc = validate_query(&req, &out);
   if (expect_ok) {
@@ -74,28 +85,33 @@ static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
   vq_out_clean(&out);
 }
 #define ASSERT_VALIDATE(db, cp, policy, sql, ok, code)                         \
-  assert_validate_at((db), (cp), (sql), (ok), (code), NULL, __FILE__, __LINE__)
-#define ASSERT_VALIDATE_MSG(db, cp, policy, sql, ok, code, substr)             \
-  assert_validate_at((db), (cp), (sql), (ok), (code), (substr), __FILE__,      \
+  assert_validate_at((db), (cp), (sql), (ok), (code), NULL, NULL, 0, __FILE__, \
                      __LINE__)
+#define ASSERT_VALIDATE_MSG(db, cp, policy, sql, ok, code, substr)             \
+  assert_validate_at((db), (cp), (sql), (ok), (code), (substr), NULL, 0,       \
+                     __FILE__, __LINE__)
+#define ASSERT_VALIDATE_PARAMS(db, cp, policy, sql, ok, code, substr, params,  \
+                               nparams)                                        \
+  assert_validate_at((db), (cp), (sql), (ok), (code), (substr), params,        \
+                     nparams, __FILE__, __LINE__)
 
 /* Runs one validation expected to succeed and checks full ValidatorPlan shape.
  * It borrows all inputs and owns temporary ValidateQueryOut for this call.
  */
-static void assert_validate_plan_at(DbBackend *db, const ConnProfile *cp,
-                                    const char *sql,
-                                    const ValidatorColOutKind *exp_kinds,
-                                    const char *const *exp_col_ids,
-                                    uint32_t exp_ncols, const char *file,
-                                    int line) {
+static void
+assert_validate_plan_at(DbBackend *db, const ConnProfile *cp, const char *sql,
+                        const ValidatorColOutKind *exp_kinds,
+                        const char *const *exp_col_ids, uint32_t exp_ncols,
+                        const SensitiveTok *params, uint32_t nparams,
+                        const char *file, int line) {
   ValidateQueryOut out = {0};
   ASSERT_TRUE_AT(vq_out_init(&out) == OK, file, line);
 
-  ValidatorRequest req = {
-      .db = db,
-      .profile = cp,
-      .sql = sql,
-  };
+  ValidatorRequest req = {.db = db,
+                          .profile = cp,
+                          .sql = sql,
+                          .params = params,
+                          .nparams = nparams};
 
   int rc = validate_query(&req, &out);
   if (rc != OK) {
@@ -136,7 +152,12 @@ static void assert_validate_plan_at(DbBackend *db, const ConnProfile *cp,
 }
 #define ASSERT_VALIDATE_PLAN(db, cp, sql, exp_kinds, exp_ids, exp_ncols)       \
   assert_validate_plan_at((db), (cp), (sql), (exp_kinds), (exp_ids),           \
-                          (exp_ncols), __FILE__, __LINE__)
+                          (exp_ncols), NULL, 0, __FILE__, __LINE__)
+
+#define ASSERT_VALIDATE_PLAN_PARAMS(db, cp, sql, exp_kinds, exp_ids,           \
+                                    exp_ncols, params, nparams)                \
+  assert_validate_plan_at((db), (cp), (sql), (exp_kinds), (exp_ids),           \
+                          (exp_ncols), params, nparams, __FILE__, __LINE__)
 
 /* Runs one validation expected to fail and asserts that the output plan is
  * empty after failure.
@@ -251,6 +272,16 @@ static void test_validator_from_notes(void) {
   ASSERT_TRUE(policy != NULL);
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
+  const SensitiveTok tok_fc1[] = {make_param_scope("users.fiscal_code")};
+  const SensitiveTok tok_fc2[] = {
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+  };
+  const SensitiveTok tok_fc3[] = {
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+  };
 
   /* ACCEPT cases */
   ASSERT_VALIDATE(db, cp, policy, "SELECT u.name FROM users u WHERE u.id = 1;",
@@ -273,24 +304,28 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT u.fiscal_code, u.name FROM users u WHERE u.id = 1 LIMIT 10;", 1,
       VERR_NONE);
-  ASSERT_VALIDATE(
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 200;", 1,
-      VERR_NONE);
-  ASSERT_VALIDATE(
+      VERR_NONE, NULL, tok_fc1, ARRLEN(tok_fc1));
+
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, $2, $3) LIMIT 200;",
-      1, VERR_NONE);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
-                  "e.user_id = u.id "
-                  "WHERE u.fiscal_code = $1 LIMIT 200;",
-                  1, VERR_NONE);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT e.category, COUNT(*) FROM users u INNER JOIN "
-                  "expenses e ON e.user_id = u.id "
-                  "WHERE u.fiscal_code = $1 GROUP BY e.category LIMIT 200;",
-                  1, VERR_NONE);
+      1, VERR_NONE, NULL, tok_fc3, ARRLEN(tok_fc3));
+
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
+      "e.user_id = u.id "
+      "WHERE u.fiscal_code = $1 LIMIT 200;",
+      1, VERR_NONE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT e.category, COUNT(*) FROM users u INNER JOIN "
+      "expenses e ON e.user_id = u.id "
+      "WHERE u.fiscal_code = $1 GROUP BY e.category LIMIT 200;",
+      1, VERR_NONE, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(
       db, cp, policy,
       "SELECT DISTINCT u.status FROM users u WHERE u.status = true;", 1,
@@ -413,10 +448,10 @@ static void test_validator_from_notes(void) {
                   "SELECT u.fiscal_code, COUNT(*) FROM users u WHERE u.status "
                   "= true GROUP BY u.fiscal_code LIMIT 200;",
                   0, VERR_SENSITIVE_LOC);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id FROM users u WHERE u.fiscal_code = $1 ORDER BY "
-                  "u.fiscal_code LIMIT 200;",
-                  0, VERR_SENSITIVE_LOC);
+  ASSERT_VALIDATE_PARAMS(db, cp, policy,
+                         "SELECT u.id FROM users u WHERE u.fiscal_code = $1 "
+                         "ORDER BY u.fiscal_code LIMIT 200;",
+                         0, VERR_SENSITIVE_LOC, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.status, COUNT(*) FROM users u WHERE u.status = "
                   "false GROUP BY u.status "
@@ -451,10 +486,10 @@ static void test_validator_from_notes(void) {
                   0, VERR_SENSITIVE_CMP);
   ASSERT_VALIDATE(db, cp, policy, "SELECT u.fiscal_code FROM users u;", 0,
                   VERR_LIMIT_REQUIRED);
-  ASSERT_VALIDATE(
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, 'X') LIMIT 10;", 0,
-      VERR_SENSITIVE_CMP);
+      VERR_SENSITIVE_CMP, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(db, cp, policy, "SELECT $1 AS trick FROM users u LIMIT 1;", 0,
                   VERR_PARAM_OUTSIDE_WHERE);
   ASSERT_VALIDATE(db, cp, policy,
@@ -464,10 +499,11 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT calc_balance(u.id) AS bal FROM users u WHERE u.id = 1;", 0,
       VERR_FUNC_UNSAFE);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.fiscal_code AS fc FROM users u WHERE u.fiscal_code "
-                  "= $1 ORDER BY fc LIMIT 10;",
-                  0, VERR_SENSITIVE_LOC);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.fiscal_code AS fc FROM users u WHERE u.fiscal_code = $1 "
+      "ORDER BY fc LIMIT 10;",
+      0, VERR_SENSITIVE_LOC, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.fiscal_code AS fc, COUNT(*) FROM users u WHERE "
                   "u.status = true GROUP BY fc LIMIT 10;",
@@ -484,16 +520,165 @@ static void test_validator_from_notes(void) {
       "SELECT u.status, MAX(u.fiscal_code) AS m FROM users u GROUP BY u.status "
       "HAVING m IS NOT NULL LIMIT 10;",
       0, VERR_NO_COLUMN_ALIAS);
-  ASSERT_VALIDATE(
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT row_number() OVER (ORDER BY u.fiscal_code) AS rn FROM users u "
       "WHERE u.fiscal_code = $1 LIMIT 10;",
-      0, VERR_SENSITIVE_SELECT_EXPR);
+      0, VERR_SENSITIVE_SELECT_EXPR, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
+      "e.receiver = $1 "
+      "WHERE u.fiscal_code = $2 LIMIT 10;",
+      0, VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc2, ARRLEN(tok_fc2));
+
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
+/* Verifies token-parameter binding rules in sensitive WHERE predicates.
+ * This suite focuses on parameter scope/index validation and does not inspect
+ * ValidatorPlan output columns.
+ */
+static void test_validator_token_param_binding(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+  SafetyPolicy *policy = &cp->safe_policy;
+  ASSERT_TRUE(policy != NULL);
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  const SensitiveTok tok_users_fc_1[] = {make_param_scope("users.fiscal_code")};
+  const SensitiveTok tok_users_fc_2[] = {
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+  };
+  const SensitiveTok tok_users_fc_3[] = {
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+  };
+  const SensitiveTok tok_private_users_fc_1[] = {
+      make_param_scope("private.users.fiscal_code"),
+  };
+  const SensitiveTok tok_exp_receiver_1[] = {
+      make_param_scope("expenses.receiver"),
+  };
+  const SensitiveTok tok_cross_ok[] = {
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("expenses.receiver"),
+  };
+  const SensitiveTok tok_cross_bad_2nd[] = {
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+  };
+  const SensitiveTok tok_in_bad_3rd[] = {
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("users.fiscal_code"),
+      make_param_scope("expenses.receiver"),
+  };
+  const SensitiveTok tok_bad_meta_null[] = {
+      {.col_ref = NULL, .col_ref_len = 8},
+  };
+  const SensitiveTok tok_bad_meta_empty[] = {
+      {.col_ref = "users.fiscal_code", .col_ref_len = 0},
+  };
+
+  // schema-qualified query column must not accept table-only token scope.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM private.users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
+      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_users_fc_1, ARRLEN(tok_users_fc_1));
+
+  // table-only query column must not accept schema-qualified token scope.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
+      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_private_users_fc_1,
+      ARRLEN(tok_private_users_fc_1));
+
+  // token from a different table/column must be rejected.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
+      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_exp_receiver_1,
+      ARRLEN(tok_exp_receiver_1));
+
+  // two sensitive predicates bound to correct scopes should pass.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
+      "e.user_id = u.id WHERE u.fiscal_code = $1 AND e.receiver = $2 LIMIT 10;",
+      1, VERR_NONE, NULL, tok_cross_ok, ARRLEN(tok_cross_ok));
+
+  // two sensitive predicates with wrong second scope should fail.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
+      "e.user_id = u.id WHERE u.fiscal_code = $1 AND e.receiver = $2 LIMIT 10;",
+      0, VERR_PARAM_SCOPE_MISMATCH, NULL, tok_cross_bad_2nd,
+      ARRLEN(tok_cross_bad_2nd));
+
+  // IN with one mismatched token among many should fail.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, $2, $3) LIMIT 10;",
+      0, VERR_PARAM_SCOPE_MISMATCH, NULL, tok_in_bad_3rd,
+      ARRLEN(tok_in_bad_3rd));
+
+  // Missing token parameters must reject sensitive predicates.
   ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
-                  "e.receiver = $1 "
-                  "WHERE u.fiscal_code = $2 LIMIT 10;",
-                  0, VERR_PARAM_OUTSIDE_WHERE);
+                  "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;",
+                  0, VERR_PARAM_IDX_RANGE);
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, $2, $3) LIMIT 10;",
+      0, VERR_PARAM_IDX_RANGE);
+
+  // Param index out of provided range.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $2 LIMIT 10;", 0,
+      VERR_PARAM_IDX_RANGE, NULL, tok_users_fc_1, ARRLEN(tok_users_fc_1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, $2, $3) LIMIT 10;",
+      0, VERR_PARAM_IDX_RANGE, NULL, tok_users_fc_2, ARRLEN(tok_users_fc_2));
+
+  // Unused provided token(s) should reject.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
+      VERR_PARAM_UNUSED, NULL, tok_users_fc_2, ARRLEN(tok_users_fc_2));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 AND u.fiscal_code = "
+      "$3 LIMIT 10;",
+      0, VERR_PARAM_UNUSED, NULL, tok_users_fc_3, ARRLEN(tok_users_fc_3));
+
+  // '= with param on left' should still enforce scope checks.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE $1 = u.fiscal_code LIMIT 10;", 1,
+      VERR_NONE, NULL, tok_users_fc_1, ARRLEN(tok_users_fc_1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE $1 = u.fiscal_code LIMIT 10;", 0,
+      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_exp_receiver_1,
+      ARRLEN(tok_exp_receiver_1));
+
+  // Malformed broker-provided token metadata must fail closed.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
+      VERR_ANALYZE_FAIL, NULL, tok_bad_meta_null, ARRLEN(tok_bad_meta_null));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
+      VERR_ANALYZE_FAIL, NULL, tok_bad_meta_empty, ARRLEN(tok_bad_meta_empty));
 
   db_destroy(db);
   catalog_destroy(cat);
@@ -512,6 +697,7 @@ static void test_validator_plan(void) {
 
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
+  const SensitiveTok tok_fc1[] = {make_param_scope("users.fiscal_code")};
 
   // all plaintext
   {
@@ -667,9 +853,9 @@ static void test_validator_plan(void) {
   {
     const ValidatorColOutKind kinds[] = {VCOL_OUT_PLAINTEXT};
     const char *ids[] = {NULL};
-    ASSERT_VALIDATE_PLAN(
+    ASSERT_VALIDATE_PLAN_PARAMS(
         db, cp, "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 200;",
-        kinds, ids, 1);
+        kinds, ids, 1, tok_fc1, ARRLEN(tok_fc1));
   }
 
   // failure paths must not leave partial plan state
@@ -723,6 +909,7 @@ int main(void) {
   test_validator_accepts();
   test_validator_rejects_rules();
   test_validator_from_notes();
+  test_validator_token_param_binding();
   test_validator_plan();
   fprintf(stderr, "OK: test_validator\n");
   return 0;

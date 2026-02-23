@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "arena.h"
 #include "mcp_id.h"
 
 typedef struct ValidatorPlan ValidatorPlan;
@@ -54,6 +55,7 @@ typedef struct QueryResult {
                                  // row count of the query executed
       uint64_t max_query_bytes;  // 0 = unlimited
       uint64_t used_query_bytes; // bytes stored across all non-NULL cells
+      Arena text_arena;          // owns column/cell strings for QR_OK
     };
 
     // valid if QR_ERROR or QR_TOOL_ERROR

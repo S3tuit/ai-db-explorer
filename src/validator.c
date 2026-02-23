@@ -57,6 +57,9 @@ typedef struct ValidatorCtx {
   DbBackend *db;
   const ConnProfile *cp;
   ValidatorErr *err;
+  const SensitiveTok *params;
+  uint32_t nparams;
+  uint8_t *param_used;
   // Scratch buffer for building short diagnostic strings. The contents are
   // valid until the next scratch use.
   StrBuf scratch;
@@ -265,6 +268,144 @@ static inline const QirFromItem *find_from_alias(const QirQuery *q,
       return j->rhs;
   }
   return NULL;
+}
+
+/* Returns a short stable description for one expression kind in diagnostics.
+ * It borrows all inputs and does not allocate memory.
+ * Error semantics: always returns a non-NULL borrowed string.
+ */
+static const char *validator_expr_diag(ValidatorCtx *ctx, const QirExpr *e) {
+  if (!ctx || !e)
+    return "<expression>";
+  if (e->kind == QIR_EXPR_COLREF)
+    return qir_colref_to_str(&e->u.colref, &ctx->scratch);
+  if (e->kind == QIR_EXPR_LITERAL)
+    return "<literal>";
+  if (e->kind == QIR_EXPR_PARAM)
+    return "<parameter>";
+  if (e->kind == QIR_EXPR_SUBQUERY)
+    return "<subquery>";
+  return "<expression>";
+}
+
+/* Compares one query column reference against one canonical token scope.
+ * It borrows all inputs and does not allocate.
+ * Error semantics: returns YES on exact scope match, NO on mismatch, ERR on
+ * invalid input or unresolved source relation.
+ */
+static int validator_colref_scope_matches(const QirQuery *q,
+                                          const QirColRef *cr,
+                                          const char *scope,
+                                          uint32_t scope_len) {
+  assert(q);
+  assert(cr);
+  assert(scope);
+  assert(scope_len > 0);
+
+  const QirFromItem *fi = find_from_alias(q, cr->qualifier.name);
+  if (!fi)
+    return ERR;
+
+  const char *schema = fi->u.rel.schema.name;
+  const char *table = fi->u.rel.name.name;
+  const char *col = cr->column.name;
+  if (!table || table[0] == '\0' || !col || col[0] == '\0')
+    return ERR;
+
+  size_t table_len = strlen(table);
+  size_t col_len = strlen(col);
+  size_t off = 0;
+
+  if (schema && schema[0] != '\0') {
+    size_t schema_len = strlen(schema);
+    size_t need = schema_len + 1u + table_len + 1u + col_len;
+    if (need != (size_t)scope_len)
+      return NO;
+    if (memcmp(scope, schema, schema_len) != 0)
+      return NO;
+    off += schema_len;
+    if (scope[off] != '.')
+      return NO;
+    off++;
+  } else {
+    size_t need = table_len + 1u + col_len;
+    if (need != (size_t)scope_len)
+      return NO;
+  }
+
+  if (memcmp(scope + off, table, table_len) != 0)
+    return NO;
+  off += table_len;
+  if (scope[off] != '.')
+    return NO;
+  off++;
+  if (memcmp(scope + off, col, col_len) != 0)
+    return NO;
+
+  return YES;
+}
+
+/* Validates that parameter '$param_idx' exists and matches one sensitive
+ * column scope. It borrows all inputs and marks ctx->param_used on success.
+ * Error semantics: returns YES on success, NO on policy mismatch, ERR on bad
+ * input/internal inconsistency.
+ */
+static int validator_validate_param_scope_for_col(ValidatorCtx *ctx,
+                                                  const QirQuery *q,
+                                                  const QirColRef *sensitive_cr,
+                                                  int param_idx) {
+  assert(ctx);
+  assert(q);
+  assert(sensitive_cr);
+
+  if (param_idx < 1) {
+    set_err(ctx, VERR_PARAM_IDX_RANGE,
+            "Token parameters referenced inside the query should start with "
+            "index 1: query references $%d.",
+            param_idx);
+    return NO;
+  }
+
+  if (!ctx->params || ctx->nparams == 0) {
+    set_err(ctx, VERR_PARAM_IDX_RANGE,
+            "Missing token parameters: query references $%d.", param_idx);
+    return NO;
+  }
+
+  if ((uint32_t)param_idx > ctx->nparams) {
+    set_err(ctx, VERR_PARAM_IDX_RANGE,
+            "Token parameter index $%d is out of range (received %u).",
+            param_idx, ctx->nparams);
+    return NO;
+  }
+
+  const SensitiveTok *tok = &ctx->params[(uint32_t)param_idx - 1u];
+  if (!tok->col_ref || tok->col_ref_len == 0) {
+    set_err(ctx, VERR_ANALYZE_FAIL, "Invalid token parameter metadata for $%d.",
+            param_idx);
+    return ERR;
+  }
+
+  int mrc = validator_colref_scope_matches(q, sensitive_cr, tok->col_ref,
+                                           tok->col_ref_len);
+  if (mrc == ERR) {
+    set_err(
+        ctx, VERR_ANALYZE_FAIL,
+        "Unable to resolve sensitive column scope during token validation.");
+    return ERR;
+  }
+  if (mrc == NO) {
+    const char *desc = qir_colref_to_str(sensitive_cr, &ctx->scratch);
+    set_err(ctx, VERR_PARAM_SCOPE_MISMATCH,
+            "Token parameter $%d scope '%.*s' does not match sensitive column "
+            "'%s'.",
+            param_idx, (int)tok->col_ref_len, tok->col_ref, desc);
+    return NO;
+  }
+
+  if (ctx->param_used)
+    ctx->param_used[(uint32_t)param_idx - 1u] = 1u;
+  return YES;
 }
 
 /* Returns YES if the colref resolves to a sensitive base table column, else,
@@ -1156,10 +1297,8 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
       if (sens_r == ERR)
         return ERR;
       if (sens_l == YES || sens_r == YES) {
-        const char *desc_l =
-            qir_colref_to_str(&e->u.bin.l->u.colref, &ctx->scratch);
-        const char *desc_r =
-            qir_colref_to_str(&e->u.bin.r->u.colref, &ctx->scratch);
+        const char *desc_l = validator_expr_diag(ctx, e->u.bin.l);
+        const char *desc_r = validator_expr_diag(ctx, e->u.bin.r);
         set_err(ctx, VERR_JOIN_ON_SENSITIVE,
                 "JOIN predicate references sensitive column ('%s' or '%s'), "
                 "which is not allowed.",
@@ -1196,8 +1335,7 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
 
       if (sens_l == YES) {
         if (e->u.bin.l->kind != QIR_EXPR_COLREF) {
-          const char *desc =
-              qir_colref_to_str(&e->u.bin.l->u.colref, &ctx->scratch);
+          const char *desc = validator_expr_diag(ctx, e->u.bin.l);
           set_err(ctx, VERR_SENSITIVE_LOC,
                   "Sensitive column '%s' must be referenced directly in WHERE.",
                   desc);
@@ -1211,11 +1349,14 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
                   desc);
           return NO;
         }
+        int prc = validator_validate_param_scope_for_col(
+            ctx, main_q, &e->u.bin.l->u.colref, e->u.bin.r->u.param_index);
+        if (prc != YES)
+          return prc;
       }
       if (sens_r == YES) {
         if (e->u.bin.r->kind != QIR_EXPR_COLREF) {
-          const char *desc =
-              qir_colref_to_str(&e->u.bin.r->u.colref, &ctx->scratch);
+          const char *desc = validator_expr_diag(ctx, e->u.bin.r);
           set_err(ctx, VERR_SENSITIVE_LOC,
                   "Sensitive column '%s' must be referenced directly in WHERE.",
                   desc);
@@ -1229,6 +1370,10 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
                   desc);
           return NO;
         }
+        int prc = validator_validate_param_scope_for_col(
+            ctx, main_q, &e->u.bin.r->u.colref, e->u.bin.l->u.param_index);
+        if (prc != YES)
+          return prc;
       }
       return YES;
     }
@@ -1237,8 +1382,7 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
       if (sens_l == ERR)
         return ERR;
       if ((sens_l == YES && e->u.in_.lhs->kind != QIR_EXPR_COLREF)) {
-        const char *desc =
-            qir_colref_to_str(&e->u.in_.lhs->u.colref, &ctx->scratch);
+        const char *desc = validator_expr_diag(ctx, e->u.in_.lhs);
         set_err(ctx, VERR_SENSITIVE_LOC,
                 "Sensitive column '%s' must be referenced directly in IN().",
                 desc);
@@ -1262,6 +1406,10 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
                     desc);
             return NO;
           }
+          int prc = validator_validate_param_scope_for_col(
+              ctx, main_q, &e->u.in_.lhs->u.colref, it->u.param_index);
+          if (prc != YES)
+            return prc;
         }
 
         int sens_i = expr_has_sensitive(main_q, ctx->cp, it);
@@ -1296,7 +1444,7 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
     if (sens == ERR)
       return ERR;
     if (sens == YES) {
-      const char *desc = qir_colref_to_str(&e->u.colref, &ctx->scratch);
+      const char *desc = validator_expr_diag(ctx, e);
       if (loc == SENS_LOC_GROUP_BY) {
         set_err(ctx, VERR_SENSITIVE_LOC,
                 "GROUP BY cannot reference sensitive column '%s'.", desc);
@@ -1488,19 +1636,30 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     return ERR;
   if (!req->db || !req->profile || !req->sql)
     return ERR;
+  if (req->nparams > 0 && !req->params)
+    return ERR;
   if (vq_out_reset(out) != OK)
     return ERR;
+
+  uint8_t *param_used = NULL;
+  if (req->nparams > 0) {
+    param_used = (uint8_t *)xcalloc(req->nparams, sizeof(*param_used));
+  }
 
   ValidatorCtx ctx = {
       .db = req->db,
       .cp = req->profile,
       .err = &out->err,
+      .params = req->params,
+      .nparams = req->nparams,
+      .param_used = param_used,
   };
   sb_init(&ctx.scratch);
 
   QirQueryHandle h = {0};
   if (db_make_query_ir(req->db, req->sql, &h) != OK) {
     set_err(&ctx, VERR_PARSE_FAIL, "Failed to parse query.");
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
@@ -1511,12 +1670,14 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
         (q && q->status_reason) ? q->status_reason : "Invalid query.";
     set_err(&ctx, VERR_UNSUPPORTED_QUERY, reason);
     qir_handle_destroy(&h);
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
   if (q->has_star) {
     set_err(&ctx, VERR_STAR, "SELECT * is not allowed.");
     qir_handle_destroy(&h);
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
@@ -1525,6 +1686,7 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
   if (!tr) {
     set_err(&ctx, VERR_ANALYZE_FAIL, "Unable to analyze query.");
     qir_handle_destroy(&h);
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
@@ -1532,6 +1694,7 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     set_err(&ctx, VERR_UNSUPPORTED_QUERY, "Unsupported query structure.");
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
@@ -1548,6 +1711,7 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     }
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
@@ -1560,6 +1724,7 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     }
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
@@ -1572,8 +1737,23 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
       }
       qir_touch_report_destroy(tr);
       qir_handle_destroy(&h);
+      free(param_used);
       sb_clean(&ctx.scratch);
       return ERR;
+    }
+  }
+
+  if (ctx.nparams > 0) {
+    for (uint32_t i = 0; i < ctx.nparams; i++) {
+      if (ctx.param_used[i] == 0) {
+        set_err(&ctx, VERR_PARAM_UNUSED,
+                "Token parameter $%u is not referenced by query.", i + 1u);
+        qir_touch_report_destroy(tr);
+        qir_handle_destroy(&h);
+        free(param_used);
+        sb_clean(&ctx.scratch);
+        return ERR;
+      }
     }
   }
 
@@ -1585,12 +1765,14 @@ int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     }
     qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
+    free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
 
   qir_touch_report_destroy(tr);
   qir_handle_destroy(&h);
+  free(param_used);
   sb_clean(&ctx.scratch);
   return OK;
 }

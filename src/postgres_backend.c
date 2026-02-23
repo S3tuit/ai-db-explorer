@@ -210,8 +210,7 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, Arena *a, QirQuery *q) {
  * Ownership: returned expression is arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_literal(const JsonGetter *jg, Arena *a,
-                                 QirQuery *q) {
+static QirExpr *pg_parse_literal(const JsonGetter *jg, Arena *a, QirQuery *q) {
   if (!jg || !a || !q)
     return NULL;
 
@@ -438,8 +437,7 @@ static int pg_parse_window_def(const JsonGetter *wg, Arena *a, QirQuery *q,
  * Ownership: returned expression and its children are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED on malformed or unknown shapes.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, Arena *a,
-                                  QirQuery *q) {
+static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, Arena *a, QirQuery *q) {
   QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_CASE);
   if (!e)
     return NULL;
@@ -1065,8 +1063,7 @@ fail:
  * Ownership: type names are arena-owned.
  * Side effects: allocates arena memory.
  * Returns OK on success, ERR on parse/allocation failure. */
-static int pg_parse_typename(const JsonGetter *jg, Arena *a,
-                             QirTypeRef *out) {
+static int pg_parse_typename(const JsonGetter *jg, Arena *a, QirTypeRef *out) {
   if (!jg || !a || !out)
     return ERR;
 
@@ -1187,6 +1184,7 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, Arena *a, QirQuery *q) {
     uint32_t n = 0;
     if (jsget_u32(&sub, "number", &n) != YES)
       return NULL;
+
     QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_PARAM);
     if (!e)
       return NULL;
