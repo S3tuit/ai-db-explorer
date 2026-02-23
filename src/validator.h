@@ -4,7 +4,7 @@
 #include "conn_catalog.h"
 #include "db_backend.h"
 #include "packed_array.h"
-#include "pl_arena.h"
+#include "arena.h"
 #include "string_op.h"
 
 typedef enum ValidatorErrCode {
@@ -50,7 +50,7 @@ typedef struct ValidatorColPlan {
 
 typedef struct ValidatorPlan {
   PackedArray *cols; // entries are ValidatorColPlan, index-aligned with SELECT
-  PlArena arena;     // owns ValidatorColPlan.col_id strings
+  Arena arena;     // owns ValidatorColPlan.col_id strings
 } ValidatorPlan;
 
 /* Output contract for validate_query().

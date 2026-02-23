@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "pl_arena.h"
+#include "arena.h"
 #include "sensitive_tok.h"
 #include "test.h"
 
@@ -11,9 +11,9 @@
  * Side effects: allocates first arena block.
  * Error semantics: asserts on failure.
  */
-static void init_test_arena(PlArena *arena) {
+static void init_test_arena(Arena *arena) {
   uint32_t cap = 4u * 1024u * 1024u;
-  ASSERT_TRUE(pl_arena_init(arena, NULL, &cap) == OK);
+  ASSERT_TRUE(arena_init(arena, NULL, &cap) == OK);
 }
 
 static void test_parse_view_ok(void) {
@@ -78,7 +78,7 @@ static void test_parse_view_failure_does_not_mutate_input(void) {
 }
 
 static void test_store_init_and_clean(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
@@ -90,11 +90,11 @@ static void test_store_init_and_clean(void) {
   stok_store_destroy(store);
   stok_store_destroy(NULL);
 
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 static void test_store_init_bad_input(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
@@ -107,11 +107,11 @@ static void test_store_init_bad_input(void) {
   ConnProfile bad_mode = make_profile("pgmain", (SafetyColumnStrategy)9999);
   ASSERT_TRUE(stok_store_create(&bad_mode, &arena) == NULL);
 
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 static void test_store_connection_match_helpers(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile a_cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
@@ -137,7 +137,7 @@ static void test_store_connection_match_helpers(void) {
   stok_store_destroy(a);
   stok_store_destroy(b);
   stok_store_destroy(c);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 /* Verifies accessor edge cases for NULL and out-of-range indexes. */
@@ -145,7 +145,7 @@ static void test_store_get_len_edge_cases(void) {
   ASSERT_TRUE(stok_store_len(NULL) == 0);
   ASSERT_TRUE(stok_store_get(NULL, 0) == NULL);
 
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
   DbTokenStore *store = stok_store_create(&cp, &arena);
@@ -168,12 +168,12 @@ static void test_store_get_len_edge_cases(void) {
   ASSERT_TRUE(stok_store_get(store, 1) == NULL);
 
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 /* Verifies deterministic mode compares by bytes, not pointer identity. */
 static void test_create_token_deterministic_pointer_independence(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
@@ -231,14 +231,14 @@ static void test_create_token_deterministic_pointer_independence(void) {
   ASSERT_TRUE(stok_store_len(store) == 3);
 
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 /* Verifies SQL NULL payloads are supported and deduplicated in deterministic
  * mode for identical column keys.
  */
 static void test_create_token_null_value_deterministic(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
@@ -266,13 +266,13 @@ static void test_create_token_null_value_deterministic(void) {
   ASSERT_TRUE(e0->value_len == 0);
 
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 /* Verifies token creation rejects oversized connection names
  * (>CONN_NAME_MAX_LEN). */
 static void test_create_token_connection_name_too_long(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   char long_name[CONN_NAME_MAX_LEN + 2];
@@ -295,11 +295,11 @@ static void test_create_token_connection_name_too_long(void) {
   ASSERT_TRUE(stok_store_len(store) == 0);
 
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 static void test_create_token_deterministic_reuse(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
@@ -340,11 +340,11 @@ static void test_create_token_deterministic_reuse(void) {
   ASSERT_TRUE(nul == NULL);
 
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 static void test_create_token_randomized_appends(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile cp = make_profile("analytics", SAFETY_COLSTRAT_RANDOMIZED);
@@ -386,11 +386,11 @@ static void test_create_token_randomized_appends(void) {
   ASSERT_TRUE(memcmp(e1->col_ref, in.col_ref, in.col_ref_len) == 0);
 
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 static void test_create_token_input_validation(void) {
-  PlArena arena = {0};
+  Arena arena = {0};
   init_test_arena(&arena);
 
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
@@ -425,7 +425,7 @@ static void test_create_token_input_validation(void) {
   ASSERT_TRUE(stok_store_len(store) == 1);
 
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
 }
 
 int main(void) {

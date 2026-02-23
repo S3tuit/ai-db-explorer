@@ -51,7 +51,7 @@ INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integratio
 # Benchmarks: each benchmarks/bench_foo.c -> build/benchmarks/bench_foo
 BENCH_SRC := $(wildcard benchmarks/bench_*.c)
 BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
-BENCH_COMMON_SRC := src/pl_arena.c src/utils.c
+BENCH_COMMON_SRC := src/arena.c src/utils.c
 
 .PHONY: all clean run test test-unit test-integration test-integration-cached test-postgres test-build asan clean-testobj pg-dump-ast bench
 

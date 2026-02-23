@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "conn_catalog.h"
-#include "pl_arena.h"
+#include "arena.h"
 typedef struct DbTokenStore DbTokenStore;
 
 /* Token prefix for sensitive-value handles. */
@@ -43,7 +43,7 @@ typedef struct ParsedTokView {
  * hash index.
  * Returns a valid store on success, NULL on invalid input/allocation failure.
  */
-DbTokenStore *stok_store_create(const ConnProfile *profile, PlArena *arena);
+DbTokenStore *stok_store_create(const ConnProfile *profile, Arena *arena);
 
 /* Destroys one heap-owned DbTokenStore.
  * Ownership: releases store-owned internals and invalidates 'store'.

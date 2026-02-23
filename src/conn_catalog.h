@@ -1,7 +1,7 @@
 #ifndef CONN_CATALOG_H
 #define CONN_CATALOG_H
 
-#include "pl_arena.h"
+#include "arena.h"
 #include "safety_policy.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -27,7 +27,7 @@ typedef struct ColumnRule {
 typedef struct ColumnPolicy {
   ColumnRule *rules; // sorted by (table, col)
   size_t n_rules;
-  PlArena arena; // owns all strings and arrays in ColumnPolicy
+  Arena arena; // owns all strings and arrays in ColumnPolicy
 } ColumnPolicy;
 
 /* Represent whether or not a function is safe to call. */
@@ -42,7 +42,7 @@ typedef struct SafeFunctionRule {
 typedef struct SafeFunctionPolicy {
   SafeFunctionRule *rules; // sorted by function name
   size_t n_rules;
-  PlArena arena; // owns all strings and arrays in SafeFunctionPolicy
+  Arena arena; // owns all strings and arrays in SafeFunctionPolicy
 } SafeFunctionPolicy;
 
 /**

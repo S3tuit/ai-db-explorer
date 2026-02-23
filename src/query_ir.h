@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "pl_arena.h"
+#include "arena.h"
 #include "string_op.h"
 
 // DB-agnostic IR for a restricted SQL subset.
@@ -305,7 +305,7 @@ struct QirQuery {
 
 // Handle that owns the arena backing a QueryIR.
 typedef struct QirQueryHandle {
-  PlArena arena; // owns all allocations reachable from q
+  Arena arena; // owns all allocations reachable from q
   QirQuery *q;   // pointer inside arena
 } QirQueryHandle;
 
@@ -333,7 +333,7 @@ typedef struct QirTouch {
 // - join ON expressions (if joins allowed globally)
 // - recursively into nested queries (scope=NESTED)
 typedef struct QirTouchReport {
-  PlArena arena; // owns touch nodes and arrays
+  Arena arena; // owns touch nodes and arrays
   QirTouch **touches;
   uint32_t ntouches;
 
@@ -392,13 +392,13 @@ const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out);
  * Ownership: copies reason into arena when provided.
  * Side effects: mutates q->status and q->status_reason.
  * Error semantics: no return value; on invalid input it is a no-op. */
-void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status,
+void qir_set_status(QirQuery *q, Arena *arena, QirStatus status,
                     const char *reason);
 
 /* Resolves ORDER BY alias references to SELECT item expressions.
  * Ownership: returned pointer is owned by the QueryIR arena.
  * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
  * Returns the resolved expression or the original expression if no match. */
-QirExpr *qir_resolve_order_alias(QirQuery *q, PlArena *arena, QirExpr *expr);
+QirExpr *qir_resolve_order_alias(QirQuery *q, Arena *arena, QirExpr *expr);
 
 #endif // QUERY_IR_H

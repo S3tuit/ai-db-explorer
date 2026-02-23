@@ -114,8 +114,8 @@ static int vq_out_reset(ValidateQueryOut *out) {
   if (!out->plan.cols)
     return ERR;
 
-  pl_arena_clean(&out->plan.arena);
-  if (pl_arena_init(&out->plan.arena, NULL, NULL) != OK) {
+  arena_clean(&out->plan.arena);
+  if (arena_init(&out->plan.arena, NULL, NULL) != OK) {
     parr_destroy(out->plan.cols);
     out->plan.cols = NULL;
     return ERR;
@@ -173,7 +173,7 @@ static int validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
   if (need > UINT32_MAX)
     return ERR;
 
-  char *dst = (char *)pl_arena_calloc(&plan->arena, (uint32_t)(need + 1u));
+  char *dst = (char *)arena_calloc(&plan->arena, (uint32_t)(need + 1u));
   if (!dst)
     return ERR;
   if (schema && schema[0] != '\0') {
@@ -1463,7 +1463,7 @@ int vq_out_init(ValidateQueryOut *out) {
   if (!out->plan.cols)
     return ERR;
 
-  if (pl_arena_init(&out->plan.arena, NULL, NULL) != OK) {
+  if (arena_init(&out->plan.arena, NULL, NULL) != OK) {
     parr_destroy(out->plan.cols);
     out->plan.cols = NULL;
     return ERR;
@@ -1478,7 +1478,7 @@ void vq_out_clean(ValidateQueryOut *out) {
     return;
   parr_destroy(out->plan.cols);
   out->plan.cols = NULL;
-  pl_arena_clean(&out->plan.arena);
+  arena_clean(&out->plan.arena);
   sb_clean(&out->err.msg);
   out->err.code = VERR_NONE;
 }

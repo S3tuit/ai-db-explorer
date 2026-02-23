@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#include "pl_arena.h"
+#include "arena.h"
 
 /* StringPool interns repeated strings so equal content shares one pointer.
  *
@@ -19,7 +19,7 @@
  * - Pointers remain valid until spool_clean/spool_destroy.
  */
 typedef struct StringPool {
-  PlArena arena;           // owned storage for interned bytes
+  Arena arena;           // owned storage for interned bytes
   struct HashTable *index; // owned key->interned pointer map
 } StringPool;
 

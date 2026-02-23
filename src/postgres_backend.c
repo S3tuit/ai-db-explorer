@@ -37,12 +37,12 @@ typedef struct PgImpl {
  * Ownership: caller transfers ownership of 'owned' to the arena.
  * Side effects: allocates arena memory, frees 'owned'.
  * Returns NULL on error. */
-static char *pg_arena_transfer(PlArena *a, char *owned) {
+static char *pg_arena_transfer(Arena *a, char *owned) {
   if (!a || !owned) {
     free(owned);
     return NULL;
   }
-  char *dst = (char *)pl_arena_add_nul(a, owned, (uint32_t)strlen(owned));
+  char *dst = (char *)arena_add_nul(a, owned, (uint32_t)strlen(owned));
   free(owned);
   return dst;
 }
@@ -51,7 +51,7 @@ static char *pg_arena_transfer(PlArena *a, char *owned) {
  * Ownership: returns an arena-owned string; frees the input buffer.
  * Side effects: frees 'owned' and allocates arena memory.
  * Returns NULL on allocation failure or if input is NULL. */
-static char *pg_arena_transfer_lower(PlArena *a, char *owned) {
+static char *pg_arena_transfer_lower(Arena *a, char *owned) {
   if (!a || !owned) {
     free(owned);
     return NULL;
@@ -68,7 +68,7 @@ static char *pg_arena_transfer_lower(PlArena *a, char *owned) {
  * Ownership: returned string is arena-owned.
  * Side effects: allocates arena memory and frees a temporary string.
  * Returns NULL if alias is absent or invalid. */
-static char *pg_parse_alias_name(const JsonGetter *alias_obj, PlArena *a) {
+static char *pg_parse_alias_name(const JsonGetter *alias_obj, Arena *a) {
   if (!alias_obj || !a)
     return NULL;
 
@@ -103,10 +103,10 @@ static int pg_get_string_field(const JsonGetter *jg, const char *k1,
  * Ownership: returned pointer is owned by the arena.
  * Side effects: allocates arena memory.
  * Returns NULL on error. */
-static inline QirQuery *pg_qir_new_query(PlArena *a) {
+static inline QirQuery *pg_qir_new_query(Arena *a) {
   if (!a)
     return NULL;
-  QirQuery *q = (QirQuery *)pl_arena_calloc(a, (uint32_t)sizeof(*q));
+  QirQuery *q = (QirQuery *)arena_calloc(a, (uint32_t)sizeof(*q));
   if (!q)
     return NULL;
   q->status = QIR_OK;
@@ -119,8 +119,8 @@ static inline QirQuery *pg_qir_new_query(PlArena *a) {
  * Ownership: returned pointer is owned by the arena.
  * Side effects: allocates arena memory.
  * Returns NULL on error. */
-static inline QirExpr *pg_qir_new_expr(PlArena *a, QirExprKind kind) {
-  QirExpr *e = (QirExpr *)pl_arena_calloc(a, (uint32_t)sizeof(*e));
+static inline QirExpr *pg_qir_new_expr(Arena *a, QirExprKind kind) {
+  QirExpr *e = (QirExpr *)arena_calloc(a, (uint32_t)sizeof(*e));
   if (!e)
     return NULL;
   e->kind = kind;
@@ -131,7 +131,7 @@ static inline QirExpr *pg_qir_new_expr(PlArena *a, QirExprKind kind) {
  * Ownership: returned expression is arena-owned.
  * Side effects: may set has_star or mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
+static QirExpr *pg_parse_colref(const JsonGetter *jg, Arena *a, QirQuery *q) {
   if (!jg || !a || !q)
     return NULL;
 
@@ -182,8 +182,8 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     if (!e)
       return NULL;
     e->u.colref.qualifier.name =
-        (nparts == 1) ? parts[0] : (char *)pl_arena_add_nul(a, (void *)"", 0);
-    e->u.colref.column.name = (char *)pl_arena_add_nul(a, (void *)"*", 1);
+        (nparts == 1) ? parts[0] : (char *)arena_add_nul(a, (void *)"", 0);
+    e->u.colref.column.name = (char *)arena_add_nul(a, (void *)"*", 1);
     return e;
   }
   if (nparts == 0 || nparts > 2) {
@@ -196,7 +196,7 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     return NULL;
 
   if (nparts == 1) {
-    e->u.colref.qualifier.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+    e->u.colref.qualifier.name = (char *)arena_add_nul(a, (void *)"", 0);
     e->u.colref.column.name = parts[0];
   } else {
     e->u.colref.qualifier.name = parts[0];
@@ -210,7 +210,7 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
  * Ownership: returned expression is arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_literal(const JsonGetter *jg, PlArena *a,
+static QirExpr *pg_parse_literal(const JsonGetter *jg, Arena *a,
                                  QirQuery *q) {
   if (!jg || !a || !q)
     return NULL;
@@ -339,13 +339,13 @@ static QirExpr *pg_parse_literal(const JsonGetter *jg, PlArena *a,
  * Ownership: returned expression is arena-owned.
  * Side effects: may set query flags.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q);
+static QirExpr *pg_parse_expr(const JsonGetter *jg, Arena *a, QirQuery *q);
 
 /* Parses a WindowDef node into a QirWindowFunc.
  * Ownership: all arrays are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED for unsupported shapes.
  * Returns OK/ERR on allocation failure. */
-static int pg_parse_window_def(const JsonGetter *wg, PlArena *a, QirQuery *q,
+static int pg_parse_window_def(const JsonGetter *wg, Arena *a, QirQuery *q,
                                QirWindowFunc *wf) {
   if (!wg || !a || !q || !wf)
     return ERR;
@@ -438,7 +438,7 @@ static int pg_parse_window_def(const JsonGetter *wg, PlArena *a, QirQuery *q,
  * Ownership: returned expression and its children are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED on malformed or unknown shapes.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a,
+static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, Arena *a,
                                   QirQuery *q) {
   QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_CASE);
   if (!e)
@@ -490,7 +490,7 @@ static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a,
       break;
     }
 
-    QirCaseWhen *w = (QirCaseWhen *)pl_arena_calloc(a, (uint32_t)sizeof(*w));
+    QirCaseWhen *w = (QirCaseWhen *)arena_calloc(a, (uint32_t)sizeof(*w));
     if (!w) {
       rc = ERR;
       break;
@@ -542,7 +542,7 @@ static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a,
  * Ownership: returned expression is arena-owned.
  * Side effects: none (aside from allocations).
  * Returns NULL on allocation error. */
-static QirExpr *pg_fold_bool_expr(PlArena *a, QirQuery *q, QirExprKind kind,
+static QirExpr *pg_fold_bool_expr(Arena *a, QirQuery *q, QirExprKind kind,
                                   QirExpr **items, uint32_t nitems) {
   if (!a || !q || !items || nitems == 0)
     return NULL;
@@ -565,7 +565,7 @@ static QirExpr *pg_fold_bool_expr(PlArena *a, QirQuery *q, QirExprKind kind,
  * Ownership: returned expression is arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, PlArena *a,
+static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, Arena *a,
                                    QirQuery *q) {
   JsonArrIter it = {0};
   if (jsget_array_objects_begin(jg, "args", &it) != YES)
@@ -624,7 +624,7 @@ static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, PlArena *a,
  * Ownership: returned expression is arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
+static QirExpr *pg_parse_aexpr(const JsonGetter *jg, Arena *a, QirQuery *q) {
   // BETWEEN is encoded via A_Expr.kind with rexpr as a 2-item list.
   char *akind = NULL;
   int krc = jsget_string_decode_alloc(jg, "kind", &akind);
@@ -760,7 +760,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
         return NULL;
       in->u.in_.lhs = lhs;
       in->u.in_.items =
-          (QirExpr **)pl_arena_calloc(a, (uint32_t)sizeof(QirExpr *));
+          (QirExpr **)arena_calloc(a, (uint32_t)sizeof(QirExpr *));
       if (!in->u.in_.items)
         return NULL;
       in->u.in_.items[0] = rhs;
@@ -924,7 +924,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
  * Ownership: returned expression is arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
-static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a,
+static QirExpr *pg_parse_func_call(const JsonGetter *jg, Arena *a,
                                    QirQuery *q) {
   JsonArrIter it = {0};
   if (jsget_array_objects_begin(jg, "funcname", &it) != YES)
@@ -970,7 +970,7 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a,
   if (schema_to_tr) {
     schema = pg_arena_transfer_lower(a, schema_to_tr);
   } else {
-    schema = pl_arena_add_nul(a, (void *)"", 0);
+    schema = arena_add_nul(a, (void *)"", 0);
   }
   if (!schema)
     goto fail;
@@ -1065,7 +1065,7 @@ fail:
  * Ownership: type names are arena-owned.
  * Side effects: allocates arena memory.
  * Returns OK on success, ERR on parse/allocation failure. */
-static int pg_parse_typename(const JsonGetter *jg, PlArena *a,
+static int pg_parse_typename(const JsonGetter *jg, Arena *a,
                              QirTypeRef *out) {
   if (!jg || !a || !out)
     return ERR;
@@ -1142,20 +1142,20 @@ static int pg_parse_typename(const JsonGetter *jg, PlArena *a,
   }
 
   if (use_sb) {
-    char *name = (char *)pl_arena_calloc(a, (uint32_t)(sb.len + 1));
+    char *name = (char *)arena_calloc(a, (uint32_t)(sb.len + 1));
     sb_clean(&sb);
     if (!name)
       return ERR;
     memcpy(name, sb.data, sb.len);
     name[sb.len] = '\0';
-    out->schema.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+    out->schema.name = (char *)arena_add_nul(a, (void *)"", 0);
     out->name.name = name;
     return OK;
   }
 
   sb_clean(&sb);
   if (nparts == 1) {
-    out->schema.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+    out->schema.name = (char *)arena_add_nul(a, (void *)"", 0);
     out->name.name = parts[0];
   } else {
     out->schema.name = parts[0];
@@ -1168,13 +1168,13 @@ static int pg_parse_typename(const JsonGetter *jg, PlArena *a,
  * Ownership: all nodes/arrays are arena-owned.
  * Side effects: may set query flags.
  * Returns OK/ERR on allocation failure. */
-static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q);
+static int pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q);
 
 /* Parses an expression node into a QirExpr.
  * Ownership: returned expression is arena-owned.
  * Side effects: may set query flags.
  * Returns NULL on allocation failure. */
-static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
+static QirExpr *pg_parse_expr(const JsonGetter *jg, Arena *a, QirQuery *q) {
   if (!jg || !a || !q)
     return NULL;
 
@@ -1285,7 +1285,7 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
         return NULL;
       in->u.in_.lhs = lhs;
       in->u.in_.items =
-          (QirExpr **)pl_arena_calloc(a, (uint32_t)sizeof(QirExpr *));
+          (QirExpr **)arena_calloc(a, (uint32_t)sizeof(QirExpr *));
       if (!in->u.in_.items)
         return NULL;
       in->u.in_.items[0] = subexpr;
@@ -1335,8 +1335,8 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
  * Ownership: returned node is arena-owned.
  * Side effects: none.
  * Returns NULL on allocation failure. */
-static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
-  QirFromItem *fi = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
+static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, Arena *a) {
+  QirFromItem *fi = arena_calloc(a, (uint32_t)sizeof(QirFromItem));
   if (!fi)
     return NULL;
   fi->kind = QIR_FROM_BASE_REL;
@@ -1350,7 +1350,7 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
   if (jsget_string_decode_alloc(jg, "schemaname", &tmp) == YES) {
     fi->u.rel.schema.name = pg_arena_transfer_lower(a, tmp);
   } else {
-    fi->u.rel.schema.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+    fi->u.rel.schema.name = (char *)arena_add_nul(a, (void *)"", 0);
   }
 
   // alias
@@ -1360,7 +1360,7 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
   }
 
   if (!fi->alias.name)
-    fi->alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+    fi->alias.name = (char *)arena_add_nul(a, (void *)"", 0);
   return fi;
 }
 
@@ -1368,7 +1368,7 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
  * Ownership: returned array is arena-owned.
  * Side effects: allocates arena memory.
  * Returns OK/ERR. */
-static int pg_parse_alias_colnames(const JsonGetter *alias_obj, PlArena *a,
+static int pg_parse_alias_colnames(const JsonGetter *alias_obj, Arena *a,
                                    QirIdent **out_cols, uint32_t *out_ncols) {
   if (!alias_obj || !a || !out_cols || !out_ncols)
     return ERR;
@@ -1409,7 +1409,7 @@ static int pg_parse_alias_colnames(const JsonGetter *alias_obj, PlArena *a,
   }
   if (cols.len > 0) {
     QirIdent *arr =
-        (QirIdent *)pl_arena_calloc(a, (uint32_t)(cols.len * sizeof(QirIdent)));
+        (QirIdent *)arena_calloc(a, (uint32_t)(cols.len * sizeof(QirIdent)));
     if (!arr) {
       ptrvec_clean(&cols);
       return ERR;
@@ -1469,14 +1469,14 @@ static void pg_resolve_cte_refs_in_query(const QirQuery *q) {
  * Ownership: from/joins vectors own their temporary buffers.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static int pg_parse_from_item(const JsonGetter *jg, PlArena *a, QirQuery *q,
+static int pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
                               PtrVec *froms, PtrVec *joins);
 
 /* Parses a join expression into from-items and joins (left-deep).
  * Ownership: join nodes are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
+static int pg_parse_join_expr(const JsonGetter *jg, Arena *a, QirQuery *q,
                               PtrVec *froms, PtrVec *joins) {
   // left
   JsonGetter ljg = {0};
@@ -1516,7 +1516,7 @@ static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
     qir_set_status(q, a, QIR_UNSUPPORTED, "NATURAL JOIN not supported");
   }
 
-  QirJoin *j = pl_arena_calloc(a, (uint32_t)sizeof(QirJoin));
+  QirJoin *j = arena_calloc(a, (uint32_t)sizeof(QirJoin));
   if (!j)
     return ERR;
   switch (jointype) {
@@ -1557,10 +1557,10 @@ static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
     if (jsget_object(&ssjg, "subquery", &subjg) == YES) {
       JsonGetter seljg = {0};
       if (jsget_object(&subjg, "SelectStmt", &seljg) == YES) {
-        QirFromItem *fi = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
+        QirFromItem *fi = arena_calloc(a, (uint32_t)sizeof(QirFromItem));
         if (fi) {
           fi->kind = QIR_FROM_SUBQUERY;
-          fi->alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+          fi->alias.name = (char *)arena_add_nul(a, (void *)"", 0);
           fi->u.values.colnames = NULL;
           fi->u.values.ncolnames = 0;
           fi->u.subquery = pg_qir_new_query(a);
@@ -1589,7 +1589,7 @@ static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
     }
   } else {
     qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported join rhs");
-    j->rhs = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
+    j->rhs = arena_calloc(a, (uint32_t)sizeof(QirFromItem));
     if (j->rhs)
       j->rhs->kind = QIR_FROM_UNSUPPORTED;
   }
@@ -1611,7 +1611,7 @@ static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
  * Ownership: from/join nodes are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static int pg_parse_from_item(const JsonGetter *jg, PlArena *a, QirQuery *q,
+static int pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
                               PtrVec *froms, PtrVec *joins) {
   if (!jg || !a || !q)
     return ERR;
@@ -1636,11 +1636,11 @@ static int pg_parse_from_item(const JsonGetter *jg, PlArena *a, QirQuery *q,
     if (jsget_bool01(&ssjg, "lateral", &lat) == YES && lat) {
       qir_set_status(q, a, QIR_UNSUPPORTED, "LATERAL subquery not supported");
     }
-    QirFromItem *fi = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
+    QirFromItem *fi = arena_calloc(a, (uint32_t)sizeof(QirFromItem));
     if (!fi)
       return ERR;
     fi->kind = QIR_FROM_SUBQUERY;
-    fi->alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+    fi->alias.name = (char *)arena_add_nul(a, (void *)"", 0);
     fi->u.values.colnames = NULL;
     fi->u.values.ncolnames = 0;
 
@@ -1687,7 +1687,7 @@ static int pg_parse_from_item(const JsonGetter *jg, PlArena *a, QirQuery *q,
  * Ownership: all nodes/arrays are arena-owned.
  * Side effects: sets query flags and fills lists.
  * Returns OK/ERR on allocation failure. */
-static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
+static int pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q) {
   if (!jg || !a || !q)
     return ERR;
 
@@ -1711,7 +1711,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
       }
 
       QirSelectItem *si =
-          (QirSelectItem *)pl_arena_calloc(a, (uint32_t)sizeof(QirSelectItem));
+          (QirSelectItem *)arena_calloc(a, (uint32_t)sizeof(QirSelectItem));
       if (!si) {
         rc = ERR;
         break;
@@ -1721,7 +1721,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
       if (jsget_string_decode_alloc(&rjg, "name", &tmp) == YES) {
         si->out_alias.name = pg_arena_transfer_lower(a, tmp);
       } else {
-        si->out_alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
+        si->out_alias.name = (char *)arena_add_nul(a, (void *)"", 0);
       }
 
       JsonGetter vjg = {0};
@@ -1871,7 +1871,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
           break;
         }
 
-        QirCte *cte = pl_arena_calloc(a, (uint32_t)sizeof(QirCte));
+        QirCte *cte = arena_calloc(a, (uint32_t)sizeof(QirCte));
         if (!cte) {
           rc = ERR;
           break;

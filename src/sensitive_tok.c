@@ -9,7 +9,7 @@
 
 #include "hash_table.h"
 #include "packed_array.h"
-#include "pl_arena.h"
+#include "arena.h"
 #include "spool.h"
 #include "utils.h"
 
@@ -17,7 +17,7 @@ struct DbTokenStore {
   const char *connection_name;
   uint32_t connection_name_len;
   SafetyColumnStrategy mode;
-  PlArena *arena;      // borrowed from BrokerMcpSession
+  Arena *arena;      // borrowed from BrokerMcpSession
   PackedArray *tokens; // entries are SensitiveTok
   StringPool col_ref_pool;
   HashTable *det_index; // used only for deterministic mode
@@ -123,7 +123,7 @@ static void stok_store_clean_inplace(DbTokenStore *store) {
   store->arena = NULL;
 }
 
-DbTokenStore *stok_store_create(const ConnProfile *profile, PlArena *arena) {
+DbTokenStore *stok_store_create(const ConnProfile *profile, Arena *arena) {
   if (!profile || !profile->connection_name || !arena)
     return NULL;
 
@@ -242,7 +242,7 @@ static int stok_format_token(char out_tok[SENSITIVE_TOK_BUFSZ],
 }
 
 /* Appends one SensitiveTok entry to store->tokens (from borrowed input view),
- * stores 'in->value' inside the 'stores''s borrowed PlArena, and stores the
+ * stores 'in->value' inside the 'stores''s borrowed Arena, and stores the
  * column reference of the token inside 'store''s owned StringPool.
  * Populates 'out' with the exact SensitiveTok added to store->tokens.
  * Error semantics: returns appended index on success, UINT32_MAX on invalid
@@ -262,7 +262,7 @@ static uint32_t stok_append_entry(DbTokenStore *store, const SensitiveTokIn *in,
 
   const char *arena_value = NULL;
   if (in->value) {
-    arena_value = (const char *)pl_arena_add_nul(store->arena, (void *)in->value,
+    arena_value = (const char *)arena_add_nul(store->arena, (void *)in->value,
                                                  in->value_len);
     if (!arena_value)
       return UINT32_MAX;
@@ -331,7 +331,7 @@ int stok_store_create_token(DbTokenStore *store, uint32_t generation,
     // we have to persist the key used by the HashTable since it must be valid
     // for the whole HashTable's lifetime
     SensitiveTokKey *owned_key =
-        (SensitiveTokKey *)pl_arena_calloc(store->arena, sizeof(*owned_key));
+        (SensitiveTokKey *)arena_calloc(store->arena, sizeof(*owned_key));
     if (!owned_key) {
       parr_drop_swap(store->tokens, added_idx);
       return -1;

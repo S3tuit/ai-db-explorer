@@ -3,33 +3,33 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "pl_arena.h"
+#include "arena.h"
 #include "utils.h"
 
 /*------------------------------------ helpers ------------------------------*/
-#define PL_ARENA_ALIGN ((uint32_t)sizeof(uintptr_t))
+#define ARENA_ALIGN ((uint32_t)sizeof(uintptr_t))
 
-static inline uint32_t pl_align_up_u32(uint32_t n, uint32_t a) {
+static inline uint32_t arena_align_up_u32(uint32_t n, uint32_t a) {
   // a must be power-of-two for this fast path
   return (n + (a - 1u)) & ~(a - 1u);
 }
 
-static inline int pl_is_power_of_two_u32(uint32_t x) {
+static inline int arena_is_power_of_two_u32(uint32_t x) {
   return x != 0u && (x & (x - 1u)) == 0u;
 }
 
-typedef struct PlArenaBlock {
-  struct PlArenaBlock *next;
+typedef struct ArenaBlock {
+  struct ArenaBlock *next;
   uint32_t used;
   uint32_t cap;
   _Alignas(sizeof(uintptr_t)) uint8_t data[];
-} PlArenaBlock;
+} ArenaBlock;
 
 /*---------------------------------------------------------------------------*/
 
 /* Allocates a new block with capacity 'cap'. */
-static PlArenaBlock *pl_arena_block_create(uint32_t cap) {
-  PlArenaBlock *b = xmalloc(sizeof(*b) + cap);
+static ArenaBlock *arena_block_create(uint32_t cap) {
+  ArenaBlock *b = xmalloc(sizeof(*b) + cap);
   b->next = NULL;
   b->used = 0;
   b->cap = cap;
@@ -37,10 +37,10 @@ static PlArenaBlock *pl_arena_block_create(uint32_t cap) {
 }
 
 /* Initializes an arena in-place.
- * Ownership: caller retains the arena object and must call pl_arena_clean().
+ * Ownership: caller retains the arena object and must call arena_clean().
  * Side effects: allocates the first block.
  * Returns OK on success, ERR on bad input or allocation failure. */
-int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
+int arena_init(Arena *ar, uint32_t *size_p, uint32_t *cap_p) {
   if (!ar)
     return ERR;
 
@@ -49,14 +49,14 @@ int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
   uint32_t cap = (cap_p == NULL || *cap_p == 0) ? 2048000u : *cap_p;  // ~2MB
 
   // Validate alignment
-  if (!pl_is_power_of_two_u32(PL_ARENA_ALIGN))
+  if (!arena_is_power_of_two_u32(ARENA_ALIGN))
     return ERR;
 
   // defensive
   if (size > cap)
     size = cap;
 
-  ar->head = pl_arena_block_create(size);
+  ar->head = arena_block_create(size);
   ar->tail = ar->head;
   ar->used = 0;
   ar->cap = cap;
@@ -66,12 +66,12 @@ int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
 }
 
 /* Allocates and initializes a heap-owned arena.
- * Ownership: caller owns the returned arena and must call pl_arena_destroy().
+ * Ownership: caller owns the returned arena and must call arena_destroy().
  * Side effects: allocates heap blocks.
  * Returns NULL on error. */
-PlArena *pl_arena_create(uint32_t *size_p, uint32_t *cap_p) {
-  PlArena *ar = xmalloc(sizeof(*ar));
-  if (pl_arena_init(ar, size_p, cap_p) != OK) {
+Arena *arena_create(uint32_t *size_p, uint32_t *cap_p) {
+  Arena *ar = xmalloc(sizeof(*ar));
+  if (arena_init(ar, size_p, cap_p) != OK) {
     free(ar);
     return NULL;
   }
@@ -83,10 +83,10 @@ PlArena *pl_arena_create(uint32_t *size_p, uint32_t *cap_p) {
  * Ownership: invalidates 'ar' for further use.
  * Side effects: frees memory.
  * Returns void. */
-void pl_arena_destroy(PlArena *ar) {
+void arena_destroy(Arena *ar) {
   if (!ar)
     return;
-  pl_arena_clean(ar);
+  arena_clean(ar);
   free(ar);
 }
 
@@ -94,12 +94,12 @@ void pl_arena_destroy(PlArena *ar) {
  * Ownership: caller retains 'ar' for reuse.
  * Side effects: frees memory.
  * Returns void. */
-void pl_arena_clean(PlArena *ar) {
+void arena_clean(Arena *ar) {
   if (!ar)
     return;
-  PlArenaBlock *b = ar->head;
+  ArenaBlock *b = ar->head;
   while (b) {
-    PlArenaBlock *next = b->next;
+    ArenaBlock *next = b->next;
     free(b);
     b = next;
   }
@@ -110,7 +110,7 @@ void pl_arena_clean(PlArena *ar) {
   ar->block_sz = 0;
 }
 
-int pl_arena_is_zeroed(const PlArena *ar) {
+int arena_is_zeroed(const Arena *ar) {
   if (!ar)
     return ERR;
   if (ar->head || ar->tail || ar->used != 0 || ar->cap != 0 ||
@@ -120,11 +120,11 @@ int pl_arena_is_zeroed(const PlArena *ar) {
   return YES;
 }
 
-int pl_arena_is_ok(const PlArena *ar) {
+int arena_is_ok(const Arena *ar) {
   if (!ar)
     return ERR;
 
-  int zeroed = pl_arena_is_zeroed(ar);
+  int zeroed = arena_is_zeroed(ar);
   if (zeroed == YES)
     return NO;
   if (zeroed == ERR)
@@ -137,8 +137,8 @@ int pl_arena_is_ok(const PlArena *ar) {
   if (ar->used > ar->cap)
     return NO;
 
-  const PlArenaBlock *b = ar->head;
-  const PlArenaBlock *last = NULL;
+  const ArenaBlock *b = ar->head;
+  const ArenaBlock *last = NULL;
   uint64_t used_sum = 0;
   while (b) {
     if (b->cap == 0)
@@ -168,7 +168,7 @@ int pl_arena_is_ok(const PlArena *ar) {
  * Ownership: arena retains ownership of blocks.
  * Side effects: may allocate a new block.
  * Returns OK on success, ERR on cap/overflow. */
-int pl_arena_ensure(PlArena *ar, uint32_t extra) {
+int arena_ensure(Arena *ar, uint32_t extra) {
   if (!ar)
     return ERR;
 
@@ -205,28 +205,28 @@ int pl_arena_ensure(PlArena *ar, uint32_t extra) {
   if (new_sz < extra)
     return ERR;
 
-  PlArenaBlock *nb = pl_arena_block_create(new_sz);
+  ArenaBlock *nb = arena_block_create(new_sz);
   ar->tail->next = nb;
   ar->tail = nb;
   ar->block_sz = new_sz;
   return OK;
 }
 
-/* Bumps the arena cursor by 'len' bytes (aligned up to PL_ARENA_ALIGN)
+/* Bumps the arena cursor by 'len' bytes (aligned up to ARENA_ALIGN)
  * and returns a pointer to the start of the reserved region.
  * Padding bytes between 'len' and the aligned size are zeroed.
  * Returns NULL on invalid input, overflow, or capacity failure.
  */
-static inline uint8_t *pl_arena_reserve(PlArena *ar, uint32_t len) {
+static inline uint8_t *arena_reserve(Arena *ar, uint32_t len) {
   if (!ar)
     return NULL;
 
-  if (len > UINT32_MAX - PL_ARENA_ALIGN)
+  if (len > UINT32_MAX - ARENA_ALIGN)
     return NULL;
 
-  const uint32_t entry_sz = pl_align_up_u32(len, PL_ARENA_ALIGN);
+  const uint32_t entry_sz = arena_align_up_u32(len, ARENA_ALIGN);
 
-  if (pl_arena_ensure(ar, entry_sz) != OK)
+  if (arena_ensure(ar, entry_sz) != OK)
     return NULL;
 
   uint8_t *payload = ar->tail->data + ar->tail->used;
@@ -240,12 +240,12 @@ static inline uint8_t *pl_arena_reserve(PlArena *ar, uint32_t len) {
   return payload;
 }
 
-void *pl_arena_alloc(PlArena *ar, uint32_t len) {
-  return (void *)pl_arena_reserve(ar, len);
+void *arena_alloc(Arena *ar, uint32_t len) {
+  return (void *)arena_reserve(ar, len);
 }
 
-void *pl_arena_calloc(PlArena *ar, uint32_t len) {
-  uint8_t *payload = pl_arena_reserve(ar, len);
+void *arena_calloc(Arena *ar, uint32_t len) {
+  uint8_t *payload = arena_reserve(ar, len);
   if (!payload)
     return NULL;
   if (len != 0)
@@ -253,11 +253,11 @@ void *pl_arena_calloc(PlArena *ar, uint32_t len) {
   return payload;
 }
 
-void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
+void *arena_add(Arena *ar, void *start_v, uint32_t len) {
   if (!start_v && len != 0)
     return NULL;
 
-  uint8_t *payload = pl_arena_reserve(ar, len);
+  uint8_t *payload = arena_reserve(ar, len);
   if (!payload)
     return NULL;
   if (len != 0)
@@ -265,14 +265,14 @@ void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
   return payload;
 }
 
-void *pl_arena_add_nul(PlArena *ar, void *start_v, uint32_t len) {
+void *arena_add_nul(Arena *ar, void *start_v, uint32_t len) {
   if (!start_v && len != 0)
     return NULL;
 
   if (len > UINT32_MAX - 1u)
     return NULL;
 
-  uint8_t *payload = pl_arena_reserve(ar, len + 1u);
+  uint8_t *payload = arena_reserve(ar, len + 1u);
   if (!payload)
     return NULL;
   if (len != 0)
@@ -281,7 +281,7 @@ void *pl_arena_add_nul(PlArena *ar, void *start_v, uint32_t len) {
   return payload;
 }
 
-uint32_t pl_arena_get_used(PlArena *ar) {
+uint32_t arena_get_used(Arena *ar) {
   if (!ar)
     return 0u;
   return ar->used;
@@ -303,10 +303,10 @@ int ptrvec_push(PtrVec *v, void *ptr) {
   return OK;
 }
 
-void **ptrvec_flatten(PtrVec *v, PlArena *a) {
+void **ptrvec_flatten(PtrVec *v, Arena *a) {
   if (!v || !a || v->len == 0)
     return NULL;
-  void **arr = (void **)pl_arena_alloc(a, (uint32_t)(v->len * sizeof(*arr)));
+  void **arr = (void **)arena_alloc(a, (uint32_t)(v->len * sizeof(*arr)));
   if (!arr)
     return NULL;
   memcpy(arr, v->items, v->len * sizeof(*arr));

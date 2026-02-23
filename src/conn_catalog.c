@@ -289,7 +289,7 @@ static int parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
 
   qsort(tmp, tmp_len, sizeof(*tmp), colruletmp_cmp);
 
-  if (pl_arena_init(&out->col_policy.arena, NULL, NULL) != OK) {
+  if (arena_init(&out->col_policy.arena, NULL, NULL) != OK) {
     set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
                   path_prefix);
     goto error;
@@ -310,7 +310,7 @@ static int parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
 
   // At this point we have a sorted tmp array (not malloc'd) of ColumnRuleTmp.
   // Now we have to malloc it in order to persist it.
-  ColumnRule *rules = (ColumnRule *)pl_arena_calloc(
+  ColumnRule *rules = (ColumnRule *)arena_calloc(
       &out->col_policy.arena, (uint32_t)(n_rules * sizeof(*rules)));
   if (!rules) {
     set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
@@ -343,16 +343,16 @@ static int parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
     }
 
     ColumnRule *r = &rules[rix++];
-    r->table = (const char *)pl_arena_add_nul(&out->col_policy.arena, tmp[i].table,
+    r->table = (const char *)arena_add_nul(&out->col_policy.arena, tmp[i].table,
                                           (uint32_t)strlen(tmp[i].table));
-    r->col = (const char *)pl_arena_add_nul(&out->col_policy.arena, tmp[i].col,
+    r->col = (const char *)arena_add_nul(&out->col_policy.arena, tmp[i].col,
                                         (uint32_t)strlen(tmp[i].col));
     r->is_global = is_global;
     r->n_schemas = (uint32_t)n_schema;
     r->schemas = NULL;
 
     if (n_schema > 0) {
-      const char **schemas = (const char **)pl_arena_calloc(
+      const char **schemas = (const char **)arena_calloc(
           &out->col_policy.arena, (uint32_t)(n_schema * sizeof(*schemas)));
       if (!schemas) {
         set_parse_err(err_out,
@@ -369,7 +369,7 @@ static int parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
         if (last_schema && strcmp(tmp[t].schema, last_schema) == 0)
           continue;
         schemas[k++] =
-            (const char *)pl_arena_add_nul(&out->col_policy.arena, tmp[t].schema,
+            (const char *)arena_add_nul(&out->col_policy.arena, tmp[t].schema,
                                        (uint32_t)strlen(tmp[t].schema));
         last_schema = tmp[t].schema;
       }
@@ -424,7 +424,7 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
     return ERR;
   }
 
-  if (pl_arena_init(&out->safe_funcs.arena, NULL, NULL) != OK) {
+  if (arena_init(&out->safe_funcs.arena, NULL, NULL) != OK) {
     set_parse_err(err_out, "%s.safeFunctions: internal allocation error.",
                   path_prefix);
     return ERR;
@@ -496,7 +496,7 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
       uniq++;
   }
 
-  out->safe_funcs.rules = (SafeFunctionRule *)pl_arena_calloc(
+  out->safe_funcs.rules = (SafeFunctionRule *)arena_calloc(
       &out->safe_funcs.arena, (uint32_t)(uniq * sizeof(SafeFunctionRule)));
   if (!out->safe_funcs.rules)
     goto error;
@@ -522,7 +522,7 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
     }
 
     SafeFunctionRule *r = &out->safe_funcs.rules[ri++];
-    r->name = (const char *)pl_arena_add_nul(&out->safe_funcs.arena, name,
+    r->name = (const char *)arena_add_nul(&out->safe_funcs.arena, name,
                                          (uint32_t)strlen(name));
     if (!r->name)
       goto error;
@@ -531,7 +531,7 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
     if (scount == 0) {
       r->schemas = NULL;
     } else {
-      r->schemas = (const char **)pl_arena_calloc(
+      r->schemas = (const char **)arena_calloc(
           &out->safe_funcs.arena, (uint32_t)(scount * sizeof(char *)));
       if (!r->schemas)
         goto error;
@@ -543,7 +543,7 @@ static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
         if (prev && strcmp(prev, tmp[t].schema) == 0)
           continue;
         r->schemas[k++] =
-            (const char *)pl_arena_add_nul(&out->safe_funcs.arena, tmp[t].schema,
+            (const char *)arena_add_nul(&out->safe_funcs.arena, tmp[t].schema,
                                        (uint32_t)strlen(tmp[t].schema));
         if (!r->schemas[k - 1])
           goto error;
@@ -570,7 +570,7 @@ error:
     }
   }
   free(tmp);
-  pl_arena_clean(&out->safe_funcs.arena);
+  arena_clean(&out->safe_funcs.arena);
   out->safe_funcs.rules = NULL;
   out->safe_funcs.n_rules = 0;
   return ERR;
@@ -719,8 +719,8 @@ static void profile_clean(ConnProfile *p) {
   free((char *)p->db_name);
   free((char *)p->user);
   free((char *)p->options);
-  pl_arena_clean(&p->col_policy.arena);
-  pl_arena_clean(&p->safe_funcs.arena);
+  arena_clean(&p->col_policy.arena);
+  arena_clean(&p->safe_funcs.arena);
 }
 
 /* Parses one databases[i] object into 'out'. This will clean 'out' if something

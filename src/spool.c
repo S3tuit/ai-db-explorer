@@ -23,7 +23,7 @@ static const char *spool_store(StringPool *sp, const char *s, uint32_t len) {
   if (sp->arena.head == NULL || sp->arena.tail == NULL)
     return NULL;
 
-  const char *owned = (const char *)pl_arena_add_nul(&sp->arena, (void *)s, len);
+  const char *owned = (const char *)arena_add_nul(&sp->arena, (void *)s, len);
   if (!owned)
     return NULL;
   if (ht_put(sp->index, owned, len, owned) != OK)
@@ -45,12 +45,12 @@ int spool_init(StringPool *sp) {
     return ERR;
 
   memset(sp, 0, sizeof(*sp));
-  if (pl_arena_init(&sp->arena, NULL, NULL) != OK)
+  if (arena_init(&sp->arena, NULL, NULL) != OK)
     return ERR;
 
   sp->index = ht_create_with_capacity(SPOOL_HT_INIT_SLOTS);
   if (!sp->index) {
-    pl_arena_clean(&sp->arena);
+    arena_clean(&sp->arena);
     return ERR;
   }
   return OK;
@@ -61,7 +61,7 @@ void spool_clean(StringPool *sp) {
     return;
   ht_destroy(sp->index);
   sp->index = NULL;
-  pl_arena_clean(&sp->arena);
+  arena_clean(&sp->arena);
 }
 
 void spool_destroy(StringPool *sp) {

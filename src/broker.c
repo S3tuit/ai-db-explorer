@@ -6,7 +6,7 @@
 #include "json_codec.h"
 #include "log.h"
 #include "packed_array.h"
-#include "pl_arena.h"
+#include "arena.h"
 #include "query_result.h"
 #include "sensitive_tok.h"
 #include "stdio_byte_channel.h"
@@ -68,7 +68,7 @@ typedef struct BrokerMcpSession {
   int fd; // connection identity (owned by bc). -1 if disconnected but resumable
   uint8_t resume_token[RESUME_TOKEN_LEN]; // can be used to resume the session
   uint32_t generation;                    // session-wide token generation
-  PlArena arena;          // stores per-session token value bytes
+  Arena arena;          // stores per-session token value bytes
   PackedArray *db_stores; // owned array of DbTokenStore*
   time_t created_at;      // for absolute TTL
   time_t last_active;     // for idle TTL
@@ -289,8 +289,8 @@ static void session_owned_clean(BrokerMcpSession *s) {
     return;
   parr_destroy(s->db_stores);
   s->db_stores = NULL;
-  pl_arena_clean(&s->arena);
-  s->arena = (PlArena){0};
+  arena_clean(&s->arena);
+  s->arena = (Arena){0};
 }
 
 /* Cleanup callback for active session slots.
@@ -347,7 +347,7 @@ static uint32_t sessions_add_from_pending(PackedArray *active,
   // pending no longer owns channel/fd after transfer.
   pending->fd = -1;
   memset(&pending->bc, 0, sizeof(pending->bc));
-  pending->arena = (PlArena){0};
+  pending->arena = (Arena){0};
   pending->db_stores = NULL;
 
   if (out_sess)
@@ -371,14 +371,14 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
   uint8_t token[RESUME_TOKEN_LEN];
   memcpy(token, src->resume_token, RESUME_TOKEN_LEN);
   uint32_t generation = src->generation;
-  PlArena arena = src->arena;
+  Arena arena = src->arena;
   PackedArray *db_stores = src->db_stores;
   time_t created = src->created_at;
 
   /* Tear down the live connection. */
   bufch_clean(&src->bc);
   src->fd = -1;
-  src->arena = (PlArena){0};
+  src->arena = (Arena){0};
   src->db_stores = NULL;
 
   /* Remove from active (cleanup callback is safe — bufch_clean is
@@ -952,7 +952,7 @@ static int verify_peer_uid(int cfd) {
 /* Initializes token-state containers for one broker session.
  * It borrows and mutates 'sess'; ownership of created members stays in the
  * session and is later released by session cleanup callbacks.
- * Side effects: allocate/init the per-session PlArena and db_stores array.
+ * Side effects: allocate/init the per-session Arena and db_stores array.
  * Error semantics: returns OK when state is ready, ERR on invalid input,
  * inconsistent partial state, or allocation failure.
  */
@@ -961,16 +961,16 @@ static int broker_session_token_state_init(BrokerMcpSession *sess) {
     return ERR;
 
   // session should be empty/zeroed during initialization
-  assert(pl_arena_is_zeroed(&sess->arena) == YES);
+  assert(arena_is_zeroed(&sess->arena) == YES);
   assert(!sess->db_stores);
 
   uint32_t cap = SESSION_TOKEN_ARENA_CAP_BYTES;
-  if (pl_arena_init(&sess->arena, NULL, &cap) != OK)
+  if (arena_init(&sess->arena, NULL, &cap) != OK)
     return ERR;
 
   sess->db_stores = parr_create(sizeof(DbTokenStore *));
   if (!sess->db_stores) {
-    pl_arena_clean(&sess->arena);
+    arena_clean(&sess->arena);
     return ERR;
   }
   parr_set_cleanup(sess->db_stores, broker_db_store_cleanup, NULL);
@@ -983,7 +983,7 @@ static int broker_session_token_state_init(BrokerMcpSession *sess) {
 inline static int broker_session_token_state_ok(BrokerMcpSession *sess) {
   if (!sess)
     return ERR;
-  if (!sess->db_stores || pl_arena_is_ok(&sess->arena) != YES)
+  if (!sess->db_stores || arena_is_ok(&sess->arena) != YES)
     return NO;
   return YES;
 }
@@ -1120,7 +1120,7 @@ static int broker_do_handshake(Broker *b, int cfd) {
     active_sess->last_active = now;
 
     // idle session lost owenership of these entities
-    idle_sess->arena = (PlArena){0};
+    idle_sess->arena = (Arena){0};
     idle_sess->db_stores = NULL;
 
     // Remove stale idle record.

@@ -19,12 +19,12 @@ int qir_handle_init(QirQueryHandle *h) {
 
   uint32_t size = 8192u;
   uint32_t cap = 1048000u; // ~1MB
-  if (pl_arena_init(&h->arena, &size, &cap) != OK)
+  if (arena_init(&h->arena, &size, &cap) != OK)
     return ERR;
 
-  QirQuery *q = (QirQuery *)pl_arena_calloc(&h->arena, (uint32_t)sizeof(*q));
+  QirQuery *q = (QirQuery *)arena_calloc(&h->arena, (uint32_t)sizeof(*q));
   if (!q) {
-    pl_arena_clean(&h->arena);
+    arena_clean(&h->arena);
     return ERR;
   }
   memset(q, 0, sizeof(*q));
@@ -44,7 +44,7 @@ int qir_handle_init(QirQueryHandle *h) {
 void qir_handle_destroy(QirQueryHandle *h) {
   if (!h)
     return;
-  pl_arena_clean(&h->arena);
+  arena_clean(&h->arena);
   h->q = NULL;
 }
 
@@ -59,7 +59,7 @@ void qir_handle_destroy(QirQueryHandle *h) {
 void qir_touch_report_destroy(QirTouchReport *tr) {
   if (!tr)
     return;
-  pl_arena_clean(&tr->arena);
+  arena_clean(&tr->arena);
   free(tr);
 }
 
@@ -67,7 +67,7 @@ void qir_touch_report_destroy(QirTouchReport *tr) {
  * Ownership: copies reason into arena when provided.
  * Side effects: mutates q->status and q->status_reason.
  * Error semantics: no return value; on invalid input it is a no-op. */
-void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status,
+void qir_set_status(QirQuery *q, Arena *arena, QirStatus status,
                     const char *reason) {
   if (!q)
     return;
@@ -77,7 +77,7 @@ void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status,
     return;
   if (!q->status_reason && reason) {
     if (arena) {
-      q->status_reason = (const char *)pl_arena_add_nul(
+      q->status_reason = (const char *)arena_add_nul(
           arena, (void *)reason, (uint32_t)strlen(reason));
     } else {
       q->status_reason = reason;
@@ -102,7 +102,7 @@ static bool qir_ident_eq(const QirIdent *a, const QirIdent *b) {
  * Ownership: returned pointer is owned by the QueryIR arena.
  * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
  * Returns the resolved expression or the original expression if no match. */
-QirExpr *qir_resolve_order_alias(QirQuery *q, PlArena *arena, QirExpr *expr) {
+QirExpr *qir_resolve_order_alias(QirQuery *q, Arena *arena, QirExpr *expr) {
   if (!q || !expr || expr->kind != QIR_EXPR_COLREF)
     return expr;
   if (!expr->u.colref.qualifier.name ||
@@ -219,7 +219,7 @@ static int qir_touch_report_add(QirTouchReport *tr, QirScope scope,
   if (!tr || !col)
     return -1;
 
-  QirTouch *t = (QirTouch *)pl_arena_calloc(&tr->arena, (uint32_t)sizeof(*t));
+  QirTouch *t = (QirTouch *)arena_calloc(&tr->arena, (uint32_t)sizeof(*t));
   if (!t)
     return -1;
 
@@ -481,7 +481,7 @@ QirTouchReport *qir_extract_touches(const QirQuery *q) {
   QirTouchReport *tr = (QirTouchReport *)xcalloc(1, sizeof(*tr));
   if (!tr)
     return NULL;
-  if (pl_arena_init(&tr->arena, NULL, NULL) != OK) {
+  if (arena_init(&tr->arena, NULL, NULL) != OK) {
     free(tr);
     return NULL;
   }

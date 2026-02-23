@@ -26,7 +26,7 @@ static int set_cell_plain(QueryResultBuilder *qb, uint32_t row, uint32_t col,
 /* Creates one deterministic token store backed by the given arena.
  * It borrows 'arena' and returns a heap-owned store; caller must destroy it.
  */
-static DbTokenStore *create_det_store(PlArena *arena, const char *conn_name) {
+static DbTokenStore *create_det_store(Arena *arena, const char *conn_name) {
   ConnProfile cp = make_profile(conn_name, SAFETY_COLSTRAT_DETERMINISTIC);
   return stok_store_create(&cp, arena);
 }
@@ -328,8 +328,8 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
   ASSERT_TRUE(vcol1->col_id != NULL);
   ASSERT_TRUE(vcol1->col_id_len > 0);
 
-  PlArena arena = {0};
-  ASSERT_TRUE(pl_arena_init(&arena, NULL, NULL) == OK);
+  Arena arena = {0};
+  ASSERT_TRUE(arena_init(&arena, NULL, NULL) == OK);
   DbTokenStore *store = create_det_store(&arena, "pgmain");
   ASSERT_TRUE(store != NULL);
 
@@ -383,7 +383,7 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
 
   qr_destroy(qr);
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
   vq_out_clean(&out);
 }
 
@@ -396,8 +396,8 @@ static void test_qb_sensitive_null_remains_null(void) {
   ValidateQueryOut out = {0};
   ASSERT_TRUE(get_validate_query_out(&out, sql) == OK);
 
-  PlArena arena = {0};
-  ASSERT_TRUE(pl_arena_init(&arena, NULL, NULL) == OK);
+  Arena arena = {0};
+  ASSERT_TRUE(arena_init(&arena, NULL, NULL) == OK);
   DbTokenStore *store = create_det_store(&arena, "pgmain");
   ASSERT_TRUE(store != NULL);
 
@@ -423,7 +423,7 @@ static void test_qb_sensitive_null_remains_null(void) {
 
   qr_destroy(qr);
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
   vq_out_clean(&out);
 }
 
@@ -468,8 +468,8 @@ static void test_qb_sensitive_col_missing_col_id_returns_err(void) {
   ASSERT_TRUE(vcol1 != NULL);
   ASSERT_TRUE(vcol1->kind == VCOL_OUT_TOKEN);
 
-  PlArena arena = {0};
-  ASSERT_TRUE(pl_arena_init(&arena, NULL, NULL) == OK);
+  Arena arena = {0};
+  ASSERT_TRUE(arena_init(&arena, NULL, NULL) == OK);
   DbTokenStore *store = create_det_store(&arena, "pgmain");
   ASSERT_TRUE(store != NULL);
 
@@ -497,7 +497,7 @@ static void test_qb_sensitive_col_missing_col_id_returns_err(void) {
 
   qr_destroy(qr);
   stok_store_destroy(store);
-  pl_arena_clean(&arena);
+  arena_clean(&arena);
   vq_out_clean(&out);
 }
 
