@@ -1,8 +1,9 @@
 #define _GNU_SOURCE
 
-#include <pthread.h>
-#include <poll.h>
+#include <arpa/inet.h>
 #include <errno.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,18 +117,14 @@ static int write_all_fd(int fd, const void *buf, size_t len) {
  * Side effects: writes raw bytes to socket 'fd'.
  * Returns OK on successful write, ERR on invalid input or write failure.
  */
-static int write_len_frame_raw(int fd, uint32_t declared_len,
+static int write_len_frame_raw(int fd, uint32_t hostlong,
                                const uint8_t *payload, size_t payload_len) {
   if (fd < 0 || (!payload && payload_len != 0))
     return ERR;
 
-  uint8_t hdr[4];
-  hdr[0] = (uint8_t)((declared_len >> 24) & 0xFFu);
-  hdr[1] = (uint8_t)((declared_len >> 16) & 0xFFu);
-  hdr[2] = (uint8_t)((declared_len >> 8) & 0xFFu);
-  hdr[3] = (uint8_t)(declared_len & 0xFFu);
+  uint32_t hdr = htonl(hostlong);
 
-  if (write_all_fd(fd, hdr, sizeof(hdr)) != OK)
+  if (write_all_fd(fd, &hdr, sizeof(hdr)) != OK)
     return ERR;
   if (payload_len > 0 && write_all_fd(fd, payload, payload_len) != OK)
     return ERR;
@@ -169,8 +166,8 @@ static int read_handshake_status_with_timeout(int fd, int timeout_ms,
   if (frame_read_len(bc, &payload) != OK)
     goto done;
   handshake_resp_t resp = {0};
-  if (handshake_resp_decode(&resp, (const uint8_t *)payload.data, payload.len) !=
-      OK)
+  if (handshake_resp_decode(&resp, (const uint8_t *)payload.data,
+                            payload.len) != OK)
     goto done;
   *out_status = resp.status;
   rc = OK;
@@ -346,9 +343,8 @@ done:
  * Side effects: performs framed handshake I/O.
  * Error semantics: returns OK on transport/decode success and writes status.
  */
-static int client_handshake_on_fd(
-    int cfd, handshake_status *out_status,
-    uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+static int client_handshake_on_fd(int cfd, handshake_status *out_status,
+                                  uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
   if (cfd < 0 || !out_status)
     return ERR;
 
@@ -400,8 +396,8 @@ static int client_resume_handshake_on_fd(
  * Side effects: creates socket connection and performs framed handshake I/O.
  * Error semantics: returns fd on HS_OK, -1 on connect/handshake failure.
  */
-static int connect_client_hs_ok(
-    const char *sock_path, uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+static int connect_client_hs_ok(const char *sock_path,
+                                uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
   int cfd = connect_client(sock_path);
   if (cfd < 0)
     return -1;
@@ -419,9 +415,11 @@ static int connect_client_hs_ok(
  * Side effects: creates socket and performs framed handshake I/O.
  * Error semantics: returns OK on transport/decode success and writes status.
  */
-static int connect_client_resume_status(
-    const char *sock_path, const uint8_t resume_token[RESUME_TOKEN_LEN],
-    handshake_status *out_status, uint8_t out_new_resume_token[RESUME_TOKEN_LEN]) {
+static int
+connect_client_resume_status(const char *sock_path,
+                             const uint8_t resume_token[RESUME_TOKEN_LEN],
+                             handshake_status *out_status,
+                             uint8_t out_new_resume_token[RESUME_TOKEN_LEN]) {
   if (!sock_path || !resume_token || !out_status)
     return ERR;
 
@@ -642,8 +640,8 @@ static void test_idle_sessions_cap(void) {
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
 
   /* Most recent token should still be resumable. */
-  ASSERT_TRUE(connect_client_resume_status(
-                  sock, tokens[MAX_IDLE_SESSIONS + 1], &st, NULL) == OK);
+  ASSERT_TRUE(connect_client_resume_status(sock, tokens[MAX_IDLE_SESSIONS + 1],
+                                           &st, NULL) == OK);
   ASSERT_TRUE(st == HS_OK);
 
   pthread_cancel(tid);
@@ -676,8 +674,8 @@ static void test_hs_bad_magic_rejected(void) {
                                   sizeof(wire)) == OK);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_BAD_MAGIC);
 
   close(cfd);
@@ -706,8 +704,8 @@ static void test_hs_bad_version_rejected(void) {
                                   sizeof(wire)) == OK);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_BAD_VERSION);
 
   close(cfd);
@@ -736,8 +734,8 @@ static void test_hs_bad_secret_rejected(void) {
                                   sizeof(wire)) == OK);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
 
   close(cfd);
@@ -764,12 +762,12 @@ static void test_hs_len_mismatch_rejected(void) {
   uint8_t wire[HANDSHAKE_REQ_WIRE_SIZE] = {0};
   ASSERT_TRUE(handshake_req_encode(&req, wire) == OK);
   size_t short_len = HANDSHAKE_REQ_WIRE_SIZE - 1u;
-  ASSERT_TRUE(write_len_frame_raw(cfd, (uint32_t)short_len,
-                                  wire, short_len) == OK);
+  ASSERT_TRUE(write_len_frame_raw(cfd, (uint32_t)short_len, wire, short_len) ==
+              OK);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_REQ);
 
   close(cfd);
@@ -792,8 +790,8 @@ static void test_hs_declared_too_large_rejected(void) {
   ASSERT_TRUE(write_len_frame_raw(cfd, UINT32_MAX, NULL, 0) == OK);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_REQ);
 
   close(cfd);
@@ -823,8 +821,8 @@ static void test_hs_truncated_then_eof_rejected(void) {
   ASSERT_TRUE(shutdown(cfd, SHUT_WR) == 0);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_REQ);
 
   close(cfd);
@@ -855,8 +853,8 @@ static void test_hs_truncated_keep_open_timeout_rejected(void) {
                                   partial) == OK);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_REQ);
 
   close(cfd);
@@ -882,8 +880,8 @@ static void test_hs_partial_header_keep_open_timeout_rejected(void) {
   ASSERT_TRUE(write_all_fd(cfd, hdr_prefix, sizeof(hdr_prefix)) == OK);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_REQ);
 
   close(cfd);
@@ -904,8 +902,8 @@ static void test_hs_no_payload_timeout_rejected(void) {
   ASSERT_TRUE(cfd >= 0);
 
   handshake_status st = HS_OK;
-  ASSERT_TRUE(read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) ==
-              OK);
+  ASSERT_TRUE(
+      read_handshake_status_with_timeout(cfd, HS_RESP_TIMEOUT_MS, &st) == OK);
   ASSERT_TRUE(st == HS_ERR_REQ);
 
   close(cfd);

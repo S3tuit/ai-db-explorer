@@ -10,11 +10,15 @@ LIBPG_QUERY_LIB := $(LIBPG_QUERY_DIR)/libpg_query.a
 LIBPG_QUERY_INC := -I$(LIBPG_QUERY_DIR)
 
 # Build flags
-CFLAGS  := -Wall -Wextra -Werror -std=c11 -g -O2
+CFLAGS  := -Wall -Wextra -Werror -std=c11 -g -O2 -flto
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
 CFLAGS  += -DNDEBUG
 INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBPG_QUERY_INC)
 LDFLAGS := $(LIBPQ_LIBS) $(LIBPG_QUERY_LIB)
+
+# Benchmark flags (optimized, no sanitizers)
+BENCH_CFLAGS := -Wall -Wextra -Werror -std=c11 -O3 -DNDEBUG -flto \
+                -D_POSIX_C_SOURCE=200809L -Isrc
 
 # Test flags
 EXTRA_TCFLAGS ?=
@@ -44,7 +48,12 @@ TEST_HELPER_OBJ := build/tests/unit/test.o
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
 INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(INTEGRATION_TEST_SRC))
 
-.PHONY: all clean run test test-unit test-integration test-integration-cached test-postgres test-build asan clean-testobj pg-dump-ast
+# Benchmarks: each benchmarks/bench_foo.c -> build/benchmarks/bench_foo
+BENCH_SRC := $(wildcard benchmarks/bench_*.c)
+BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
+BENCH_COMMON_SRC := src/pl_arena.c src/utils.c
+
+.PHONY: all clean run test test-unit test-integration test-integration-cached test-postgres test-build asan clean-testobj pg-dump-ast bench
 
 all: $(BIN)
 
@@ -71,6 +80,19 @@ $(PG_DUMP_AST_BIN): $(PG_DUMP_AST_SRC) $(LIBPG_QUERY_LIB)
 	$(CC) $(CFLAGS) $(LIBPG_QUERY_INC) $< -o $@ $(LIBPG_QUERY_LIB)
 
 pg-dump-ast: $(PG_DUMP_AST_BIN)
+
+# Build one benchmark binary with shared benchmark sources.
+build/benchmarks/%: benchmarks/%.c $(BENCH_COMMON_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(BENCH_CFLAGS) $< $(BENCH_COMMON_SRC) -o $@
+
+# Build and run all benchmarks in benchmarks/.
+bench: $(BENCH_BINS)
+	@set -e; \
+	for b in $(BENCH_BINS); do \
+	  echo "==> $$b"; \
+	  $$b; \
+	done
 
 # ASAN-instrumented app binary for debugging, used inside integration tests.
 ASAN_CFLAGS = $(TCFLAGS) $(TSAN)

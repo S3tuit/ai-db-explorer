@@ -262,8 +262,8 @@ static uint32_t stok_append_entry(DbTokenStore *store, const SensitiveTokIn *in,
 
   const char *arena_value = NULL;
   if (in->value) {
-    arena_value = (const char *)pl_arena_add(store->arena, (void *)in->value,
-                                             in->value_len);
+    arena_value = (const char *)pl_arena_add_nul(store->arena, (void *)in->value,
+                                                 in->value_len);
     if (!arena_value)
       return UINT32_MAX;
   }
@@ -331,7 +331,7 @@ int stok_store_create_token(DbTokenStore *store, uint32_t generation,
     // we have to persist the key used by the HashTable since it must be valid
     // for the whole HashTable's lifetime
     SensitiveTokKey *owned_key =
-        (SensitiveTokKey *)pl_arena_alloc(store->arena, sizeof(*owned_key));
+        (SensitiveTokKey *)pl_arena_calloc(store->arena, sizeof(*owned_key));
     if (!owned_key) {
       parr_drop_swap(store->tokens, added_idx);
       return -1;

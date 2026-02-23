@@ -1,25 +1,21 @@
 #include "frame_codec.h"
 #include "utils.h"
 
+#include <arpa/inet.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-int frame_write_len(BufChannel *bc, const void *payload, uint32_t n) {
+int frame_write_len(BufChannel *bc, const void *payload, uint32_t hostlong) {
   if (!bc)
     return ERR;
-  if (!payload && n != 0)
+  if (!payload && hostlong != 0)
     return ERR;
 
-  // write in big-endian
-  unsigned char hdr[4];
-  hdr[0] = (unsigned char)((n >> 24) & 0xFF);
-  hdr[1] = (unsigned char)((n >> 16) & 0xFF);
-  hdr[2] = (unsigned char)((n >> 8) & 0xFF);
-  hdr[3] = (unsigned char)(n & 0xFF);
+  uint32_t hdr = htonl(hostlong);
 
-  return bufch_write2v(bc, hdr, sizeof(hdr), payload, (size_t)n);
+  return bufch_write2v(bc, &hdr, sizeof(hdr), payload, (size_t)hostlong);
 }
 
 int frame_read_len(BufChannel *bc, StrBuf *out_payload) {
@@ -27,13 +23,11 @@ int frame_read_len(BufChannel *bc, StrBuf *out_payload) {
     return ERR;
 
   // read first 4 bytes
-  unsigned char hdr[4];
-  if (bufch_read_exact(bc, hdr, sizeof(hdr)) != OK)
+  uint32_t netlong;
+  if (bufch_read_exact(bc, &netlong, sizeof(netlong)) != OK)
     return ERR;
 
-  // convert to little-endiat
-  uint32_t n = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
-               ((uint32_t)hdr[2] << 8) | ((uint32_t)hdr[3]);
+  uint32_t n = ntohl(netlong);
 
   if (n > STRBUF_MAX_BYTES)
     return ERR;

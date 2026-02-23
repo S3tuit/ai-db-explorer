@@ -173,7 +173,7 @@ static int validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
   if (need > UINT32_MAX)
     return ERR;
 
-  char *dst = (char *)pl_arena_alloc(&plan->arena, (uint32_t)need);
+  char *dst = (char *)pl_arena_calloc(&plan->arena, (uint32_t)(need + 1u));
   if (!dst)
     return ERR;
   if (schema && schema[0] != '\0') {

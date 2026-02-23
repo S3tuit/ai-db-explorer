@@ -2,10 +2,11 @@
 #include "utils.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #ifndef BUFIO_READ_CHUNK
-#define BUFIO_READ_CHUNK 4096
+#define BUFIO_READ_CHUNK BUFSIZ
 #endif
 
 int bufch_init(BufChannel *bc, ByteChannel *ch) {

@@ -42,8 +42,7 @@ static char *pg_arena_transfer(PlArena *a, char *owned) {
     free(owned);
     return NULL;
   }
-  // the arena automatically puts a 0 at the end
-  char *dst = (char *)pl_arena_add(a, owned, (uint32_t)strlen(owned));
+  char *dst = (char *)pl_arena_add_nul(a, owned, (uint32_t)strlen(owned));
   free(owned);
   return dst;
 }
@@ -107,7 +106,7 @@ static int pg_get_string_field(const JsonGetter *jg, const char *k1,
 static inline QirQuery *pg_qir_new_query(PlArena *a) {
   if (!a)
     return NULL;
-  QirQuery *q = (QirQuery *)pl_arena_alloc(a, (uint32_t)sizeof(*q));
+  QirQuery *q = (QirQuery *)pl_arena_calloc(a, (uint32_t)sizeof(*q));
   if (!q)
     return NULL;
   q->status = QIR_OK;
@@ -121,7 +120,7 @@ static inline QirQuery *pg_qir_new_query(PlArena *a) {
  * Side effects: allocates arena memory.
  * Returns NULL on error. */
 static inline QirExpr *pg_qir_new_expr(PlArena *a, QirExprKind kind) {
-  QirExpr *e = (QirExpr *)pl_arena_alloc(a, (uint32_t)sizeof(*e));
+  QirExpr *e = (QirExpr *)pl_arena_calloc(a, (uint32_t)sizeof(*e));
   if (!e)
     return NULL;
   e->kind = kind;
@@ -183,8 +182,8 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     if (!e)
       return NULL;
     e->u.colref.qualifier.name =
-        (nparts == 1) ? parts[0] : (char *)pl_arena_add(a, (void *)"", 0);
-    e->u.colref.column.name = (char *)pl_arena_add(a, (void *)"*", 1);
+        (nparts == 1) ? parts[0] : (char *)pl_arena_add_nul(a, (void *)"", 0);
+    e->u.colref.column.name = (char *)pl_arena_add_nul(a, (void *)"*", 1);
     return e;
   }
   if (nparts == 0 || nparts > 2) {
@@ -197,7 +196,7 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, PlArena *a, QirQuery *q) {
     return NULL;
 
   if (nparts == 1) {
-    e->u.colref.qualifier.name = (char *)pl_arena_add(a, (void *)"", 0);
+    e->u.colref.qualifier.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
     e->u.colref.column.name = parts[0];
   } else {
     e->u.colref.qualifier.name = parts[0];
@@ -491,7 +490,7 @@ static QirExpr *pg_parse_caseexpr(const JsonGetter *jg, PlArena *a,
       break;
     }
 
-    QirCaseWhen *w = (QirCaseWhen *)pl_arena_alloc(a, (uint32_t)sizeof(*w));
+    QirCaseWhen *w = (QirCaseWhen *)pl_arena_calloc(a, (uint32_t)sizeof(*w));
     if (!w) {
       rc = ERR;
       break;
@@ -761,7 +760,7 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
         return NULL;
       in->u.in_.lhs = lhs;
       in->u.in_.items =
-          (QirExpr **)pl_arena_alloc(a, (uint32_t)sizeof(QirExpr *));
+          (QirExpr **)pl_arena_calloc(a, (uint32_t)sizeof(QirExpr *));
       if (!in->u.in_.items)
         return NULL;
       in->u.in_.items[0] = rhs;
@@ -971,7 +970,7 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, PlArena *a,
   if (schema_to_tr) {
     schema = pg_arena_transfer_lower(a, schema_to_tr);
   } else {
-    schema = pl_arena_add(a, (void *)"", 0);
+    schema = pl_arena_add_nul(a, (void *)"", 0);
   }
   if (!schema)
     goto fail;
@@ -1143,20 +1142,20 @@ static int pg_parse_typename(const JsonGetter *jg, PlArena *a,
   }
 
   if (use_sb) {
-    char *name = (char *)pl_arena_alloc(a, (uint32_t)(sb.len + 1));
+    char *name = (char *)pl_arena_calloc(a, (uint32_t)(sb.len + 1));
     sb_clean(&sb);
     if (!name)
       return ERR;
     memcpy(name, sb.data, sb.len);
     name[sb.len] = '\0';
-    out->schema.name = (char *)pl_arena_add(a, (void *)"", 0);
+    out->schema.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
     out->name.name = name;
     return OK;
   }
 
   sb_clean(&sb);
   if (nparts == 1) {
-    out->schema.name = (char *)pl_arena_add(a, (void *)"", 0);
+    out->schema.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
     out->name.name = parts[0];
   } else {
     out->schema.name = parts[0];
@@ -1286,7 +1285,7 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
         return NULL;
       in->u.in_.lhs = lhs;
       in->u.in_.items =
-          (QirExpr **)pl_arena_alloc(a, (uint32_t)sizeof(QirExpr *));
+          (QirExpr **)pl_arena_calloc(a, (uint32_t)sizeof(QirExpr *));
       if (!in->u.in_.items)
         return NULL;
       in->u.in_.items[0] = subexpr;
@@ -1337,7 +1336,7 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, PlArena *a, QirQuery *q) {
  * Side effects: none.
  * Returns NULL on allocation failure. */
 static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
-  QirFromItem *fi = pl_arena_alloc(a, (uint32_t)sizeof(QirFromItem));
+  QirFromItem *fi = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
   if (!fi)
     return NULL;
   fi->kind = QIR_FROM_BASE_REL;
@@ -1351,7 +1350,7 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
   if (jsget_string_decode_alloc(jg, "schemaname", &tmp) == YES) {
     fi->u.rel.schema.name = pg_arena_transfer_lower(a, tmp);
   } else {
-    fi->u.rel.schema.name = (char *)pl_arena_add(a, (void *)"", 0);
+    fi->u.rel.schema.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
   }
 
   // alias
@@ -1361,7 +1360,7 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, PlArena *a) {
   }
 
   if (!fi->alias.name)
-    fi->alias.name = (char *)pl_arena_add(a, (void *)"", 0);
+    fi->alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
   return fi;
 }
 
@@ -1410,7 +1409,7 @@ static int pg_parse_alias_colnames(const JsonGetter *alias_obj, PlArena *a,
   }
   if (cols.len > 0) {
     QirIdent *arr =
-        (QirIdent *)pl_arena_alloc(a, (uint32_t)(cols.len * sizeof(QirIdent)));
+        (QirIdent *)pl_arena_calloc(a, (uint32_t)(cols.len * sizeof(QirIdent)));
     if (!arr) {
       ptrvec_clean(&cols);
       return ERR;
@@ -1517,7 +1516,7 @@ static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
     qir_set_status(q, a, QIR_UNSUPPORTED, "NATURAL JOIN not supported");
   }
 
-  QirJoin *j = pl_arena_alloc(a, (uint32_t)sizeof(QirJoin));
+  QirJoin *j = pl_arena_calloc(a, (uint32_t)sizeof(QirJoin));
   if (!j)
     return ERR;
   switch (jointype) {
@@ -1558,10 +1557,10 @@ static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
     if (jsget_object(&ssjg, "subquery", &subjg) == YES) {
       JsonGetter seljg = {0};
       if (jsget_object(&subjg, "SelectStmt", &seljg) == YES) {
-        QirFromItem *fi = pl_arena_alloc(a, (uint32_t)sizeof(QirFromItem));
+        QirFromItem *fi = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
         if (fi) {
           fi->kind = QIR_FROM_SUBQUERY;
-          fi->alias.name = (char *)pl_arena_add(a, (void *)"", 0);
+          fi->alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
           fi->u.values.colnames = NULL;
           fi->u.values.ncolnames = 0;
           fi->u.subquery = pg_qir_new_query(a);
@@ -1590,7 +1589,7 @@ static int pg_parse_join_expr(const JsonGetter *jg, PlArena *a, QirQuery *q,
     }
   } else {
     qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported join rhs");
-    j->rhs = pl_arena_alloc(a, (uint32_t)sizeof(QirFromItem));
+    j->rhs = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
     if (j->rhs)
       j->rhs->kind = QIR_FROM_UNSUPPORTED;
   }
@@ -1637,11 +1636,11 @@ static int pg_parse_from_item(const JsonGetter *jg, PlArena *a, QirQuery *q,
     if (jsget_bool01(&ssjg, "lateral", &lat) == YES && lat) {
       qir_set_status(q, a, QIR_UNSUPPORTED, "LATERAL subquery not supported");
     }
-    QirFromItem *fi = pl_arena_alloc(a, (uint32_t)sizeof(QirFromItem));
+    QirFromItem *fi = pl_arena_calloc(a, (uint32_t)sizeof(QirFromItem));
     if (!fi)
       return ERR;
     fi->kind = QIR_FROM_SUBQUERY;
-    fi->alias.name = (char *)pl_arena_add(a, (void *)"", 0);
+    fi->alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
     fi->u.values.colnames = NULL;
     fi->u.values.ncolnames = 0;
 
@@ -1712,7 +1711,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
       }
 
       QirSelectItem *si =
-          (QirSelectItem *)pl_arena_alloc(a, (uint32_t)sizeof(QirSelectItem));
+          (QirSelectItem *)pl_arena_calloc(a, (uint32_t)sizeof(QirSelectItem));
       if (!si) {
         rc = ERR;
         break;
@@ -1722,7 +1721,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
       if (jsget_string_decode_alloc(&rjg, "name", &tmp) == YES) {
         si->out_alias.name = pg_arena_transfer_lower(a, tmp);
       } else {
-        si->out_alias.name = (char *)pl_arena_add(a, (void *)"", 0);
+        si->out_alias.name = (char *)pl_arena_add_nul(a, (void *)"", 0);
       }
 
       JsonGetter vjg = {0};
@@ -1872,7 +1871,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, PlArena *a, QirQuery *q) {
           break;
         }
 
-        QirCte *cte = pl_arena_alloc(a, (uint32_t)sizeof(QirCte));
+        QirCte *cte = pl_arena_calloc(a, (uint32_t)sizeof(QirCte));
         if (!cte) {
           rc = ERR;
           break;

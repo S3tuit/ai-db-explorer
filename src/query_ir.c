@@ -22,7 +22,7 @@ int qir_handle_init(QirQueryHandle *h) {
   if (pl_arena_init(&h->arena, &size, &cap) != OK)
     return ERR;
 
-  QirQuery *q = (QirQuery *)pl_arena_alloc(&h->arena, (uint32_t)sizeof(*q));
+  QirQuery *q = (QirQuery *)pl_arena_calloc(&h->arena, (uint32_t)sizeof(*q));
   if (!q) {
     pl_arena_clean(&h->arena);
     return ERR;
@@ -77,8 +77,8 @@ void qir_set_status(QirQuery *q, PlArena *arena, QirStatus status,
     return;
   if (!q->status_reason && reason) {
     if (arena) {
-      q->status_reason = (const char *)pl_arena_add(arena, (void *)reason,
-                                                    (uint32_t)strlen(reason));
+      q->status_reason = (const char *)pl_arena_add_nul(
+          arena, (void *)reason, (uint32_t)strlen(reason));
     } else {
       q->status_reason = reason;
     }
@@ -219,7 +219,7 @@ static int qir_touch_report_add(QirTouchReport *tr, QirScope scope,
   if (!tr || !col)
     return -1;
 
-  QirTouch *t = (QirTouch *)pl_arena_alloc(&tr->arena, (uint32_t)sizeof(*t));
+  QirTouch *t = (QirTouch *)pl_arena_calloc(&tr->arena, (uint32_t)sizeof(*t));
   if (!t)
     return -1;
 

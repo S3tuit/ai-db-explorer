@@ -3,16 +3,24 @@
 
 #include <stdint.h>
 
-/* It stores data in a chain of non-moving blocks. Each object (of n bytes)
- * is prefixed with n in the in-memory layout. The last byte is always 0.
- * Offsets are aligned with 0 padding and refer to the logical concatenation
- * of all blocks, in insertion order. The structure grows by adding blocks,
- * but never past its cap.
+/* A bump allocator that stores data in a chain of non-moving blocks.
+ * Allocations are pointer-sized aligned (sizeof(uintptr_t)) with zero
+ * padding between entries. The structure grows by doubling blocks, but
+ * never past its cap.
  *
  * Layout of how an object is stored:
- * +---+--------------+---+-----------+
- * | n | object bytes | 0 | 0-padding |
- * +---+--------------+---+-----------+
+ * +--------------+-----------+
+ * | object bytes | 0-padding |
+ * +--------------+-----------+
+ *
+ * Designed for short-lived entities where many objects share the same
+ * lifetime and are freed together (e.g. a query IR tree, a result set).
+ * Allocation is a pointer bump into contiguous memory, deallocation is
+ * O(blocks) instead of O(objects). Individual objects cannot be freed;
+ * the entire arena is released at once via pl_arena_clean/pl_arena_destroy.
+ *
+ * WARNING: alignment is sizeof(uintptr_t), not alignof(max_align_t).
+ * Do not store types that require stricter alignment (double, long double).
  */
 typedef struct {
   struct PlArenaBlock *head; // first block
@@ -64,13 +72,22 @@ int pl_arena_is_ok(const PlArena *ar);
  * Returns OK on success, ERR if cap reached or errors occurred. */
 int pl_arena_ensure(PlArena *ar, uint32_t extra);
 
-/* Allocates 'len' bytes inside the arena and returns the payload pointer.
- * The payload is zero-initialized and NUL-terminated. */
+/* Allocates 'len' bytes inside the arena and returns the pointer.
+ * Memory is uninitialized. Returns NULL on error. */
 void *pl_arena_alloc(PlArena *ar, uint32_t len);
 
-/* Adds 'len' bytes starting from 'start_v' to the data of 'ar'.
- * Returns a pointer to the stored payload on success, NULL on error. */
+/* Allocates 'len' bytes inside the arena and returns the pointer.
+ * Memory is zero-initialized. Returns NULL on error. */
+void *pl_arena_calloc(PlArena *ar, uint32_t len);
+
+/* Copies 'len' bytes from 'start_v' into the arena.
+ * Returns a pointer to the stored copy on success, NULL on error. */
 void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len);
+
+/* Copies 'len' bytes from 'start_v' into the arena and appends a NUL byte.
+ * Use this for C strings. Returns a pointer to the stored copy, NULL on error.
+ */
+void *pl_arena_add_nul(PlArena *ar, void *start_v, uint32_t len);
 
 /* Returns the number of bytes used by the data inside 'ar'. */
 uint32_t pl_arena_get_used(PlArena *ar);

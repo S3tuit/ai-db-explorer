@@ -1,4 +1,3 @@
-#include <stdalign.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -20,7 +19,6 @@ static void test_basic_add_get(void) {
   char *v1 = (char *)pl_arena_add(ar, (void *)s1, 3);
   ASSERT_TRUE(v1 != NULL);
   ASSERT_TRUE(memcmp(v1, "abc", 3) == 0);
-  ASSERT_TRUE(v1[3] == '\0');
   ASSERT_TRUE(pl_arena_get_used(ar) > 0);
 
   pl_arena_destroy(ar);
@@ -35,11 +33,10 @@ static void test_alignment_and_empty(void) {
 
   char *v2 = (char *)pl_arena_add(ar, "bbbb", 4);
   ASSERT_TRUE(v2 != NULL);
-  ASSERT_TRUE(((uintptr_t)v2 % alignof(max_align_t)) == 0);
+  ASSERT_TRUE(((uintptr_t)v2 % sizeof(uintptr_t)) == 0);
 
   char *v3 = (char *)pl_arena_add(ar, NULL, 0);
   ASSERT_TRUE(v3 != NULL);
-  ASSERT_TRUE(v3[0] == '\0');
 
   pl_arena_destroy(ar);
 }
@@ -67,7 +64,7 @@ static void test_grow_blocks_and_stability(void) {
   memset(payload2, 'b', sizeof(payload2));
   char *p2 = (char *)pl_arena_add(ar, payload2, (uint32_t)sizeof(payload2));
   ASSERT_TRUE(p2 != NULL);
-  ASSERT_TRUE(((uintptr_t)p2 % alignof(max_align_t)) == 0);
+  ASSERT_TRUE(((uintptr_t)p2 % sizeof(uintptr_t)) == 0);
 
   // Original payload must still be accessible after growth.
   ASSERT_TRUE(memcmp(p1, payload1, sizeof(payload1)) == 0);
@@ -90,7 +87,8 @@ static void test_large_entry_and_cap(void) {
   pl_arena_destroy(ar);
 
   // Cap enforcement: second add should fail due to cap.
-  cap = 48;
+  // 20 bytes aligns up to 24; two entries need 48, so cap=40 forces failure.
+  cap = 40;
   ar = pl_arena_create(NULL, &cap);
   ASSERT_TRUE(ar != NULL);
 
@@ -129,6 +127,80 @@ static void test_ptrvec_flatten(void) {
   pl_arena_destroy(ar);
 }
 
+static void test_alloc_basic(void) {
+  PlArena *ar = pl_arena_create(NULL, NULL);
+  ASSERT_TRUE(ar != NULL);
+
+  uint8_t *p = (uint8_t *)pl_arena_alloc(ar, 4);
+  ASSERT_TRUE(p != NULL);
+
+  p[0] = 0x11;
+  p[1] = 0x22;
+  p[2] = 0x33;
+  p[3] = 0x44;
+
+  uint8_t expected[] = {0x11, 0x22, 0x33, 0x44};
+  ASSERT_TRUE(memcmp(p, expected, sizeof(expected)) == 0);
+
+  pl_arena_destroy(ar);
+}
+
+static void test_alloc_zero_len(void) {
+  PlArena *ar = pl_arena_create(NULL, NULL);
+  ASSERT_TRUE(ar != NULL);
+
+  uint8_t *p = (uint8_t *)pl_arena_alloc(ar, 0);
+  ASSERT_TRUE(p != NULL);
+
+  pl_arena_destroy(ar);
+}
+
+static void test_calloc_zeroes_payload(void) {
+  PlArena *ar = pl_arena_create(NULL, NULL);
+  ASSERT_TRUE(ar != NULL);
+
+  uint8_t *p = (uint8_t *)pl_arena_calloc(ar, 8);
+  ASSERT_TRUE(p != NULL);
+  for (size_t i = 0; i < 8; i++) {
+    ASSERT_TRUE(p[i] == 0);
+  }
+
+  pl_arena_destroy(ar);
+}
+
+static void test_alloc_rejects_overflow_len(void) {
+  uint32_t cap = UINT32_MAX;
+  PlArena *ar = pl_arena_create(NULL, &cap);
+  ASSERT_TRUE(ar != NULL);
+
+  ASSERT_TRUE(pl_arena_alloc(ar, UINT32_MAX) == NULL);
+
+  pl_arena_destroy(ar);
+}
+
+static void test_add_nul(void) {
+  PlArena *ar = pl_arena_create(NULL, NULL);
+  ASSERT_TRUE(ar != NULL);
+
+  // NUL-terminated copy of a string.
+  char *s1 = (char *)pl_arena_add_nul(ar, (void *)"hello", 5);
+  ASSERT_TRUE(s1 != NULL);
+  ASSERT_TRUE(memcmp(s1, "hello", 5) == 0);
+  ASSERT_TRUE(s1[5] == '\0');
+
+  // Zero-length NUL-terminated string.
+  char *s2 = (char *)pl_arena_add_nul(ar, (void *)"", 0);
+  ASSERT_TRUE(s2 != NULL);
+  ASSERT_TRUE(s2[0] == '\0');
+
+  // pl_arena_add (without nul) must NOT guarantee a terminator.
+  char *raw = (char *)pl_arena_add(ar, (void *)"xyz", 3);
+  ASSERT_TRUE(raw != NULL);
+  ASSERT_TRUE(memcmp(raw, "xyz", 3) == 0);
+
+  pl_arena_destroy(ar);
+}
+
 int main(void) {
   test_basic_add_get();
   test_alignment_and_empty();
@@ -136,6 +208,11 @@ int main(void) {
   test_grow_blocks_and_stability();
   test_large_entry_and_cap();
   test_ptrvec_flatten();
+  test_alloc_basic();
+  test_alloc_zero_len();
+  test_calloc_zeroes_payload();
+  test_alloc_rejects_overflow_len();
+  test_add_nul();
   fprintf(stderr, "OK: test_pl_arena\n");
   return 0;
 }

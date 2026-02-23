@@ -1,5 +1,5 @@
-#include <stdalign.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,6 +7,8 @@
 #include "utils.h"
 
 /*------------------------------------ helpers ------------------------------*/
+#define PL_ARENA_ALIGN ((uint32_t)sizeof(uintptr_t))
+
 static inline uint32_t pl_align_up_u32(uint32_t n, uint32_t a) {
   // a must be power-of-two for this fast path
   return (n + (a - 1u)) & ~(a - 1u);
@@ -20,7 +22,7 @@ typedef struct PlArenaBlock {
   struct PlArenaBlock *next;
   uint32_t used;
   uint32_t cap;
-  alignas(max_align_t) uint8_t data[];
+  _Alignas(sizeof(uintptr_t)) uint8_t data[];
 } PlArenaBlock;
 
 /*---------------------------------------------------------------------------*/
@@ -47,7 +49,7 @@ int pl_arena_init(PlArena *ar, uint32_t *size_p, uint32_t *cap_p) {
   uint32_t cap = (cap_p == NULL || *cap_p == 0) ? 2048000u : *cap_p;  // ~2MB
 
   // Validate alignment
-  if (!pl_is_power_of_two_u32((uint32_t)alignof(max_align_t)))
+  if (!pl_is_power_of_two_u32(PL_ARENA_ALIGN))
     return ERR;
 
   // defensive
@@ -210,70 +212,52 @@ int pl_arena_ensure(PlArena *ar, uint32_t extra) {
   return OK;
 }
 
-/* Allocates 'len' bytes inside the arena and returns the payload pointer.
- * The payload is zero-initialized and NUL-terminated. */
-/* Allocates a zero-initialized payload in the arena.
- * Ownership: returned pointer is owned by the arena.
- * Side effects: allocates arena memory.
- * Returns NULL on error. */
-void *pl_arena_alloc(PlArena *ar, uint32_t len) {
+/* Bumps the arena cursor by 'len' bytes (aligned up to PL_ARENA_ALIGN)
+ * and returns a pointer to the start of the reserved region.
+ * Padding bytes between 'len' and the aligned size are zeroed.
+ * Returns NULL on invalid input, overflow, or capacity failure.
+ */
+static inline uint8_t *pl_arena_reserve(PlArena *ar, uint32_t len) {
   if (!ar)
     return NULL;
 
-  // entry layout: [u32 len][align pad][payload len bytes][0][padding...]
-  // padding aligns *next* entry start
-  const uint32_t header_sz = pl_align_up_u32((uint32_t)sizeof(uint32_t),
-                                             (uint32_t)alignof(max_align_t));
-  const uint32_t data_sz = len + 1u;
-  const uint32_t raw_entry_sz = header_sz + data_sz;
+  if (len > UINT32_MAX - PL_ARENA_ALIGN)
+    return NULL;
 
-  // Align entry size to PL_ARENA_ALIGNMENT
-  const uint32_t entry_sz =
-      pl_align_up_u32(raw_entry_sz, (uint32_t)alignof(max_align_t));
-  const uint32_t padding = entry_sz - raw_entry_sz;
+  const uint32_t entry_sz = pl_align_up_u32(len, PL_ARENA_ALIGN);
 
   if (pl_arena_ensure(ar, entry_sz) != OK)
     return NULL;
 
-  uint8_t *p = ar->tail->data + ar->tail->used;
+  uint8_t *payload = ar->tail->data + ar->tail->used;
 
-  // write len
-  memcpy(p, &len, sizeof(uint32_t));
-  p += sizeof(uint32_t);
-  if (header_sz > sizeof(uint32_t)) {
-    memset(p, 0, header_sz - sizeof(uint32_t));
-    p += header_sz - sizeof(uint32_t);
-  }
-
-  uint8_t *payload = p;
-  // write payload
-  if (len != 0)
-    memset(payload, 0, len);
-  payload[len] = 0; // terminator
-  p = payload + data_sz;
-
-  // zero padding
+  uint32_t padding = entry_sz - len;
   if (padding)
-    memset(p, 0, padding);
+    memset(payload + len, 0, padding);
 
   ar->tail->used += entry_sz;
   ar->used += entry_sz;
-  return (void *)payload;
+  return payload;
 }
 
-/* Adds 'len' bytes starting from 'start_v' to the data of 'ar'.
- * Returns a pointer to the stored payload on success, NULL on error. */
-/* Adds a payload to the arena by copying from start_v.
- * Ownership: returned pointer is owned by the arena.
- * Side effects: allocates arena memory.
- * Returns NULL on error. */
-void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
-  if (!ar)
+void *pl_arena_alloc(PlArena *ar, uint32_t len) {
+  return (void *)pl_arena_reserve(ar, len);
+}
+
+void *pl_arena_calloc(PlArena *ar, uint32_t len) {
+  uint8_t *payload = pl_arena_reserve(ar, len);
+  if (!payload)
     return NULL;
+  if (len != 0)
+    memset(payload, 0, len);
+  return payload;
+}
+
+void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
   if (!start_v && len != 0)
     return NULL;
 
-  uint8_t *payload = (uint8_t *)pl_arena_alloc(ar, len);
+  uint8_t *payload = pl_arena_reserve(ar, len);
   if (!payload)
     return NULL;
   if (len != 0)
@@ -281,21 +265,28 @@ void *pl_arena_add(PlArena *ar, void *start_v, uint32_t len) {
   return payload;
 }
 
-/* Returns the number of bytes used by the data inside 'ar'. */
-/* Returns the total bytes used by the arena.
- * Ownership: does not allocate.
- * Side effects: none.
- * Returns the byte count. */
+void *pl_arena_add_nul(PlArena *ar, void *start_v, uint32_t len) {
+  if (!start_v && len != 0)
+    return NULL;
+
+  if (len > UINT32_MAX - 1u)
+    return NULL;
+
+  uint8_t *payload = pl_arena_reserve(ar, len + 1u);
+  if (!payload)
+    return NULL;
+  if (len != 0)
+    memcpy(payload, start_v, len);
+  payload[len] = '\0';
+  return payload;
+}
+
 uint32_t pl_arena_get_used(PlArena *ar) {
   if (!ar)
     return 0u;
   return ar->used;
 }
 
-/* Appends a pointer to a small temporary vector.
- * Ownership: vector owns the heap buffer for items.
- * Side effects: may realloc on heap.
- * Returns OK/ERR. */
 int ptrvec_push(PtrVec *v, void *ptr) {
   if (!v)
     return ERR;
@@ -312,10 +303,6 @@ int ptrvec_push(PtrVec *v, void *ptr) {
   return OK;
 }
 
-/* Copies a temporary vector into the arena and returns the new array.
- * Ownership: returned array is owned by the arena.
- * Side effects: allocates arena memory.
- * Returns NULL on error or when v->len == 0. */
 void **ptrvec_flatten(PtrVec *v, PlArena *a) {
   if (!v || !a || v->len == 0)
     return NULL;
@@ -326,10 +313,6 @@ void **ptrvec_flatten(PtrVec *v, PlArena *a) {
   return arr;
 }
 
-/* Frees the heap storage owned by the vector but keeps the struct.
- * Ownership: caller retains the vector struct for reuse.
- * Side effects: frees heap memory.
- * Returns void. */
 void ptrvec_clean(PtrVec *v) {
   if (!v)
     return;

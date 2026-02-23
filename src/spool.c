@@ -23,7 +23,7 @@ static const char *spool_store(StringPool *sp, const char *s, uint32_t len) {
   if (sp->arena.head == NULL || sp->arena.tail == NULL)
     return NULL;
 
-  const char *owned = (const char *)pl_arena_add(&sp->arena, (void *)s, len);
+  const char *owned = (const char *)pl_arena_add_nul(&sp->arena, (void *)s, len);
   if (!owned)
     return NULL;
   if (ht_put(sp->index, owned, len, owned) != OK)
