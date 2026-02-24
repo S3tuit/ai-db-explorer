@@ -85,6 +85,24 @@ static QueryResult *pg_exec_impl(DbBackend *pg, const char *sql,
 }
 #define PG_EXEC(pg, sql) pg_exec_impl((pg), (sql), __FILE__, __LINE__)
 
+/* Executes one bound SQL statement and returns one QueryResult.
+ * Ownership: caller owns returned QueryResult and must destroy it.
+ * Side effects: sends one parameterized query to the backend.
+ * Error semantics: asserts backend contract (OK + non-NULL QueryResult).
+ */
+static QueryResult *pg_exec_bound_impl(DbBackend *pg, const char *sql,
+                                       const DbExecParam *params,
+                                       uint32_t nparams, const char *file,
+                                       int line) {
+  QueryResult *qr = NULL;
+  int rc = db_exec_bound(pg, sql, params, nparams, NULL, &qr);
+  ASSERT_TRUE_AT(rc == OK, file, line);
+  ASSERT_TRUE_AT(qr != NULL, file, line);
+  return qr;
+}
+#define PG_EXEC_BOUND(pg, sql, params, nparams)                                \
+  pg_exec_bound_impl((pg), (sql), (params), (nparams), __FILE__, __LINE__)
+
 static void assert_ok_qr(const QueryResult *qr, const char *file, int line) {
   ASSERT_TRUE_AT(qr != NULL, file, line);
   ASSERT_TRUE_AT(qr->status == QR_OK, file, line);
@@ -98,6 +116,19 @@ static void assert_tool_err_qr(const QueryResult *qr, const char *file,
 }
 #define ASSERT_OK_QR(qr) assert_ok_qr((qr), __FILE__, __LINE__)
 #define ASSERT_TOOL_ERR_QR(qr) assert_tool_err_qr((qr), __FILE__, __LINE__)
+
+/* Verifies the backend connection is still usable after an error.
+ * Ownership: borrows 'pg'; temporary QueryResult is destroyed internally.
+ * Side effects: runs one simple SQL query.
+ * Error semantics: assertions abort on failure.
+ */
+static void assert_backend_still_usable(DbBackend *pg) {
+  QueryResult *qr = PG_EXEC(pg, "SELECT 1 AS one");
+  ASSERT_OK_QR(qr);
+  ASSERT_TRUE(qr->nrows == 1);
+  ASSERT_STREQ(qr_get_cell(qr, 0, 0), "1");
+  qr_destroy(qr);
+}
 
 /* --------------------------------- tests --------------------------------- */
 
@@ -255,6 +286,140 @@ static void test_conn_options_applied(void) {
   db_destroy(pg);
 }
 
+static void test_bound_exec_one_param_ok(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  const DbExecParam params[] = {
+      {.value = "SCT-9001-A", .value_len = 10, .pg_oid = 25},
+  };
+  QueryResult *qr = PG_EXEC_BOUND(
+      pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1",
+      params, ARRLEN(params));
+
+  ASSERT_OK_QR(qr);
+  ASSERT_TRUE(qr->ncols == 1);
+  ASSERT_TRUE(qr->nrows == 1);
+  ASSERT_STREQ(qr_get_cell(qr, 0, 0), "Kakarot");
+
+  qr_destroy(qr);
+  db_destroy(pg);
+}
+
+static void test_bound_exec_two_params_ok(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  const DbExecParam params[] = {
+      {.value = "SCT-9002-B", .value_len = 10, .pg_oid = 25},
+      {.value = "Prince", .value_len = 6, .pg_oid = 25},
+  };
+  QueryResult *qr =
+      PG_EXEC_BOUND(pg,
+                    "SELECT z.name FROM zfighter_intel zi "
+                    "JOIN zfighters z ON z.id = zi.fighter_id "
+                    "WHERE zi.scouter_serial = $1 AND zi.codename = $2",
+                    params, ARRLEN(params));
+
+  ASSERT_OK_QR(qr);
+  ASSERT_TRUE(qr->ncols == 1);
+  ASSERT_TRUE(qr->nrows == 1);
+  ASSERT_STREQ(qr_get_cell(qr, 0, 0), "Vegeta");
+
+  qr_destroy(qr);
+  db_destroy(pg);
+}
+
+static void test_bound_exec_null_params_pointer_fails_soft(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  QueryResult *qr = PG_EXEC_BOUND(
+      pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1", NULL,
+      1);
+  ASSERT_TOOL_ERR_QR(qr);
+  qr_destroy(qr);
+
+  assert_backend_still_usable(pg);
+  db_destroy(pg);
+}
+
+static void test_bound_exec_null_value_param_fails_soft(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  const DbExecParam params[] = {
+      {.value = NULL, .value_len = 0, .pg_oid = 25},
+  };
+  QueryResult *qr = PG_EXEC_BOUND(
+      pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1",
+      params, ARRLEN(params));
+  ASSERT_TOOL_ERR_QR(qr);
+  qr_destroy(qr);
+
+  assert_backend_still_usable(pg);
+  db_destroy(pg);
+}
+
+static void test_bound_exec_sql_param_count_mismatch_missing(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  const DbExecParam params[] = {
+      {.value = "SCT-9002-B", .value_len = 10, .pg_oid = 25},
+  };
+  QueryResult *qr =
+      PG_EXEC_BOUND(pg,
+                    "SELECT z.name FROM zfighter_intel zi "
+                    "JOIN zfighters z ON z.id = zi.fighter_id "
+                    "WHERE zi.scouter_serial = $1 AND zi.codename = $2",
+                    params, ARRLEN(params));
+  ASSERT_TOOL_ERR_QR(qr);
+  qr_destroy(qr);
+
+  assert_backend_still_usable(pg);
+  db_destroy(pg);
+}
+
+static void test_bound_exec_sql_param_count_mismatch_fewer(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  const DbExecParam params[] = {
+      {.value = "SCT-9002-B", .value_len = 10, .pg_oid = 25},
+  };
+  QueryResult *qr = PG_EXEC_BOUND(pg,
+                                  "SELECT codename FROM zfighter_intel "
+                                  "WHERE scouter_serial = $1 AND codename = $2",
+                                  params, ARRLEN(params));
+  ASSERT_TOOL_ERR_QR(qr);
+  qr_destroy(qr);
+
+  assert_backend_still_usable(pg);
+  db_destroy(pg);
+}
+
+static void test_bound_exec_over_max_params_fails_soft(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  DbExecParam params[MAX_TOKEN_PARAMS + 1];
+  memset(params, 0, sizeof(params));
+  for (uint32_t i = 0; i < (uint32_t)ARRLEN(params); i++) {
+    params[i].value = "x";
+    params[i].value_len = 1;
+    params[i].pg_oid = 25;
+  }
+  QueryResult *qr = PG_EXEC_BOUND(
+      pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1",
+      params, (uint32_t)ARRLEN(params));
+  ASSERT_TOOL_ERR_QR(qr);
+  qr_destroy(qr);
+
+  assert_backend_still_usable(pg);
+  db_destroy(pg);
+}
+
 void test_postgres_backend(void) {
   test_base_select_join();
   test_select_null_cell();
@@ -264,6 +429,13 @@ void test_postgres_backend(void) {
   test_attempt_disable_readonly_still_cannot_write();
   test_long_running_query();
   test_conn_options_applied();
+  test_bound_exec_one_param_ok();
+  test_bound_exec_two_params_ok();
+  test_bound_exec_null_params_pointer_fails_soft();
+  test_bound_exec_null_value_param_fails_soft();
+  test_bound_exec_sql_param_count_mismatch_missing();
+  test_bound_exec_sql_param_count_mismatch_fewer();
+  test_bound_exec_over_max_params_fails_soft();
 }
 
 int main(void) {

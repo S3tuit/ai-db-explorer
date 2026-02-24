@@ -11,10 +11,23 @@
  * in order to be used. */
 typedef struct DbBackend DbBackend;
 
+// Maximum number of bound parameters accepted by token-aware execution paths.
+#define MAX_TOKEN_PARAMS 10u
+
 typedef struct DbSafeFuncList {
   const char **names; // sorted, lowercase, unqualified names
   uint32_t count;
 } DbSafeFuncList;
+
+/* DB-facing bind parameter used by bound execution APIs.
+ * Ownership: all pointers are borrowed for the duration of one db_exec_bound().
+ * v1 uses Postgres OID metadata; other backends may ignore pg_oid.
+ */
+typedef struct DbExecParam {
+  const char *value; // text value (borrowed)
+  uint32_t value_len;
+  uint32_t pg_oid;
+} DbExecParam;
 
 typedef struct DbBackendVTable {
   // Establishes a connection described by 'profile' using 'pwd' when needed.
@@ -41,6 +54,13 @@ typedef struct DbBackendVTable {
   // Returns OK if it was able to allocate a QueryResult, ERR otherwise.
   int (*exec)(DbBackend *db, const char *sql,
               const QueryResultBuildPolicy *qb_policy, QueryResult **out_qr);
+
+  // Executes one SQL statement with positional bind parameters.
+  // 'params[i]' maps to SQL placeholder $(i+1).
+  // Returns OK if it was able to allocate a QueryResult, ERR otherwise.
+  int (*exec_bound)(DbBackend *db, const char *sql, const DbExecParam *params,
+                    uint32_t nparams, const QueryResultBuildPolicy *qb_policy,
+                    QueryResult **out_qr);
 
   // Creates a QirQueryHandle starting from 'sql'. The backend owns and
   // populates the handle, and the caller must destroy it via
@@ -88,6 +108,15 @@ static inline int db_exec(DbBackend *db, const char *sql,
   if (!db || !db->vt || !db->vt->exec)
     return ERR;
   return db->vt->exec(db, sql, qb_policy, out_qr);
+}
+
+static inline int db_exec_bound(DbBackend *db, const char *sql,
+                                const DbExecParam *params, uint32_t nparams,
+                                const QueryResultBuildPolicy *qb_policy,
+                                QueryResult **out_qr) {
+  if (!db || !db->vt || !db->vt->exec_bound)
+    return ERR;
+  return db->vt->exec_bound(db, sql, params, nparams, qb_policy, out_qr);
 }
 
 static inline int db_make_query_ir(DbBackend *db, const char *sql,

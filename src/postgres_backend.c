@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <ctype.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -2118,10 +2119,100 @@ static int pg_exec_single_result(PgImpl *p, const char *sql,
                                  PGresult **out_res) {
   if (!p || !p->conn || !sql || !out_res)
     return ERR;
+  assert(p);
+  assert(p->conn);
+  assert(sql);
+  assert(out_res);
+
   *out_res = NULL;
 
   if (PQsendQuery(p->conn, sql) != 1) {
     pg_set_err_pg(p, p->conn, "PQsendQuery failed");
+    return ERR;
+  }
+
+  PGresult *first = NULL;
+  PGresult *extra = NULL;
+
+  for (;;) {
+    PGresult *res = PQgetResult(p->conn);
+    if (!res)
+      break;
+
+    if (!first) {
+      first = res;
+    } else {
+      // second result => multi-statement or multiple commands
+      extra = res;
+      // consume remaining results to keep connection usable
+      while ((res = PQgetResult(p->conn)) != NULL) {
+        PQclear(res);
+      }
+      break;
+    }
+  }
+
+  if (extra) {
+    pg_set_err(p, "multiple statements/results are not allowed");
+    PQclear(extra);
+    if (first)
+      PQclear(first);
+    return ERR;
+  }
+
+  if (!first) {
+    pg_set_err(p, "no result returned");
+    return ERR;
+  }
+
+  *out_res = first;
+  return OK;
+}
+
+/* Executes one parameterized SQL statement and returns exactly one PGresult.
+ * Ownership: borrows all inputs; caller owns '*out_res' on success.
+ * Side effects: sends one query over libpq and stores backend errors into 'p'.
+ * Error semantics: returns OK when exactly one result is produced, ERR on bad
+ * input/libpq failure/multiple results.
+ */
+static int pg_exec_single_result_bound(PgImpl *p, const char *sql,
+                                       const DbExecParam *params,
+                                       uint32_t nparams, PGresult **out_res) {
+  assert(p);
+  assert(p->conn);
+  assert(sql);
+  assert(out_res);
+  assert(!(nparams > 0 && !params));
+
+  if (!p || !p->conn || !sql || !out_res)
+    return ERR;
+  if ((nparams > 0 && !params) || nparams > MAX_TOKEN_PARAMS) {
+    pg_set_err(p, "invalid bound execution input");
+    return ERR;
+  }
+
+  *out_res = NULL;
+
+  const char *param_values[MAX_TOKEN_PARAMS];
+  Oid param_types[MAX_TOKEN_PARAMS];
+  for (uint32_t i = 0; i < nparams; i++) {
+    const DbExecParam *in = &params[i];
+    if (!in->value) {
+      pg_set_err(p, "invalid bound parameter payload");
+      return ERR;
+    }
+    // libpq text binds require NUL-terminated strings.
+    // This entity is NOT responsible for validating params values.
+    assert(in->value[in->value_len] == '\0');
+    param_values[i] = in->value;
+    param_types[i] = (Oid)in->pg_oid;
+  }
+
+  // param_values and _types may be unitialized if nparams is 0, but it's safe
+  // since PQsendQueryParams do not dereference them if nparams is 0.
+  if (PQsendQueryParams(p->conn, sql, (int)nparams, param_types, param_values,
+                        NULL, NULL, 0) != 1) {
+    pg_set_err_pg(p, p->conn, "PQsendQueryParams failed");
     return ERR;
   }
 
@@ -2307,9 +2398,18 @@ static void pg_destroy(DbBackend *db) {
   free(db);
 }
 
-static int pg_exec(DbBackend *db, const char *sql,
-                   const QueryResultBuildPolicy *qb_policy,
-                   QueryResult **out_qr) {
+/* Executes one SQL statement (optionally with bound positional params) and
+ * materializes one QueryResult.
+ * Ownership: borrows db/sql/params/qb_policy; allocates '*out_qr' on success.
+ * Side effects: executes SQL, enforces policy/transactions, and mutates PgImpl
+ * error buffer.
+ * Error semantics: returns OK if a QueryResult object is produced, ERR only on
+ * catastrophic allocation/input failures.
+ */
+static int pg_exec_impl(DbBackend *db, const char *sql,
+                        const DbExecParam *params, uint32_t nparams,
+                        const QueryResultBuildPolicy *qb_policy,
+                        QueryResult **out_qr) {
 
   const char *err_msg;
   QueryResult *qr = NULL;
@@ -2318,7 +2418,7 @@ static int pg_exec(DbBackend *db, const char *sql,
   // Error logging logic, if we called a function that sets the error like
   // pg_exec_command(), we use that error... else, we create the message.
 
-  if (!db || !db->impl || !sql || !out_qr) {
+  if (!db || !db->impl || !sql || !out_qr || (nparams > 0 && params == NULL)) {
     err_msg = "unexpected input before executing the query";
     goto fail_bad_input;
   };
@@ -2357,8 +2457,12 @@ static int pg_exec(DbBackend *db, const char *sql,
     }
   }
 
-  if (pg_exec_single_result(p, sql, &res) != OK) {
-    goto fail;
+  if (nparams > 0) {
+    if (pg_exec_single_result_bound(p, sql, params, nparams, &res) != OK)
+      goto fail;
+  } else {
+    if (pg_exec_single_result(p, sql, &res) != OK)
+      goto fail;
   }
 
   ExecStatusType st = PQresultStatus(res);
@@ -2495,6 +2599,19 @@ fail_bad_input:
   // if bad input, we can't rely on the buffer for the error of PgImpl
   *out_qr = qr_create_tool_err(NULL, err_msg);
   return (*out_qr ? OK : ERR);
+}
+
+static int pg_exec(DbBackend *db, const char *sql,
+                   const QueryResultBuildPolicy *qb_policy,
+                   QueryResult **out_qr) {
+  return pg_exec_impl(db, sql, NULL, 0, qb_policy, out_qr);
+}
+
+static int pg_exec_bound(DbBackend *db, const char *sql,
+                         const DbExecParam *params, uint32_t nparams,
+                         const QueryResultBuildPolicy *qb_policy,
+                         QueryResult **out_qr) {
+  return pg_exec_impl(db, sql, params, nparams, qb_policy, out_qr);
 }
 
 // This list of functions MUST be sorted ASC.
@@ -2715,6 +2832,7 @@ static const DbBackendVTable PG_VT = {.connect = pg_connect,
                                       .disconnect = pg_disconnect,
                                       .destroy = pg_destroy,
                                       .exec = pg_exec,
+                                      .exec_bound = pg_exec_bound,
                                       .make_query_ir = pg_make_query_ir,
                                       .safe_functions = pg_safe_functions};
 

@@ -30,8 +30,6 @@
 
 // Maximum size of a single request payload (bytes). Larger frames are rejected.
 #define MAX_REQ_LEN (8u * 1024u * 1024u)
-// Maximum number of token parameters accepted by run_sql_query_tokens.
-#define MAX_TOKEN_PARAMS 10u
 // Per-session storage cap for sensitive token values/keys.
 #define SESSION_TOKEN_ARENA_CAP_BYTES (64u * 1024u * 1024u)
 
@@ -790,7 +788,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   memset(vparams, 0, sizeof(vparams));
   uint32_t nparams = 0;
 
-  // loop over all the parameters of the request
+  // loop over all the parameters of the request, validate them and retrieve
+  // the SensitiveTok associated to them
   JsonStrSpan sp = {0};
   for (;;) {
     int nrc = jsget_array_strings_next(jg, &it, &sp);
@@ -803,7 +802,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     }
 
     char *tok = NULL;
-    if (json_span_decode_alloc(&sp, &tok) != OK || !tok) {
+    int drc = json_span_decode_alloc(&sp, &tok);
+    if (drc != OK || !tok) {
       free(tok);
       *out_query =
           qr_create_err(id, QRERR_INPARAM, "Invalid token parameter entry.");
@@ -822,8 +822,9 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
 
     if (strcmp(parsed.connection_name, conn_name) != 0) {
       free(tok);
-      *out_query =
-          qr_create_err(id, QRERR_INPARAM, "Token connection mismatch.");
+      *out_query = qr_create_err(id, QRERR_INPARAM,
+                                 "Token connection mismatch; it was generated "
+                                 "from a different connection.");
       goto free_n_return;
     }
     if (parsed.generation != sess->generation) {
@@ -851,6 +852,7 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     free(tok);
   }
 
+  // Validate the query
   ValidateQueryOut vout = {0};
   if (vq_out_init(&vout) != OK) {
     *out_query = qr_create_tool_err(
@@ -874,12 +876,44 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     vq_out_clean(&vout);
     goto free_n_return;
   }
-  vq_out_clean(&vout);
+  // From now on we assume that parameters are valid
 
-  // Bound execution path will be added with validator plan + DB typed binds.
-  *out_query = qr_create_tool_err(
-      id, "run_sql_query_tokens is recognized, but bound execution is not "
-          "implemented yet.");
+  // prepare context to allow DbBackend to create a QueryResult
+  QueryResultBuildPolicy qb_policy = {
+      .plan = &vout.plan,
+      .store = store,
+      .generation = sess->generation,
+  };
+
+  // Build the params array that will be used by the DbBackend for query
+  // execution
+  DbExecParam db_params[MAX_TOKEN_PARAMS];
+  memset(db_params, 0, sizeof(db_params));
+  for (uint32_t i = 0; i < nparams; i++) {
+    assert(!(!vparams[i].value && vparams[i].value_len != 0));
+    db_params[i].value = vparams[i].value;
+    db_params[i].value_len = vparams[i].value_len;
+    db_params[i].pg_oid = vparams[i].pg_oid;
+  }
+
+  if (db_exec_bound(cv.db, query, db_params, nparams, &qb_policy, out_query) !=
+      OK) {
+    vq_out_clean(&vout);
+    TLOG("ERROR - bound execution failed while communicating with %s",
+         conn_name);
+    *out_query = qr_create_tool_err(
+        id, "Something went wrong while communicating with the database.");
+    goto free_n_return;
+  }
+  // db_exec_bound leaves the id zeroed; stamp it with the request id
+  if (qr_set_id(*out_query, id) != OK) {
+    qr_destroy(*out_query);
+    vq_out_clean(&vout);
+    *out_query = NULL;
+    goto free_n_return;
+  }
+  connm_mark_used(b->cm, conn_name);
+  vq_out_clean(&vout);
 
 free_n_return:
   free(conn_name);

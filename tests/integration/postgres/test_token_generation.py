@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
+import json
 import shutil
 import sys
 
 from test_broker_mcp_handshake import do_full_handshake
 from test_mcp_run_sql import send_tools_call
-from test_user_mcp_handshake import stop_proc
+from test_user_mcp_handshake import read_frame, stop_proc, write_frame
 
 
 def _assert_tools_call_ok(resp, req_id):
@@ -13,6 +14,24 @@ def _assert_tools_call_ok(resp, req_id):
     assert "result" in resp
     assert resp["result"].get("isError") is not True
     return resp["result"]["structuredContent"]
+
+
+def send_tokens_tools_call(server, req_id, connection_name, query, parameters):
+    req = {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "tools/call",
+        "params": {
+            "name": "run_sql_query_tokens",
+            "arguments": {
+                "connectionName": connection_name,
+                "query": query,
+                "parameters": parameters,
+            },
+        },
+    }
+    write_frame(server, json.dumps(req).encode("utf-8"))
+    return json.loads(read_frame(server).decode("utf-8"))
 
 
 def _parse_token(token):
@@ -157,11 +176,93 @@ def test_another_postgres_only_sensitive_columns_are_tokenized():
             shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+def test_my_postgres_run_sql_query_tokens_still_masks_sensitive_output():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    try:
+        broker, server, privdir, runtime_dir, _ = do_full_handshake(req_id=140)
+
+        src = send_tools_call(
+            server,
+            "my-bind-mask-src",
+            "MyPostgres",
+            "SELECT i.scouter_serial FROM zfighter_intel i WHERE i.fighter_id = 1 LIMIT 1;",
+        )
+        src_data = _assert_tools_call_ok(src, "my-bind-mask-src")
+        tok = src_data["rows"][0][0]
+        _assert_is_token(tok, "MyPostgres")
+
+        resp = send_tokens_tools_call(
+            server,
+            "my-bind-mask-run",
+            "MyPostgres",
+            "SELECT i.codename, i.scouter_serial FROM zfighter_intel i "
+            "WHERE i.scouter_serial = $1 LIMIT 1;",
+            [tok],
+        )
+        print(resp)
+        data = _assert_tools_call_ok(resp, "my-bind-mask-run")
+        row = data["rows"][0]
+        assert row[0] == "Kakarot"
+        assert row[1] != "SCT-9001-A"
+        _assert_is_token(row[1], "MyPostgres")
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def test_another_postgres_run_sql_query_tokens_still_masks_sensitive_output():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    try:
+        broker, server, privdir, runtime_dir, _ = do_full_handshake(req_id=150)
+
+        src = send_tools_call(
+            server,
+            "another-bind-mask-src",
+            "AnotherPostgres",
+            "SELECT g.real_name FROM gym_bros g WHERE g.id = 2 LIMIT 1;",
+        )
+        src_data = _assert_tools_call_ok(src, "another-bind-mask-src")
+        tok = src_data["rows"][0][0]
+        _assert_is_token(tok, "AnotherPostgres")
+
+        resp = send_tokens_tools_call(
+            server,
+            "another-bind-mask-run",
+            "AnotherPostgres",
+            "SELECT g.nickname, g.real_name FROM gym_bros g WHERE g.real_name = $1 LIMIT 1;",
+            [tok],
+        )
+        data = _assert_tools_call_ok(resp, "another-bind-mask-run")
+        row = data["rows"][0]
+        assert row[0] == "Black Panther"
+        assert row[1] != "Angelo"
+        _assert_is_token(row[1], "AnotherPostgres")
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
 def main():
     test_my_postgres_randomized_same_value_yields_different_tokens()
     test_my_postgres_only_sensitive_columns_are_tokenized()
     test_another_postgres_deterministic_same_value_yields_same_token()
     test_another_postgres_only_sensitive_columns_are_tokenized()
+    test_my_postgres_run_sql_query_tokens_still_masks_sensitive_output()
+    test_another_postgres_run_sql_query_tokens_still_masks_sensitive_output()
     print("OK: test_token_generation")
 
 
