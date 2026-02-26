@@ -74,13 +74,20 @@ typedef struct JsonArrIter {
   int next_tok; // next token index to consume (internal cursor)
 } JsonArrIter;
 
+/* Fixed-size token buffer used by jsget_init().
+ * It is caller-owned and must outlive any JsonGetter views that borrow it.
+ */
+typedef struct JsonTokBuf {
+  jsmntok_t toks[JSON_GETTER_MAX_TOKENS];
+} JsonTokBuf;
+
 typedef struct JsonGetter {
   const char *json;
   size_t json_len;
   const jsmntok_t *toks;
   int ntok;
-  int root; // token index of the root object for this view
-  jsmntok_t tok_storage[JSON_GETTER_MAX_TOKENS];
+  int root;              // token index of the root object for this view
+  jsmntok_t *owned_toks; // owned only when initialized via jsget_create()
 } JsonGetter;
 
 typedef struct {
@@ -88,17 +95,33 @@ typedef struct {
   size_t len;
 } JsonStrSpan;
 
-/*
- * Initializes JsonGetter by tokenizing the entire JSON text.
- *
+/* Initializes JsonGetter by tokenizing the entire JSON text into caller-owned
+ * fixed token storage.
+ * It borrows 'json' and 'tok_buf'; no allocations are performed.
  * Requirements:
  *  - json is not required to be NUL-terminated; use json_len.
  *  - root must be a JSON object.
- *  - token buffer is capped to 1024 tokens.
- *
- * Return OK on success, ERR on error/bad input.
+ *  - token buffer is capped to JSON_GETTER_MAX_TOKENS.
+ * Returns OK on success, ERR on error/bad input.
  */
-AdbxStatus jsget_init(JsonGetter *jg, const char *json, size_t json_len);
+AdbxStatus jsget_init(JsonGetter *jg, const char *json, size_t json_len,
+                      JsonTokBuf *tok_buf);
+
+#define JSON_GETTER_MAX_ALLOC_TOKENS 10000u
+/* Initializes JsonGetter by counting tokens first, then allocating exactly the
+ * required token buffer up to an internal cap.
+ * It borrows 'json' and owns/frees the internal token buffer via
+ * jsget_destroy(). Root must be a JSON object.
+ * Returns OK on success, ERR on parse error, bad input, or if token count
+ * exceeds 'max_tokens'.
+ */
+AdbxStatus jsget_create(JsonGetter *jg, const char *json, size_t json_len);
+
+/* Releases resources owned by a JsonGetter created with jsget_create().
+ * It borrows 'jg' and is safe to call on stack-only views/instances.
+ * Side effects: frees owned token memory and resets the structure.
+ */
+void jsget_destroy(JsonGetter *jg);
 
 /* Validates a JSON-RPC request and initializes JsonGetter.
  * Returns YES if the payload is valid and has jsonrpc/id/method, NO if it
@@ -215,9 +238,10 @@ AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
  * When the function returns NO because of an unknown key and
  * 'out_unknown_key' is non-NULL, it writes the first unknown key span there.
  * Returns YES/NO/ERR. */
-AdbxTriStatus
-jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
-                           const char *const *allowed, size_t n_allowed,
-                           JsonStrSpan *out_unknown_key);
+AdbxTriStatus jsget_top_level_validation(const JsonGetter *jg,
+                                         const char *obj_key,
+                                         const char *const *allowed,
+                                         size_t n_allowed,
+                                         JsonStrSpan *out_unknown_key);
 
 #endif

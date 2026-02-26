@@ -969,7 +969,8 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
   }
 
   JsonGetter jg;
-  if (jsget_init(&jg, sb.data, sb.len) != OK) {
+  JsonTokBuf tok_buf = {0};
+  if (jsget_init(&jg, sb.data, sb.len, &tok_buf) != OK) {
     set_parse_err(&err_msg, "$: invalid JSON.");
     goto error;
   }

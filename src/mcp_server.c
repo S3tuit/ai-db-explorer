@@ -395,7 +395,13 @@ static AdbxStatus mcpser_user_initialize_handshake(McpServer *s) {
   const char *json = req.data;
 
   JsonGetter jg;
-  AdbxStatus irc = jsget_init(&jg, json, req.len);
+  JsonTokBuf tok_buf = {0};
+  AdbxStatus irc = jsget_init(&jg, json, req.len, &tok_buf);
+  if (irc != OK) {
+    TLOG("ERROR - handshake parse failed (invalid JSON or token overflow, "
+         "len=%zu)",
+         req.len);
+  }
   // if it's not a valid JSON-RPC, we still try to find a top-leve "id" key
   // before returning the error
   AdbxTriStatus vrc = (irc == OK) ? jsget_simple_rpc_validation(&jg) : ERR;
@@ -521,10 +527,12 @@ static AdbxTriStatus mcpser_validate_user_req(McpServer *s, const StrBuf *req,
   *idp_out = NULL;
 
   JsonGetter jg;
-  AdbxStatus irc = jsget_init(&jg, req->data, req->len);
+  JsonTokBuf tok_buf = {0};
+  AdbxStatus irc = jsget_init(&jg, req->data, req->len, &tok_buf);
   if (irc != OK) {
     fprintf(stderr, "McpServer: malformed input\n");
-    TLOG("ERROR - invalid JSON in MCP input");
+    TLOG("ERROR - invalid JSON in MCP input or token overflow (len=%zu)",
+         req->len);
     if (mcpser_send_error(s, NULL, -32600, "Malformed JSON-RPC request",
                           NULL) != OK) {
       mcpser_set_err(s, "failed to write error response");

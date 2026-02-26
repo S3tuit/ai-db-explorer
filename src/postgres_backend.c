@@ -1968,31 +1968,27 @@ static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
   }
 
   JsonGetter root = {0};
-  if (jsget_init(&root, res.parse_tree, strlen(res.parse_tree)) != OK) {
+  if (jsget_create(&root, res.parse_tree, strlen(res.parse_tree)) != OK) {
     qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
-    pg_query_free_parse_result(res);
-    return OK;
+    goto free_pg_parse_result;
   }
 
   JsonArrIter it = {0};
   if (jsget_array_objects_begin(&root, "stmts", &it) != YES) {
     qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
-    pg_query_free_parse_result(res);
-    return OK;
+    goto free_pg_parse_result;
   }
 
   JsonGetter stmt = {0};
   if (jsget_array_objects_next(&root, &it, &stmt) != YES) {
     qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
-    pg_query_free_parse_result(res);
-    return OK;
+    goto free_pg_parse_result;
   }
 
   // multiple statements are a parse error
   if (jsget_array_objects_next(&root, &it, &stmt) == YES) {
     qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "multiple statements");
-    pg_query_free_parse_result(res);
-    return OK;
+    goto free_pg_parse_result;
   }
 
   JsonGetter raw = {0};
@@ -2003,14 +1999,14 @@ static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
   JsonGetter stg = {0};
   if (jsget_object(&stmt, "stmt", &stg) != YES) {
     qir_set_status(q, &out->arena, QIR_PARSE_ERROR, "parse error");
-    pg_query_free_parse_result(res);
-    return OK;
+    goto free_pg_parse_result;
   }
 
   JsonGetter seljg = {0};
   if (jsget_object(&stg, "SelectStmt", &seljg) == YES) {
     if (pg_parse_select_stmt(&seljg, &out->arena, q) != OK) {
       qir_handle_destroy(out);
+      jsget_destroy(&root);
       pg_query_free_parse_result(res);
       return ERR;
     }
@@ -2019,6 +2015,8 @@ static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
                    "unsupported statement type");
   }
 
+free_pg_parse_result:
+  jsget_destroy(&root);
   pg_query_free_parse_result(res);
   return OK;
 }
@@ -2608,8 +2606,8 @@ fail_bad_input:
       (err_msg && err_msg[0] != '\0') ? err_msg : "Unknown backend error.";
   // TODO: relying on the internal state of the entity to log the error is bad,
   // we should use a sort of context.
-  *out_qr = qr_create_tool_err(NULL, "PostgreSQL execution failed: %s",
-                               safe_msg);
+  *out_qr =
+      qr_create_tool_err(NULL, "PostgreSQL execution failed: %s", safe_msg);
   return (*out_qr ? OK : ERR);
 }
 

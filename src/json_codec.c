@@ -2,6 +2,7 @@
 #include "string_op.h"
 #include "utils.h"
 
+#include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -963,7 +964,7 @@ static int find_value_tok_path(const JsonGetter *jg, const char *path) {
     seg = dot + 1;
   }
 
-  return -2;
+  return -1;
 }
 
 /*
@@ -1099,31 +1100,80 @@ static AdbxStatus tok_parse_long(const char *json, const jsmntok_t *t,
   return OK;
 }
 
-AdbxStatus jsget_init(JsonGetter *jg, const char *json, size_t json_len) {
+/* Parses one JSON document into the provided 'tokens' buffer and initializes
+ * the root JsonGetter view. It borrows jg/json and mutates jg in place. Side
+ * effects: writes token metadata into 'tokens'. Error semantics: returns OK on
+ * success, ERR on parse/type failures.
+ */
+static AdbxStatus jsget_parse_into_tokens(JsonGetter *jg, jsmntok_t *tokens,
+                                          uint32_t token_cap) {
+  assert(jg);
+  assert(jg->json);
+  assert(jg->json_len > 0);
+  assert(tokens);
+  assert(token_cap);
+
+  jsmn_parser p;
+  jsmn_init(&p);
+
+  int ntok = jsmn_parse(&p, jg->json, jg->json_len, tokens, token_cap);
+  if (ntok <= 0 || (uint32_t)ntok > token_cap)
+    return ERR;
+
+  // Root must be an object for all current JsonGetter callers.
+  if (tokens[0].type != JSMN_OBJECT)
+    return ERR;
+
+  jg->toks = tokens;
+  jg->ntok = ntok;
+  jg->root = 0;
+  return OK;
+}
+
+AdbxStatus jsget_init(JsonGetter *jg, const char *json, size_t json_len,
+                      JsonTokBuf *tok_buf) {
+  if (!jg || !json || json_len == 0 || !tok_buf)
+    return ERR;
+
+  memset(jg, 0, sizeof(*jg));
+  jg->json = json;
+  jg->json_len = json_len;
+  jg->owned_toks = NULL;
+  return jsget_parse_into_tokens(jg, tok_buf->toks,
+                                 (uint32_t)ARRLEN(tok_buf->toks));
+}
+
+AdbxStatus jsget_create(JsonGetter *jg, const char *json, size_t json_len) {
   if (!jg || !json || json_len == 0)
     return ERR;
 
   memset(jg, 0, sizeof(*jg));
   jg->json = json;
   jg->json_len = json_len;
-  jg->toks = jg->tok_storage;
 
   jsmn_parser p;
   jsmn_init(&p);
 
-  // Tokenize the entire JSON text. Token count is capped to 1024.
-  int ntok = jsmn_parse(&p, json, (int)json_len, jg->tok_storage,
-                        (unsigned)ARRLEN(jg->tok_storage));
-  if (ntok <= 0 || ntok > JSON_GETTER_MAX_TOKENS)
+  // First pass: count required tokens without storing them.
+  int needed = jsmn_parse(&p, json, json_len, NULL, 0);
+  if (needed <= 0)
+    return ERR;
+  if ((uint32_t)needed > JSON_GETTER_MAX_ALLOC_TOKENS)
     return ERR;
 
-  // Root must be a JSON object for our broker protocol.
-  if (jg->tok_storage[0].type != JSMN_OBJECT)
+  jg->owned_toks = (jsmntok_t *)xmalloc((size_t)needed * sizeof(jsmntok_t));
+  if (jsget_parse_into_tokens(jg, jg->owned_toks, (uint32_t)needed) != OK) {
+    jsget_destroy(jg);
     return ERR;
-
-  jg->ntok = ntok;
-  jg->root = 0;
+  }
   return OK;
+}
+
+void jsget_destroy(JsonGetter *jg) {
+  if (!jg)
+    return;
+  free(jg->owned_toks);
+  memset(jg, 0, sizeof(*jg));
 }
 
 AdbxTriStatus jsget_u32(const JsonGetter *jg, const char *key,
@@ -1300,11 +1350,14 @@ AdbxTriStatus jsget_object(const JsonGetter *jg, const char *key,
   if (tv->type != JSMN_OBJECT)
     return ERR;
 
+  // Preserve ownership only for in-place narrowing (out == jg).
+  jsmntok_t *owned_toks = (out == jg) ? out->owned_toks : NULL;
   out->json = jg->json;
   out->json_len = jg->json_len;
   out->toks = jg->toks;
   out->ntok = jg->ntok;
   out->root = val_i;
+  out->owned_toks = owned_toks;
   return YES;
 }
 
@@ -1407,12 +1460,14 @@ AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
   if (te->type != JSMN_OBJECT)
     return ERR;
 
-  memset(out_obj, 0, sizeof(*out_obj));
+  // Preserve ownership only for in-place narrowing (out_obj == jg).
+  jsmntok_t *owned_toks = (out_obj == jg) ? out_obj->owned_toks : NULL;
   out_obj->json = jg->json;
   out_obj->json_len = jg->json_len;
   out_obj->toks = jg->toks;
   out_obj->ntok = jg->ntok;
   out_obj->root = i;
+  out_obj->owned_toks = owned_toks;
 
   int next = skip_token(jg->toks, jg->ntok, i);
   if (next < 0)
@@ -1423,10 +1478,11 @@ AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
   return YES;
 }
 
-AdbxTriStatus
-jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
-                           const char *const *allowed, size_t n_allowed,
-                           JsonStrSpan *out_unknown_key) {
+AdbxTriStatus jsget_top_level_validation(const JsonGetter *jg,
+                                         const char *obj_key,
+                                         const char *const *allowed,
+                                         size_t n_allowed,
+                                         JsonStrSpan *out_unknown_key) {
   if (!jg || !allowed)
     return ERR;
   if (out_unknown_key) {

@@ -10,6 +10,11 @@
 #include "db_backend.h"
 #include "handshake_codec.h"
 
+// TODO: we should be able to accept more than 1 McpServer with just one Broker.
+// We should make the code async, and use a real connection pool.
+#define MAX_CLIENTS 1
+#define MAX_IDLE_SESSIONS (MAX_CLIENTS * 2)
+
 /* The entity is responsible for connecting to databases and running the
  * commands of the clients. */
 typedef struct Broker Broker;

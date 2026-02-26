@@ -44,11 +44,6 @@
 #define REQUEST_READ_TIMEOUT_SEC 3
 #endif
 
-// TODO: we should be able to accept more than 1 McpServer with just one Broker.
-// We should make the code async, and use a real connection pool.
-#define MAX_CLIENTS 1
-#define MAX_IDLE_SESSIONS (MAX_CLIENTS * 2)
-
 #define ABSOLUTE_TTL (8 * 60 * 60) // 8 hours
 #define IDLE_TTL (20 * 60)         // 20 minutes
 
@@ -986,8 +981,11 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
 
   McpId id = {0};
   JsonGetter jg;
-  if (jsget_init(&jg, req, req_len) != OK)
+  JsonTokBuf tok_buf = {0};
+  if (jsget_init(&jg, req, req_len, &tok_buf) != OK) {
+    TLOG("ERROR - invalid request JSON or token overflow (len=%u)", req_len);
     return ERR;
+  }
   AdbxTriStatus has_u32 = jsget_u32(&jg, "id", &id.u32);
   if (has_u32 == YES) {
     id.kind = MCP_ID_INT;

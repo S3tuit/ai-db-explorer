@@ -25,8 +25,8 @@ static McpId id_u32(uint32_t v) {
   return id;
 }
 
-static int set_col_plain(QueryResultBuilder *qb, uint32_t col,
-                         const char *name, const char *type) {
+static int set_col_plain(QueryResultBuilder *qb, uint32_t col, const char *name,
+                         const char *type) {
   return qb_set_col(qb, col, name, type, 0);
 }
 
@@ -360,26 +360,62 @@ static void test_jsget_simple_rpc_validation(void) {
   const char *bad_json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"exec\"";
 
   JsonGetter jg;
-  ASSERT_TRUE(jsget_init(&jg, ok, strlen(ok)) == OK);
+  JsonTokBuf tok_buf = {0};
+  ASSERT_TRUE(jsget_init(&jg, ok, strlen(ok), &tok_buf) == OK);
   ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == YES);
 
-  ASSERT_TRUE(jsget_init(&jg, ok_str, strlen(ok_str)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, ok_str, strlen(ok_str), &tok_buf) == OK);
   ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == YES);
 
-  ASSERT_TRUE(jsget_init(&jg, no_id, strlen(no_id)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, no_id, strlen(no_id), &tok_buf) == OK);
   ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == NO);
 
-  ASSERT_TRUE(jsget_init(&jg, bad_ver, strlen(bad_ver)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, bad_ver, strlen(bad_ver), &tok_buf) == OK);
   ASSERT_TRUE(jsget_simple_rpc_validation(&jg) == NO);
 
-  ASSERT_TRUE(jsget_init(&jg, bad_json, strlen(bad_json)) == ERR);
+  ASSERT_TRUE(jsget_init(&jg, bad_json, strlen(bad_json), &tok_buf) == ERR);
+}
+
+static void test_jsget_create_and_destroy(void) {
+  const char *json = "{\"a\":{\"b\":{\"c\":\"z\"}},\"arr\":[1,2,3]}";
+  JsonGetter jg = {0};
+  JsonGetter sub = {0};
+  JsonStrSpan sp = {0};
+
+  ASSERT_TRUE(jsget_create(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_string_span(&jg, "a.b.c", &sp) == YES);
+  ASSERT_TRUE(sp.len == 1);
+  ASSERT_TRUE(sp.ptr[0] == 'z');
+
+  ASSERT_TRUE(jsget_object(&jg, "a.b", &sub) == YES);
+  ASSERT_TRUE(jsget_string_span(&sub, "c", &sp) == YES);
+  ASSERT_TRUE(sp.len == 1);
+  ASSERT_TRUE(sp.ptr[0] == 'z');
+
+  // Child views never own tokens; destroy must be a no-op.
+  jsget_destroy(&sub);
+  jsget_destroy(&jg);
+}
+
+static void test_jsget_create_inplace_object_view_keeps_ownership(void) {
+  const char *json = "{\"a\":{\"b\":{\"c\":\"z\"}},\"x\":2}";
+  JsonGetter jg = {0};
+  JsonStrSpan sp = {0};
+
+  ASSERT_TRUE(jsget_create(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_object(&jg, "a.b", &jg) == YES);
+  ASSERT_TRUE(jsget_string_span(&jg, "c", &sp) == YES);
+  ASSERT_TRUE(sp.len == 1);
+  ASSERT_TRUE(sp.ptr[0] == 'z');
+  jsget_destroy(&jg);
 }
 
 static void test_jsget_paths(void) {
   const char *json =
       "{\"a\":\"x\",\"b\":{\"c\":\"hello\",\"d\":{\"e\":\"z\"}}}";
   JsonGetter jg;
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  JsonTokBuf tok_buf = {0};
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
 
   char *s1 = NULL;
   char *s2 = NULL;
@@ -401,11 +437,12 @@ static void test_jsget_paths(void) {
 static void test_jsget_object_view(void) {
   const char *json = "{\"a\":{\"b\":{\"c\":\"z\",\"num\":77},\"n\":1},\"x\":2}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   JsonGetter sub;
   JsonStrSpan sp = {0};
   uint32_t num = 0;
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_object(&jg, "a.b", &sub) == YES);
   ASSERT_TRUE(jsget_string_span(&sub, "c", &sp) == YES);
   ASSERT_TRUE(sp.len == 1);
@@ -420,9 +457,10 @@ static void test_jsget_object_view(void) {
 static void test_jsget_object_inplace(void) {
   const char *json = "{\"a\":{\"b\":{\"c\":\"z\"}},\"x\":2}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   JsonStrSpan sp = {0};
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_object(&jg, "a.b", &jg) == YES);
   ASSERT_TRUE(jsget_string_span(&jg, "c", &sp) == YES);
   ASSERT_TRUE(sp.len == 1);
@@ -432,7 +470,8 @@ static void test_jsget_object_inplace(void) {
 static void test_jsget_null_and_overflow(void) {
   const char *json = "{\"a\":null,\"b\":4294967296}";
   JsonGetter jg;
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  JsonTokBuf tok_buf = {0};
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
 
   uint32_t v = 0;
   ASSERT_TRUE(jsget_u32(&jg, "a", &v) == NO);
@@ -442,11 +481,12 @@ static void test_jsget_null_and_overflow(void) {
 static void test_jsget_u32_and_bool(void) {
   const char *json = "{\"id\":7,\"ok\":true,\"err\":false}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   uint32_t id = 0;
   int ok = 0;
   int err = 10;
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_u32(&jg, "id", &id) == YES);
   ASSERT_TRUE(id == 7);
   ASSERT_TRUE(jsget_bool01(&jg, "ok", &ok) == YES);
@@ -458,9 +498,10 @@ static void test_jsget_u32_and_bool(void) {
 static void test_jsget_f64(void) {
   const char *json = "{\"pi\":3.1415,\"i\":2,\"bad\":\"x\"}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   double v = 0.0;
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_f64(&jg, "pi", &v) == YES);
   ASSERT_TRUE(v > 3.14 && v < 3.15);
   ASSERT_TRUE(jsget_f64(&jg, "i", &v) == YES);
@@ -472,9 +513,10 @@ static void test_jsget_f64(void) {
 static void test_jsget_i64(void) {
   const char *json = "{\"n\":-12,\"z\":0,\"bad\":3.1}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   int64_t v = 0;
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_i64(&jg, "n", &v) == YES);
   ASSERT_TRUE(v == -12);
   ASSERT_TRUE(jsget_i64(&jg, "z", &v) == YES);
@@ -486,10 +528,11 @@ static void test_jsget_i64(void) {
 static void test_jsget_string_span_and_decode(void) {
   const char *json = "{\"raw\":\"a\\\\n\\\"b\\\"\"}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   JsonStrSpan sp = {0};
   char *decoded = NULL;
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_string_span(&jg, "raw", &sp) == YES);
   ASSERT_TRUE(sp.len == strlen("a\\\\n\\\"b\\\""));
   ASSERT_TRUE(jsget_string_decode_alloc(&jg, "raw", &decoded) == YES);
@@ -500,10 +543,11 @@ static void test_jsget_string_span_and_decode(void) {
 static void test_jsget_array_strings(void) {
   const char *json = "{\"arr\":[\"x\",\"y\"]}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   JsonArrIter it;
   JsonStrSpan sp = {0};
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_array_strings_begin(&jg, "arr", &it) == YES);
 
   ASSERT_TRUE(jsget_array_strings_next(&jg, &it, &sp) == YES);
@@ -520,11 +564,12 @@ static void test_jsget_array_strings(void) {
 static void test_jsget_array_objects(void) {
   const char *json = "{\"arr\":[{\"a\":1},{\"b\":2}]}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   JsonArrIter it;
   JsonGetter obj = {0};
   uint32_t v = 0;
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_array_objects_begin(&jg, "arr", &it) == YES);
 
   ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
@@ -542,25 +587,26 @@ static void test_jsget_top_level_validation(void) {
   const char *json = "{\"a\":1,\"b\":2}";
   const char *json_extra = "{\"a\":1,\"b\":2,\"c\":3}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
   const char *allowed[] = {"a", "b"};
   JsonStrSpan unknown = {0};
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2, &unknown) ==
               YES);
   ASSERT_TRUE(unknown.ptr == NULL);
   ASSERT_TRUE(unknown.len == 0);
 
-  ASSERT_TRUE(jsget_init(&jg, json_extra, strlen(json_extra)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json_extra, strlen(json_extra), &tok_buf) == OK);
   ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, allowed, 2, &unknown) ==
               NO);
   ASSERT_TRUE(unknown.ptr != NULL);
   ASSERT_TRUE(unknown.len == 1);
   ASSERT_TRUE(strncmp(unknown.ptr, "c", 1) == 0);
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
-  ASSERT_TRUE(jsget_top_level_validation(&jg, "missing", allowed, 2,
-                                         &unknown) == NO);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
+  ASSERT_TRUE(
+      jsget_top_level_validation(&jg, "missing", allowed, 2, &unknown) == NO);
   ASSERT_TRUE(unknown.ptr == NULL);
   ASSERT_TRUE(unknown.len == 0);
 }
@@ -569,14 +615,15 @@ static void test_jsget_exists_nonnull(void) {
   const char *json = "{\"a\":null,\"b\":1,\"c\":\"x\"}";
   const char *json_str = "{\"a\":\"null\"}";
   JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
 
-  ASSERT_TRUE(jsget_init(&jg, json, strlen(json)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
   ASSERT_TRUE(jsget_exists_nonnull(&jg, "a") == NO);
   ASSERT_TRUE(jsget_exists_nonnull(&jg, "b") == YES);
   ASSERT_TRUE(jsget_exists_nonnull(&jg, "c") == YES);
   ASSERT_TRUE(jsget_exists_nonnull(&jg, "missing") == NO);
 
-  ASSERT_TRUE(jsget_init(&jg, json_str, strlen(json_str)) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json_str, strlen(json_str), &tok_buf) == OK);
   ASSERT_TRUE(jsget_exists_nonnull(&jg, "a") == YES);
 }
 
@@ -592,6 +639,8 @@ int main(void) {
   test_json_builder_array();
   test_json_builder_nested();
   test_jsget_simple_rpc_validation();
+  test_jsget_create_and_destroy();
+  test_jsget_create_inplace_object_view_keeps_ownership();
   test_jsget_paths();
   test_jsget_object_view();
   test_jsget_object_inplace();
