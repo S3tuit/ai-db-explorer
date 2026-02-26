@@ -3,6 +3,7 @@
 
 #include "arena.h"
 #include "safety_policy.h"
+#include "utils.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -117,8 +118,8 @@ size_t catalog_list(ConnCatalog *cat, ConnProfile **out, size_t cap_count);
  *
  * Returns YES/NO/ERR.
  */
-int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
-                           const char *table, const char *column);
+AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
+                                     const char *table, const char *column);
 
 /**
  * Returns YES if the function name is marked safe by the profile.
@@ -132,7 +133,7 @@ int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
  *
  * Returns YES/NO/ERR.
  */
-int connp_is_func_safe(const ConnProfile *cp, const char *schema,
-                       const char *name);
+AdbxTriStatus connp_is_func_safe(const ConnProfile *cp, const char *schema,
+                                 const char *name);
 
 #endif

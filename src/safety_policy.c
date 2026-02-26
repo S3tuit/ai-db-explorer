@@ -1,9 +1,10 @@
 #include "safety_policy.h"
 #include "utils.h"
 
-int safety_policy_init(SafetyPolicy *p, int *read_only, uint32_t *max_rows,
-                       uint32_t *max_payload_bytes,
-                       uint32_t *statement_timeout_ms) {
+AdbxStatus safety_policy_init(SafetyPolicy *p, int *read_only,
+                              uint32_t *max_rows,
+                              uint32_t *max_payload_bytes,
+                              uint32_t *statement_timeout_ms) {
   if (!p)
     return ERR;
 

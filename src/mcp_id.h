@@ -2,6 +2,7 @@
 #define MCP_ID_H
 
 #include <stdint.h>
+#include "utils.h"
 
 typedef enum {
   MCP_ID_INT = 0,
@@ -23,7 +24,7 @@ void mcp_id_init_u32(McpId *id, uint32_t v);
 
 /* Initializes a string id by copying 's'. Ownership: allocates and must be
  * cleaned with mcp_id_clean(). Returns OK/ERR. */
-int mcp_id_init_str_copy(McpId *id, const char *s);
+AdbxStatus mcp_id_init_str_copy(McpId *id, const char *s);
 
 /* Releases any owned memory inside 'id'. Safe to call multiple times. */
 void mcp_id_clean(McpId *id);

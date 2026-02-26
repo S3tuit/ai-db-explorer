@@ -28,7 +28,7 @@ typedef struct Broker Broker;
  * TODO: now it runs forever until an unrecoverable error occurs. Sdd a stop
  * flag / signal handling.
  */
-int broker_run(Broker *b);
+AdbxStatus broker_run(Broker *b);
 
 /* Creates a Broker. The Broker takes ownership of 'cm'.
  * 'secret_token' is copied internally and used for handshake verification.

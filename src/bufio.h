@@ -6,6 +6,7 @@
 
 #include "byte_channel.h"
 #include "string_op.h"
+#include "utils.h"
 
 /* Buffered I/O on top of a ByteChannel. This layer is protocol-agnostic.
  *
@@ -26,7 +27,7 @@ typedef struct BufChannel {
 } BufChannel;
 
 /* Initializes a BufChannel without allocating it. */
-int bufch_init(BufChannel *bc, ByteChannel *ch);
+AdbxStatus bufch_init(BufChannel *bc, ByteChannel *ch);
 
 BufChannel *bufch_create(ByteChannel *ch);
 
@@ -38,7 +39,7 @@ void bufch_destroy(BufChannel *bc);
 
 // Ensures at least 'need' bytes are available to peek/consume from 'bc'.
 // Returns YES/NO/ERR, and sets EOF state if peer closes.
-int bufch_ensure(BufChannel *bc, size_t need);
+AdbxTriStatus bufch_ensure(BufChannel *bc, size_t need);
 
 // Returns a pointer to available data buffered but not read and stores its
 // length inside 'out_val'. The returned pointer is valid until next
@@ -53,7 +54,7 @@ const uint8_t *bufch_peek(const BufChannel *bc, size_t *out_avail);
  * position.
  * Error semantics: returns OK on success, ERR on invalid input or short read.
  */
-int bufch_read_exact(BufChannel *bc, void *dst, size_t n);
+AdbxStatus bufch_read_exact(BufChannel *bc, void *dst, size_t n);
 
 /* Reads up to 'max_n' bytes into 'dst', stopping at EOF or once max is met.
  * Ownership: borrows 'bc'; writes into caller-owned 'dst'.
@@ -74,11 +75,11 @@ ssize_t bufch_findn(BufChannel *bc, const void *needle, size_t needle_len,
                     size_t max_dist);
 
 /* Writes all 'n' bytes from 'src' to 'bc'. Returns ok/err. */
-int bufch_write_all(BufChannel *bc, const void *src, size_t n);
+AdbxStatus bufch_write_all(BufChannel *bc, const void *src, size_t n);
 
 /* Writes header + payload with a vector fast path when available. */
-int bufch_write2v(BufChannel *bc, const void *h, size_t hlen, const void *p,
-                  size_t plen);
+AdbxStatus bufch_write2v(BufChannel *bc, const void *h, size_t hlen,
+                         const void *p, size_t plen);
 
 /*---------------------------------- Helpers --------------------------------*/
 
@@ -89,8 +90,9 @@ int bufch_write2v(BufChannel *bc, const void *h, size_t hlen, const void *p,
  * This helper guarantees the temporary owned channel is destroyed when
  * bufch_init fails (for example when 'bufch' is NULL), preventing fd leaks.
  */
-static inline int bufch_stdio_openp_init(BufChannel *bufch, const char *in_path,
-                                         const char *out_path) {
+static inline AdbxStatus bufch_stdio_openp_init(BufChannel *bufch,
+                                                const char *in_path,
+                                                const char *out_path) {
   ByteChannel *ch = stdio_bytechannel_open_path(in_path, out_path);
   if (!ch)
     return ERR;
@@ -108,8 +110,8 @@ static inline int bufch_stdio_openp_init(BufChannel *bufch, const char *in_path,
  *
  * This helper guarantees ownership is not leaked when bufch_init fails.
  */
-static inline int bufch_stdio_openfd_init(BufChannel *bufch, int in_fd,
-                                          int out_fd) {
+static inline AdbxStatus bufch_stdio_openfd_init(BufChannel *bufch, int in_fd,
+                                                 int out_fd) {
   ByteChannel *ch = stdio_bytechannel_open_fd(in_fd, out_fd);
   if (!ch)
     return ERR;

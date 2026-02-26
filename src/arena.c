@@ -40,7 +40,7 @@ static ArenaBlock *arena_block_create(uint32_t cap) {
  * Ownership: caller retains the arena object and must call arena_clean().
  * Side effects: allocates the first block.
  * Returns OK on success, ERR on bad input or allocation failure. */
-int arena_init(Arena *ar, uint32_t *size_p, uint32_t *cap_p) {
+AdbxStatus arena_init(Arena *ar, uint32_t *size_p, uint32_t *cap_p) {
   if (!ar)
     return ERR;
 
@@ -110,7 +110,7 @@ void arena_clean(Arena *ar) {
   ar->block_sz = 0;
 }
 
-int arena_is_zeroed(const Arena *ar) {
+AdbxTriStatus arena_is_zeroed(const Arena *ar) {
   if (!ar)
     return ERR;
   if (ar->head || ar->tail || ar->used != 0 || ar->cap != 0 ||
@@ -120,11 +120,11 @@ int arena_is_zeroed(const Arena *ar) {
   return YES;
 }
 
-int arena_is_ok(const Arena *ar) {
+AdbxTriStatus arena_is_ok(const Arena *ar) {
   if (!ar)
     return ERR;
 
-  int zeroed = arena_is_zeroed(ar);
+  AdbxTriStatus zeroed = arena_is_zeroed(ar);
   if (zeroed == YES)
     return NO;
   if (zeroed == ERR)
@@ -168,7 +168,7 @@ int arena_is_ok(const Arena *ar) {
  * Ownership: arena retains ownership of blocks.
  * Side effects: may allocate a new block.
  * Returns OK on success, ERR on cap/overflow. */
-int arena_ensure(Arena *ar, uint32_t extra) {
+AdbxStatus arena_ensure(Arena *ar, uint32_t extra) {
   if (!ar)
     return ERR;
 
@@ -287,7 +287,7 @@ uint32_t arena_get_used(Arena *ar) {
   return ar->used;
 }
 
-int ptrvec_push(PtrVec *v, void *ptr) {
+AdbxStatus ptrvec_push(PtrVec *v, void *ptr) {
   if (!v)
     return ERR;
   if (v->len + 1 > v->cap) {

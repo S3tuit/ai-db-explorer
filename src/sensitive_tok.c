@@ -38,7 +38,7 @@ static inline const void *stok_index_encode(uint32_t idx) {
  * Side effects: writes decoded value to '*out_idx'.
  * Error semantics: returns OK on valid payload, ERR on invalid input/range.
  */
-static inline int stok_index_decode(const void *p, uint32_t *out_idx) {
+static inline AdbxStatus stok_index_decode(const void *p, uint32_t *out_idx) {
   if (!p || !out_idx)
     return ERR;
   uintptr_t raw = (uintptr_t)p;
@@ -82,7 +82,7 @@ static uint64_t tok_hash(const void *key, void *ctx) {
  * Side effects: none.
  * Error semantics: returns YES when equal, NO otherwise.
  */
-static int tok_eq(const void *a, const void *b, void *ctx) {
+static AdbxTriStatus tok_eq(const void *a, const void *b, void *ctx) {
   (void)ctx;
   const SensitiveTokKey *ka = (const SensitiveTokKey *)a;
   const SensitiveTokKey *kb = (const SensitiveTokKey *)b;
@@ -178,7 +178,8 @@ void stok_store_destroy(DbTokenStore *store) {
   free(store);
 }
 
-int stok_store_same_connection(const DbTokenStore *a, const DbTokenStore *b) {
+AdbxTriStatus stok_store_same_connection(const DbTokenStore *a,
+                                         const DbTokenStore *b) {
   if (!a || !b || !a->connection_name || !b->connection_name)
     return NO;
   if (a->connection_name_len != b->connection_name_len)
@@ -191,8 +192,8 @@ int stok_store_same_connection(const DbTokenStore *a, const DbTokenStore *b) {
              : NO;
 }
 
-int stok_store_matches_conn_name(const DbTokenStore *store,
-                                 const char *connection_name) {
+AdbxTriStatus stok_store_matches_conn_name(const DbTokenStore *store,
+                                           const char *connection_name) {
   if (!store || !connection_name || !store->connection_name)
     return ERR;
   size_t input_len = strlen(connection_name);
@@ -370,8 +371,8 @@ int stok_store_create_token(DbTokenStore *store, uint32_t generation,
  * Side effects: writes to '*out_u32' on success.
  * Error semantics: returns OK on valid uint32 text, ERR otherwise.
  */
-static int parse_u32_span(const char *start, const char *end,
-                          uint32_t *out_u32) {
+static AdbxStatus parse_u32_span(const char *start, const char *end,
+                                 uint32_t *out_u32) {
   assert(start != NULL);
   assert(end != NULL);
   assert(out_u32 != NULL);
@@ -410,7 +411,7 @@ static char *find_last_underscore(char *start, char *end) {
   return NULL;
 }
 
-int stok_parse_view_inplace(char *token, ParsedTokView *out) {
+AdbxStatus stok_parse_view_inplace(char *token, ParsedTokView *out) {
   if (!token || !out)
     return ERR;
   size_t prefix_len = strlen(SENSITIVE_TOK_PREFIX);

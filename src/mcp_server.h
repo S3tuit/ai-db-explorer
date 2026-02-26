@@ -7,6 +7,7 @@
 #include "bufio.h"
 #include "private_dir.h"
 #include "resume_token.h"
+#include "utils.h"
 
 typedef struct McpServerInit {
   FILE *in;             /* borrowed by McpServer */
@@ -32,12 +33,12 @@ enum {
  * and does not close them. Broker connectivity is best-effort at init and is
  * retried lazily during request handling.
  * Returns OK/ERR. */
-int mcpser_init(McpServer *s, const McpServerInit *init);
+AdbxStatus mcpser_init(McpServer *s, const McpServerInit *init);
 
 /* Runs the main loop until EOF. Returns OK on clean EOF, ERR on fatal error.
  * This handle errors logging to the user via JSONRPC and via stderr. If
  * a fatal error occurs, set 'c'->last_err and returns. */
-int mcpser_run(McpServer *s);
+AdbxStatus mcpser_run(McpServer *s);
 
 /* Cleans owned resources (channels). Safe to call multiple times. */
 void mcpser_clean(McpServer *s);

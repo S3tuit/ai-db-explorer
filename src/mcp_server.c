@@ -26,15 +26,15 @@ static void mcpser_set_err(McpServer *s, const char *msg) {
   snprintf(s->last_err, sizeof(s->last_err), "%s", msg);
 }
 
-static int mcpser_send_error(McpServer *s, const McpId *id, long code,
-                             const char *msg, const char *requested);
+static AdbxStatus mcpser_send_error(McpServer *s, const McpId *id, long code,
+                                    const char *msg, const char *requested);
 
 /* Marks broker channel as unavailable and drops its socket/channel resources.
  * Ownership: borrows 's'.
  * Side effects: closes broker channel and clears runtime-ready state bit.
  * Error semantics: returns OK on state update, ERR on invalid input.
  */
-static int mcpser_invalidate_broker(McpServer *s) {
+static AdbxStatus mcpser_invalidate_broker(McpServer *s) {
   if (!s)
     return ERR;
   s->flags &= ~MCPSER_F_BROKER_READY;
@@ -77,7 +77,8 @@ static int connect_unix_socket(const char *path) {
  * Error semantics: returns OK on success, ERR on invalid input or connection/
  * channel creation failure.
  */
-static int mcpser_connect_broker_channel(McpServer *s, const char *sock_path) {
+static AdbxStatus mcpser_connect_broker_channel(McpServer *s,
+                                                const char *sock_path) {
   if (!s || !sock_path)
     return ERR;
 
@@ -98,7 +99,7 @@ static int mcpser_connect_broker_channel(McpServer *s, const char *sock_path) {
  * Error semantics: returns OK on success, ERR on invalid input or write
  * failure.
  */
-static int mcpser_send_broker_handshake_req(
+static AdbxStatus mcpser_send_broker_handshake_req(
     McpServer *s, const uint8_t secret_token[SECRET_TOKEN_LEN], int use_resume,
     const uint8_t resume_token[RESUME_TOKEN_LEN]) {
   if (!s || !s->brok_bc.ch || !secret_token)
@@ -127,14 +128,14 @@ static int mcpser_send_broker_handshake_req(
  * Error semantics: returns OK on valid response frame, ERR on invalid input,
  * framing I/O failure, payload-size mismatch, or bad magic/version.
  */
-static int mcpser_read_broker_handshake_resp(McpServer *s,
-                                             handshake_resp_t *out) {
+static AdbxStatus mcpser_read_broker_handshake_resp(McpServer *s,
+                                                    handshake_resp_t *out) {
   if (!s || !s->brok_bc.ch || !out)
     return ERR;
 
   StrBuf payload;
   sb_init(&payload);
-  int rc = frame_read_len(&s->brok_bc, &payload);
+  AdbxStatus rc = frame_read_len(&s->brok_bc, &payload);
   if (rc != OK) {
     sb_clean(&payload);
     return ERR;
@@ -188,7 +189,7 @@ static const char *mcpser_hs_status_desc(handshake_status st) {
  * Error semantics: returns OK when broker is ready (already ready or newly
  * connected), ERR on missing/invalid inputs or failed connect/handshake flow.
  */
-static int mcpser_connect_and_handshake_broker(McpServer *s) {
+static AdbxStatus mcpser_connect_and_handshake_broker(McpServer *s) {
   if (!s || !s->privd || !s->privd->sock_path)
     return ERR;
 
@@ -215,8 +216,8 @@ static int mcpser_connect_and_handshake_broker(McpServer *s) {
 
     // try handshake once
     handshake_resp_t resp = {0};
-    int rc = mcpser_send_broker_handshake_req(s, secret_token, have_resume,
-                                              resume_token);
+    AdbxStatus rc = mcpser_send_broker_handshake_req(s, secret_token,
+                                                     have_resume, resume_token);
     if (rc == OK)
       rc = mcpser_read_broker_handshake_resp(s, &resp);
     if (rc != OK) {
@@ -259,7 +260,8 @@ static int mcpser_connect_and_handshake_broker(McpServer *s) {
  * Error semantics: returns OK on successful write, ERR on invalid input or
  * write failure.
  */
-static int mcpser_send_broker_unavailable(McpServer *s, const McpId *id) {
+static AdbxStatus mcpser_send_broker_unavailable(McpServer *s,
+                                                 const McpId *id) {
   return mcpser_send_error(
       s, id, -32600,
       "Unable to reach broker. Please, try again. If the issue persists, ask "
@@ -275,8 +277,8 @@ static int mcpser_send_broker_unavailable(McpServer *s, const McpId *id) {
  * Error semantics: returns OK on successful serialization/write, ERR on invalid
  * input, allocation failure, or output I/O failure.
  */
-static int mcpser_send_error(McpServer *s, const McpId *id, long code,
-                             const char *msg, const char *requested) {
+static AdbxStatus mcpser_send_error(McpServer *s, const McpId *id, long code,
+                                    const char *msg, const char *requested) {
   if (!s || !s->out_bc.ch || !msg)
     return ERR;
 
@@ -323,7 +325,7 @@ static int mcpser_send_error(McpServer *s, const McpId *id, long code,
   if (json_obj_end(&sb) != OK)
     goto err;
 
-  int rc = frame_write_cl(&s->out_bc, sb.data, sb.len);
+  AdbxStatus rc = frame_write_cl(&s->out_bc, sb.data, sb.len);
   sb_clean(&sb);
   return rc;
 
@@ -332,7 +334,7 @@ err:
   return ERR;
 }
 
-int mcpser_init(McpServer *s, const McpServerInit *init) {
+AdbxStatus mcpser_init(McpServer *s, const McpServerInit *init) {
   if (!s || !init || !init->in || !init->out || !init->privd)
     return ERR;
   memset(s, 0, sizeof(*s));
@@ -378,13 +380,13 @@ int mcpser_init(McpServer *s, const McpServerInit *init) {
  * Error semantics: returns OK on valid initialize flow, ERR on malformed input
  * framing/JSON, write failure, or protocol mismatch.
  */
-static int mcpser_user_initialize_handshake(McpServer *s) {
+static AdbxStatus mcpser_user_initialize_handshake(McpServer *s) {
   if (!s)
     return ERR;
 
   StrBuf req;
   sb_init(&req);
-  int rc = frame_read_cl(&s->in_bc, &req);
+  AdbxTriStatus rc = frame_read_cl(&s->in_bc, &req);
   if (rc != YES) {
     sb_clean(&req);
     return ERR;
@@ -393,10 +395,10 @@ static int mcpser_user_initialize_handshake(McpServer *s) {
   const char *json = req.data;
 
   JsonGetter jg;
-  int irc = jsget_init(&jg, json, req.len);
+  AdbxStatus irc = jsget_init(&jg, json, req.len);
   // if it's not a valid JSON-RPC, we still try to find a top-leve "id" key
   // before returning the error
-  int vrc = (irc == OK) ? jsget_simple_rpc_validation(&jg) : ERR;
+  AdbxTriStatus vrc = (irc == OK) ? jsget_simple_rpc_validation(&jg) : ERR;
 
   McpId id = {0};
   const McpId *idp = NULL;
@@ -406,7 +408,7 @@ static int mcpser_user_initialize_handshake(McpServer *s) {
       idp = &id;
     } else {
       char *id_str = NULL;
-      int src = jsget_string_decode_alloc(&jg, "id", &id_str);
+      AdbxTriStatus src = jsget_string_decode_alloc(&jg, "id", &id_str);
       if (src == YES) {
         id.kind = MCP_ID_STR;
         id.str = id_str;
@@ -427,11 +429,11 @@ static int mcpser_user_initialize_handshake(McpServer *s) {
 
   JsonStrSpan method = {0};
   JsonStrSpan proto = {0};
-  int mrc = jsget_string_span(&jg, "method", &method);
+  AdbxTriStatus mrc = jsget_string_span(&jg, "method", &method);
   // If the server supports the requested protocol version, it MUST respond
   // with the same version. Otherwise, the server MUST respond with another
   // protocol version it supports.
-  int prc = jsget_string_span(&jg, "params.protocolVersion", &proto);
+  AdbxTriStatus prc = jsget_string_span(&jg, "params.protocolVersion", &proto);
   if (mrc != YES || prc != YES || method.len == 0 ||
       method.len != strlen("initialize") ||
       memcmp(method.ptr, "initialize", method.len) != 0) {
@@ -486,7 +488,7 @@ static int mcpser_user_initialize_handshake(McpServer *s) {
   if (json_obj_end(&sb) != OK)
     goto fail;
 
-  int wrc = frame_write_cl(&s->out_bc, sb.data, sb.len);
+  AdbxStatus wrc = frame_write_cl(&s->out_bc, sb.data, sb.len);
   sb_clean(&sb);
   if (id.kind == MCP_ID_STR)
     mcp_id_clean(&id);
@@ -509,8 +511,9 @@ fail:
  * processing must stop (typically failed error-response write or invalid input
  * pointers).
  */
-static int mcpser_validate_user_req(McpServer *s, const StrBuf *req,
-                                    McpId *id_out, const McpId **idp_out) {
+static AdbxTriStatus mcpser_validate_user_req(McpServer *s, const StrBuf *req,
+                                              McpId *id_out,
+                                              const McpId **idp_out) {
   if (!s || !req || !id_out || !idp_out)
     return ERR;
 
@@ -518,7 +521,7 @@ static int mcpser_validate_user_req(McpServer *s, const StrBuf *req,
   *idp_out = NULL;
 
   JsonGetter jg;
-  int irc = jsget_init(&jg, req->data, req->len);
+  AdbxStatus irc = jsget_init(&jg, req->data, req->len);
   if (irc != OK) {
     fprintf(stderr, "McpServer: malformed input\n");
     TLOG("ERROR - invalid JSON in MCP input");
@@ -535,7 +538,7 @@ static int mcpser_validate_user_req(McpServer *s, const StrBuf *req,
     *idp_out = id_out;
   } else {
     char *id_str = NULL;
-    int src = jsget_string_decode_alloc(&jg, "id", &id_str);
+    AdbxTriStatus src = jsget_string_decode_alloc(&jg, "id", &id_str);
     if (src == YES) {
       id_out->kind = MCP_ID_STR;
       id_out->str = id_str;
@@ -554,7 +557,7 @@ static int mcpser_validate_user_req(McpServer *s, const StrBuf *req,
     }
   }
 
-  int vrc = jsget_simple_rpc_validation(&jg);
+  AdbxTriStatus vrc = jsget_simple_rpc_validation(&jg);
   if (vrc != YES) {
     fprintf(stderr, "McpServer: invalid input\n");
     TLOG("ERROR - invalid JSON-RPC envelope");
@@ -591,14 +594,14 @@ static int mcpser_validate_user_req(McpServer *s, const StrBuf *req,
   return YES;
 }
 
-int mcpser_run(McpServer *s) {
+AdbxStatus mcpser_run(McpServer *s) {
   // This is the flow of McpServer:
   // handshake -> read JSON-RPC -> validate -> write to broker -> read from
   // broker -> write to out channel
   if (!s || !s->in_bc.ch || !s->out_bc.ch || !s->privd)
     return ERR;
 
-  int hrc = mcpser_user_initialize_handshake(s);
+  AdbxStatus hrc = mcpser_user_initialize_handshake(s);
   if (hrc != OK)
     return ERR;
   TLOG("INFO - handshake complete, entering main loop");
@@ -607,7 +610,7 @@ int mcpser_run(McpServer *s) {
     // McpServer reads JSON-RPC request
     StrBuf req;
     sb_init(&req);
-    int rc = frame_read_cl(&s->in_bc, &req);
+    AdbxTriStatus rc = frame_read_cl(&s->in_bc, &req);
     TLOG("INFO - frame_read_cl rc=%d len=%zu", rc, req.len);
     if (rc == NO) {
       // EOF
@@ -624,7 +627,7 @@ int mcpser_run(McpServer *s) {
 
     McpId id = {0};
     const McpId *idp = NULL;
-    int vrc = mcpser_validate_user_req(s, &req, &id, &idp);
+    AdbxTriStatus vrc = mcpser_validate_user_req(s, &req, &id, &idp);
     if (vrc == ERR) {
       sb_clean(&req);
       return ERR;

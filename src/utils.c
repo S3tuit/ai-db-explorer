@@ -46,7 +46,7 @@ uint64_t now_ms_monotonic(void) {
   return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
-int fill_random(uint8_t *buf, size_t len) {
+AdbxStatus fill_random(uint8_t *buf, size_t len) {
 #ifdef __linux__
   size_t done = 0;
   while (done < len) {

@@ -9,7 +9,7 @@
 #define BUFIO_READ_CHUNK BUFSIZ
 #endif
 
-int bufch_init(BufChannel *bc, ByteChannel *ch) {
+AdbxStatus bufch_init(BufChannel *bc, ByteChannel *ch) {
   if (!bc || !ch)
     return ERR;
   bc->ch = ch;
@@ -114,7 +114,7 @@ static ssize_t bufch_fill(BufChannel *bc) {
 // TODO: for non-blocking sockets, ensure is blocking and may stall other
 // clients
 
-int bufch_ensure(BufChannel *bc, size_t need) {
+AdbxTriStatus bufch_ensure(BufChannel *bc, size_t need) {
   while (bc_avail(bc) < need) {
     ssize_t n = bufch_fill(bc);
     if (n < 0)
@@ -150,7 +150,7 @@ static void bufch_consume(BufChannel *bc, size_t n) {
   }
 }
 
-int bufch_read_exact(BufChannel *bc, void *dst, size_t n) {
+AdbxStatus bufch_read_exact(BufChannel *bc, void *dst, size_t n) {
   if (!bc || (!dst && n != 0))
     return ERR;
   if (bufch_ensure(bc, n) != YES)
@@ -199,7 +199,7 @@ ssize_t bufch_findn(BufChannel *bc, const void *needle, size_t needle_len,
 
   // Ensure enough bytes so we can decide the search window.
   while (bc_avail(bc) < need) {
-    int rc = bufch_ensure(bc, need);
+    AdbxTriStatus rc = bufch_ensure(bc, need);
     if (rc == YES)
       break;
     if (rc == NO)
@@ -253,7 +253,8 @@ ssize_t bufch_find_buffered(const BufChannel *bc, const void *needle,
 
 /* Writers 'n' bytes starting from 'src' to the underlying channel of 'bc' but
  * does not perform any flush() call. */
-static int bufch_write_all_no_flush(BufChannel *bc, const void *src, size_t n) {
+static AdbxStatus bufch_write_all_no_flush(BufChannel *bc, const void *src,
+                                           size_t n) {
   if (!bc || !bc->ch)
     return ERR;
   if (!src && n != 0)
@@ -277,7 +278,7 @@ static int bufch_write_all_no_flush(BufChannel *bc, const void *src, size_t n) {
   return OK;
 }
 
-int bufch_write_all(BufChannel *bc, const void *src, size_t n) {
+AdbxStatus bufch_write_all(BufChannel *bc, const void *src, size_t n) {
   if (bufch_write_all_no_flush(bc, src, n) != OK)
     return ERR;
   // we want the target (broker/client/agent) to see the message as soon as
@@ -287,8 +288,8 @@ int bufch_write_all(BufChannel *bc, const void *src, size_t n) {
   return OK;
 }
 
-int bufch_write2v(BufChannel *bc, const void *h, size_t hlen, const void *p,
-                  size_t plen) {
+AdbxStatus bufch_write2v(BufChannel *bc, const void *h, size_t hlen,
+                         const void *p, size_t plen) {
   if (!bc || !bc->ch)
     return ERR;
   if ((!h && hlen != 0) || (!p && plen != 0))

@@ -10,7 +10,7 @@ LIBPG_QUERY_LIB := $(LIBPG_QUERY_DIR)/libpg_query.a
 LIBPG_QUERY_INC := -I$(LIBPG_QUERY_DIR)
 
 # Build flags
-CFLAGS  := -Wall -Wextra -Werror -std=c11 -g -O2 -flto
+CFLAGS  := -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O2 -flto
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
 CFLAGS  += -DNDEBUG
 INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBPG_QUERY_INC)
@@ -22,7 +22,7 @@ BENCH_CFLAGS := -Wall -Wextra -Werror -std=c11 -O3 -DNDEBUG -flto \
 
 # Test flags
 EXTRA_TCFLAGS ?=
-TCFLAGS = -Wall -Wextra -Werror -std=c11 -g -O1 $(INCLUDES) \
+TCFLAGS = -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O1 $(INCLUDES) \
           -D_POSIX_C_SOURCE=200809L $(EXTRA_TCFLAGS)
 TSAN    := -fsanitize=address,undefined -fno-omit-frame-pointer
 TLDFLAGS := $(TSAN) $(LDFLAGS) $(PIE_LDFLAGS)

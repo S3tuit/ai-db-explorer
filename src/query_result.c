@@ -10,8 +10,8 @@
 #include <string.h>
 
 /* Returns YES if 'row' and 'col' form a valid index to write into cells. */
-static inline int idx_ok_set(const QueryResult *qr, uint32_t row,
-                             uint32_t col) {
+static inline AdbxTriStatus idx_ok_set(const QueryResult *qr, uint32_t row,
+                                       uint32_t col) {
   return (qr && qr->cols && qr->cells && row < qr->nrows_alloc &&
           col < qr->ncols)
              ? YES
@@ -19,8 +19,8 @@ static inline int idx_ok_set(const QueryResult *qr, uint32_t row,
 }
 
 /* Returns YES if 'row' and 'col' form a valid index to read from cells. */
-static inline int idx_ok_get(const QueryResult *qr, uint32_t row,
-                             uint32_t col) {
+static inline AdbxTriStatus idx_ok_get(const QueryResult *qr, uint32_t row,
+                                       uint32_t col) {
   return (qr && qr->cols && qr->cells && row < qr->nrows && col < qr->ncols)
              ? YES
              : NO;
@@ -30,9 +30,10 @@ static inline int idx_ok_get(const QueryResult *qr, uint32_t row,
  * It borrows no dynamic memory and writes caller-owned outputs.
  * Error semantics: returns OK on success, ERR on invalid output pointers.
  */
-static int qr_pick_text_arena_sizes(uint32_t ncols, uint32_t nrows,
-                                    uint64_t max_query_bytes,
-                                    uint32_t *out_init_sz, uint32_t *out_cap) {
+static AdbxStatus qr_pick_text_arena_sizes(uint32_t ncols, uint32_t nrows,
+                                           uint64_t max_query_bytes,
+                                           uint32_t *out_init_sz,
+                                           uint32_t *out_cap) {
   if (!out_init_sz || !out_cap)
     return ERR;
 
@@ -68,8 +69,9 @@ static int qr_pick_text_arena_sizes(uint32_t ncols, uint32_t nrows,
  * Side effects: allocates/frees column metadata strings.
  * Error semantics: returns OK on success, ERR on invalid input/out-of-bounds.
  */
-static int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
-                      const char *type, QRColType value_type, uint32_t pg_oid) {
+static AdbxStatus qr_set_col(QueryResult *qr, uint32_t col, const char *name,
+                             const char *type, QRColType value_type,
+                             uint32_t pg_oid) {
   if (!qr || !qr->cols || col >= qr->ncols || !name)
     return ERR;
 
@@ -94,8 +96,8 @@ static int qr_set_col(QueryResult *qr, uint32_t col, const char *name,
  * Error semantics: returns YES on success, NO when byte cap would be exceeded,
  * ERR on invalid input/out-of-bounds/allocation failure.
  */
-static int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
-                       const char *value, size_t v_len) {
+static AdbxTriStatus qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
+                                 const char *value, size_t v_len) {
   if (!qr)
     return ERR;
   if (!idx_ok_set(qr, row, col))
@@ -128,7 +130,7 @@ static int qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
   return YES;
 }
 
-int qr_set_id(QueryResult *qr, const McpId *id) {
+AdbxStatus qr_set_id(QueryResult *qr, const McpId *id) {
   if (!qr || !id)
     return ERR;
 
@@ -258,8 +260,8 @@ void qr_destroy(QueryResult *qr) {
   free(qr);
 }
 
-int qb_init(QueryResultBuilder *qb, QueryResult *qr,
-            const QueryResultBuildPolicy *policy) {
+AdbxStatus qb_init(QueryResultBuilder *qb, QueryResult *qr,
+                   const QueryResultBuildPolicy *policy) {
   if (!qb || !qr)
     return ERR;
   qb->qr = qr;
@@ -275,8 +277,8 @@ int qb_init(QueryResultBuilder *qb, QueryResult *qr,
   return OK;
 }
 
-int qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
-               const char *type, uint32_t pg_oid) {
+AdbxStatus qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
+                      const char *type, uint32_t pg_oid) {
   if (!qb || !qb->qr)
     return ERR;
 
@@ -302,8 +304,8 @@ const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col) {
   return &qr->cols[col];
 }
 
-int qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
-                const char *value, size_t v_len) {
+AdbxTriStatus qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
+                          const char *value, size_t v_len) {
   if (!qb || !qb->qr)
     return ERR;
   if (!value && v_len != 0)
@@ -353,7 +355,7 @@ const char *qr_get_cell(const QueryResult *qr, uint32_t row, uint32_t col) {
   return qr->cells[idx];
 }
 
-int qr_is_null(const QueryResult *qr, uint32_t row, uint32_t col) {
+AdbxTriStatus qr_is_null(const QueryResult *qr, uint32_t row, uint32_t col) {
   if (!idx_ok_get(qr, row, col))
     return ERR;
   size_t idx = (size_t)row * (size_t)qr->ncols + (size_t)col;

@@ -118,7 +118,8 @@ static inline void safe_close_fd(int *fd) {
  * Side effects: none.
  * Returns YES when arrays are equal, NO when different, ERR on invalid input.
  */
-static int bytes_equal_ct(const uint8_t *a, const uint8_t *b, size_t len) {
+static AdbxTriStatus bytes_equal_ct(const uint8_t *a, const uint8_t *b,
+                                    size_t len) {
   if (!a || !b)
     return ERR;
 
@@ -135,11 +136,11 @@ static int bytes_equal_ct(const uint8_t *a, const uint8_t *b, size_t len) {
  * Side effects: writes one length-prefixed frame to sess->bc.
  * Returns OK on successful write, ERR on invalid input or I/O failure.
  */
-static int broker_write_handshake_resp(BrokerMcpSession *sess,
-                                       handshake_status status,
-                                       const uint8_t *resume_token,
-                                       uint32_t idle_ttl_secs,
-                                       uint32_t abs_ttl_secs) {
+static AdbxStatus broker_write_handshake_resp(BrokerMcpSession *sess,
+                                              handshake_status status,
+                                              const uint8_t *resume_token,
+                                              uint32_t idle_ttl_secs,
+                                              uint32_t abs_ttl_secs) {
   if (!sess || idle_ttl_secs == 0 || abs_ttl_secs == 0)
     return ERR;
 
@@ -167,14 +168,14 @@ static int broker_write_handshake_resp(BrokerMcpSession *sess,
  * Returns OK on exact-size, well-formed handshake payload; ERR on framing
  * failure, timeout, malformed size, or invalid input.
  */
-static int broker_read_handshake_req(BrokerMcpSession *sess,
-                                     handshake_req_t *out_req) {
+static AdbxStatus broker_read_handshake_req(BrokerMcpSession *sess,
+                                            handshake_req_t *out_req) {
   if (!sess || !out_req)
     return ERR;
 
   StrBuf payload;
   sb_init(&payload);
-  int rc = frame_read_len(&sess->bc, &payload);
+  AdbxStatus rc = frame_read_len(&sess->bc, &payload);
   if (rc != OK) {
     sb_clean(&payload);
     return ERR;
@@ -194,7 +195,7 @@ static int broker_read_handshake_req(BrokerMcpSession *sess,
  * Side effects: updates SO_RCVTIMEO kernel state for the socket.
  * Returns OK on success, ERR on invalid input or setsockopt failure.
  */
-static int broker_set_rcv_timeout_sec(int fd, int sec) {
+static AdbxStatus broker_set_rcv_timeout_sec(int fd, int sec) {
   if (fd < 0 || sec < 0)
     return ERR;
 
@@ -209,9 +210,10 @@ static int broker_set_rcv_timeout_sec(int fd, int sec) {
  * Side effects: none.
  * Returns YES when expired, NO when still valid, ERR on invalid input.
  */
-static int broker_session_is_expired(const BrokerMcpSession *sess, time_t now,
-                                     uint32_t idle_ttl_secs,
-                                     uint32_t abs_ttl_secs) {
+static AdbxTriStatus broker_session_is_expired(const BrokerMcpSession *sess,
+                                               time_t now,
+                                               uint32_t idle_ttl_secs,
+                                               uint32_t abs_ttl_secs) {
   if (!sess || now < 0 || sess->created_at <= 0 || sess->last_active <= 0)
     return ERR;
   if (idle_ttl_secs == 0 || abs_ttl_secs == 0)
@@ -234,7 +236,7 @@ static int broker_session_is_expired(const BrokerMcpSession *sess, time_t now,
  * Side effects: may remove one idle session from PackedArray.
  * Returns OK when one idle session is removed, ERR otherwise.
  */
-static int broker_reap_one_idle_session(PackedArray *idle) {
+static AdbxStatus broker_reap_one_idle_session(PackedArray *idle) {
   if (!idle)
     return ERR;
 
@@ -269,7 +271,8 @@ static ssize_t broker_find_idle_by_token(const PackedArray *idle,
         (const BrokerMcpSession *)parr_cat(idle, (uint32_t)i);
     if (!sess)
       continue;
-    int eq = bytes_equal_ct(token, sess->resume_token, RESUME_TOKEN_LEN);
+    AdbxTriStatus eq =
+        bytes_equal_ct(token, sess->resume_token, RESUME_TOKEN_LEN);
     if (eq == YES) {
       return (ssize_t)i;
     }
@@ -559,7 +562,7 @@ static DbTokenStore *broker_find_store(PackedArray *stores,
     DbTokenStore **slot = (DbTokenStore **)parr_at(stores, (uint32_t)i);
     if (!slot || !*slot)
       continue;
-    int eq = stok_store_matches_conn_name(*slot, connection_name);
+    AdbxTriStatus eq = stok_store_matches_conn_name(*slot, connection_name);
     if (eq == YES)
       return *slot;
   }
@@ -573,9 +576,9 @@ static DbTokenStore *broker_find_store(PackedArray *stores,
  * Error semantics: returns OK on success, ERR on invalid input or allocation
  * failure.
  */
-static int broker_get_or_init_store(BrokerMcpSession *sess,
-                                    const ConnProfile *profile,
-                                    DbTokenStore **out_store) {
+static AdbxStatus broker_get_or_init_store(BrokerMcpSession *sess,
+                                           const ConnProfile *profile,
+                                           DbTokenStore **out_store) {
   if (out_store)
     *out_store = NULL;
   if (!sess || !profile || !profile->connection_name || !out_store)
@@ -655,7 +658,11 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
 
   TLOG("INFO - preparing for running %s", query);
   ConnView cv = {0};
-  int rc = connm_get_connection(b->cm, conn_name, &cv);
+  AdbxTriStatus rc = connm_get_connection(b->cm, conn_name, &cv);
+  if (rc == NO) {
+    *out_query =
+        qr_create_tool_err(id, "Unable to find the requested connectionName");
+  }
   if (rc != YES || !cv.db || !cv.profile) {
     TLOG("ERROR - unable to connect to %s", conn_name);
     *out_query = qr_create_err(id, QRERR_RESOURCE,
@@ -757,7 +764,11 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   }
 
   ConnView cv = {0};
-  int rc = connm_get_connection(b->cm, conn_name, &cv);
+  AdbxTriStatus rc = connm_get_connection(b->cm, conn_name, &cv);
+  if (rc == NO) {
+    *out_query =
+        qr_create_tool_err(id, "Unable to find the requested connectionName");
+  }
   if (rc != YES || !cv.db || !cv.profile) {
     *out_query = qr_create_err(id, QRERR_RESOURCE,
                                "Unable to connect to the requested database.");
@@ -772,7 +783,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   }
 
   JsonArrIter it = {0};
-  int arc = jsget_array_strings_begin(jg, "params.arguments.parameters", &it);
+  AdbxTriStatus arc =
+      jsget_array_strings_begin(jg, "params.arguments.parameters", &it);
   if (arc != YES) {
     *out_query =
         qr_create_err(id, QRERR_INPARAM, "Missing arguments.parameters array.");
@@ -792,7 +804,7 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   // the SensitiveTok associated to them
   JsonStrSpan sp = {0};
   for (;;) {
-    int nrc = jsget_array_strings_next(jg, &it, &sp);
+    AdbxTriStatus nrc = jsget_array_strings_next(jg, &it, &sp);
     if (nrc == NO)
       break;
     if (nrc != YES) {
@@ -802,8 +814,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     }
 
     char *tok = NULL;
-    int drc = json_span_decode_alloc(&sp, &tok);
-    if (drc != OK || !tok) {
+    AdbxTriStatus drc = json_span_decode_alloc(&sp, &tok);
+    if (drc != YES || !tok) {
       free(tok);
       *out_query =
           qr_create_err(id, QRERR_INPARAM, "Invalid token parameter entry.");
@@ -814,16 +826,16 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     if (stok_parse_view_inplace(tok, &parsed) != OK) {
       free(tok);
       // TODO: log the wrong formatted token
-      *out_query = qr_create_err(id, QRERR_INPARAM,
-                                 "Invalid token format. Expected "
+      *out_query =
+          qr_create_tool_err(id, "Invalid token format. Expected "
                                  "tok_<connection>_<generation>_<index>.");
       goto free_n_return;
     }
 
     if (strcmp(parsed.connection_name, conn_name) != 0) {
       free(tok);
-      *out_query = qr_create_err(id, QRERR_INPARAM,
-                                 "Token connection mismatch; it was generated "
+      *out_query =
+          qr_create_tool_err(id, "Token connection mismatch; it was generated "
                                  "from a different connection.");
       goto free_n_return;
     }
@@ -837,14 +849,14 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     const SensitiveTok *bound = stok_store_get(store, parsed.index);
     if (!bound) {
       free(tok);
-      *out_query = qr_create_err(id, QRERR_INPARAM, "Unknown token index.");
+      *out_query = qr_create_tool_err(id, "Unknown token index.");
       goto free_n_return;
     }
 
     if (nparams >= MAX_TOKEN_PARAMS) {
       free(tok);
-      *out_query = qr_create_err(
-          id, QRERR_INPARAM, "Token parameters must contain 1..10 entries.");
+      *out_query = qr_create_tool_err(
+          id, "Token parameters must contain 1..10 entries.");
       goto free_n_return;
     }
     vparams[nparams++] = *bound;
@@ -929,9 +941,9 @@ free_n_return:
  * payload; returns ERR only for catastrophic parse/allocation/internal
  * failures.
  */
-static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
-                                 const char *req, uint32_t req_len,
-                                 QueryResult **out_res) {
+static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
+                                        const char *req, uint32_t req_len,
+                                        QueryResult **out_res) {
   if (!b || !sess || !req || !out_res)
     return ERR;
   TLOG("INFO - handling a request of %u bytes", req_len);
@@ -941,12 +953,12 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
   JsonGetter jg;
   if (jsget_init(&jg, req, req_len) != OK)
     return ERR;
-  int has_u32 = jsget_u32(&jg, "id", &id.u32);
+  AdbxTriStatus has_u32 = jsget_u32(&jg, "id", &id.u32);
   if (has_u32 == YES) {
     id.kind = MCP_ID_INT;
   } else {
     char *id_str = NULL;
-    int s_rc = jsget_string_decode_alloc(&jg, "id", &id_str);
+    AdbxTriStatus s_rc = jsget_string_decode_alloc(&jg, "id", &id_str);
     if (s_rc == YES) {
       id.kind = MCP_ID_STR;
       id.str = id_str;
@@ -956,7 +968,7 @@ static int broker_handle_request(Broker *b, BrokerMcpSession *sess,
     }
   }
 
-  int vrc = jsget_simple_rpc_validation(&jg);
+  AdbxTriStatus vrc = jsget_simple_rpc_validation(&jg);
   if (vrc != YES) {
     *out_res = qr_create_err(&id, QRERR_INREQ, "Invalid JSON-RPC request.");
     goto return_res;
@@ -1017,7 +1029,7 @@ return_res:
  * Side effects: reads peer credential metadata via getsockopt/getpeereid.
  * Returns OK on UID match, ERR on mismatch or syscall failure.
  */
-static int verify_peer_uid(int cfd) {
+static AdbxStatus verify_peer_uid(int cfd) {
   uid_t expected_uid = getuid();
 #ifdef __linux__
   struct ucred cred;
@@ -1041,7 +1053,7 @@ static int verify_peer_uid(int cfd) {
  * Error semantics: returns OK when state is ready, ERR on invalid input,
  * inconsistent partial state, or allocation failure.
  */
-static int broker_session_token_state_init(BrokerMcpSession *sess) {
+static AdbxStatus broker_session_token_state_init(BrokerMcpSession *sess) {
   if (!sess)
     return ERR;
 
@@ -1065,7 +1077,8 @@ static int broker_session_token_state_init(BrokerMcpSession *sess) {
 
 /* Checks whether 'sess' has correctly initialized the token-store containers
  * and is ready to store/retrieve tokens. */
-inline static int broker_session_token_state_ok(BrokerMcpSession *sess) {
+inline static AdbxTriStatus
+broker_session_token_state_ok(BrokerMcpSession *sess) {
   if (!sess)
     return ERR;
   if (!sess->db_stores || arena_is_ok(&sess->arena) != YES)
@@ -1080,7 +1093,7 @@ inline static int broker_session_token_state_ok(BrokerMcpSession *sess) {
  * arrays, may reap idle sessions, and updates per-session timestamps/tokens.
  * Returns OK only when handshake succeeds and session is active; ERR otherwise.
  */
-static int broker_do_handshake(Broker *b, int cfd) {
+static AdbxStatus broker_do_handshake(Broker *b, int cfd) {
   if (!b || cfd < 0) {
     safe_close_fd(&cfd);
     return ERR;
@@ -1128,7 +1141,7 @@ static int broker_do_handshake(Broker *b, int cfd) {
     goto send_n_close;
   }
 
-  int secret_rc =
+  AdbxTriStatus secret_rc =
       bytes_equal_ct(req.secret_token, b->secret_token, SECRET_TOKEN_LEN);
   if (secret_rc != YES) {
     status = HS_ERR_TOKEN_UNKNOWN;
@@ -1158,8 +1171,8 @@ static int broker_do_handshake(Broker *b, int cfd) {
     }
 
     time_t resume_created_at = idle_sess->created_at;
-    int exp = broker_session_is_expired(idle_sess, now, b->idle_ttl_secs,
-                                        b->abs_ttl_secs);
+    AdbxTriStatus exp = broker_session_is_expired(
+        idle_sess, now, b->idle_ttl_secs, b->abs_ttl_secs);
     if (exp == YES) {
       parr_drop_swap(b->idle_sessions, (uint32_t)idle_idx);
       status = HS_ERR_TOKEN_EXPIRED;
@@ -1290,14 +1303,14 @@ send_n_close: {
  * Side effects: writes to the client channel.
  * Returns OK on successful encode/write, ERR on invalid input or write failure.
  */
-static int broker_write_q_res(BrokerMcpSession *sess,
-                              const QueryResult *q_res) {
+static AdbxStatus broker_write_q_res(BrokerMcpSession *sess,
+                                     const QueryResult *q_res) {
   if (!q_res || !sess)
     return ERR;
 
   size_t response_len;
   char *response;
-  int rc;
+  AdbxStatus rc;
   if (qr_to_jsonrpc(q_res, &response, &response_len) != OK) {
     rc = ERR;
     goto clean_n_ret;
@@ -1321,7 +1334,7 @@ clean_n_ret:
  * Returns OK on clean stop (not currently reachable), ERR on fatal loop-level
  * failure.
  */
-int broker_run(Broker *b) {
+AdbxStatus broker_run(Broker *b) {
   if (!b)
     return ERR;
 
@@ -1376,7 +1389,7 @@ int broker_run(Broker *b) {
         sb_init(&req);
         QueryResult *q_res = NULL;
         uint64_t t0 = now_ms_monotonic();
-        int rr = frame_read_len(&sess->bc, &req);
+        AdbxStatus rr = frame_read_len(&sess->bc, &req);
         if (rr != OK || req.len > MAX_REQ_LEN) {
           // framing error -> drop client
           TLOG("ERROR - drop client: frame_read_len rc=%d len=%zu", rr,
@@ -1400,7 +1413,8 @@ int broker_run(Broker *b) {
           goto send_q_res;
         }
 
-        int hr = broker_handle_request(b, sess, req.data, req.len, &q_res);
+        AdbxStatus hr =
+            broker_handle_request(b, sess, req.data, req.len, &q_res);
 
         if (hr != OK) {
           // Something bad happend, drop client

@@ -50,7 +50,8 @@ static uint32_t read_be32(const uint8_t *src) {
  * Side effects: none.
  * Error semantics: returns OK for known statuses, ERR for invalid inputs.
  */
-static int handshake_status_to_wire(handshake_status st, uint16_t *out_code) {
+static AdbxStatus handshake_status_to_wire(handshake_status st,
+                                           uint16_t *out_code) {
   if (!out_code)
     return ERR;
 
@@ -75,8 +76,8 @@ static int handshake_status_to_wire(handshake_status st, uint16_t *out_code) {
  * Side effects: none.
  * Error semantics: returns OK for known codes, ERR for invalid inputs.
  */
-static int handshake_status_from_wire(uint16_t code,
-                                      handshake_status *out_status) {
+static AdbxStatus handshake_status_from_wire(uint16_t code,
+                                             handshake_status *out_status) {
   if (!out_status)
     return ERR;
 
@@ -96,8 +97,8 @@ static int handshake_status_from_wire(uint16_t code,
   }
 }
 
-int handshake_req_encode(const handshake_req_t *req,
-                         uint8_t out[HANDSHAKE_REQ_WIRE_SIZE]) {
+AdbxStatus handshake_req_encode(const handshake_req_t *req,
+                                uint8_t out[HANDSHAKE_REQ_WIRE_SIZE]) {
   if (!req || !out)
     return ERR;
 
@@ -109,8 +110,8 @@ int handshake_req_encode(const handshake_req_t *req,
   return OK;
 }
 
-int handshake_req_decode(handshake_req_t *out, const uint8_t *wire,
-                         size_t wire_len) {
+AdbxStatus handshake_req_decode(handshake_req_t *out, const uint8_t *wire,
+                                size_t wire_len) {
   if (!out || !wire)
     return ERR;
   if (wire_len != HANDSHAKE_REQ_WIRE_SIZE)
@@ -125,8 +126,8 @@ int handshake_req_decode(handshake_req_t *out, const uint8_t *wire,
   return OK;
 }
 
-int handshake_resp_encode(const handshake_resp_t *resp,
-                          uint8_t out[HANDSHAKE_RESP_WIRE_SIZE]) {
+AdbxStatus handshake_resp_encode(const handshake_resp_t *resp,
+                                 uint8_t out[HANDSHAKE_RESP_WIRE_SIZE]) {
   if (!resp || !out)
     return ERR;
 
@@ -143,8 +144,8 @@ int handshake_resp_encode(const handshake_resp_t *resp,
   return OK;
 }
 
-int handshake_resp_decode(handshake_resp_t *out, const uint8_t *wire,
-                          size_t wire_len) {
+AdbxStatus handshake_resp_decode(handshake_resp_t *out, const uint8_t *wire,
+                                 size_t wire_len) {
   if (!out || !wire)
     return ERR;
   if (wire_len != HANDSHAKE_RESP_WIRE_SIZE)

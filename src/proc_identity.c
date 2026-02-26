@@ -25,7 +25,7 @@ typedef struct {
  * Side effects: none.
  * Error semantics: returns OK on successful parse, ERR on malformed input.
  */
-static int procid_parse_stat_line(char *line, StatFields *stats) {
+static AdbxStatus procid_parse_stat_line(char *line, StatFields *stats) {
   if (!line || !stats)
     return ERR;
 
@@ -87,7 +87,7 @@ static int procid_parse_stat_line(char *line, StatFields *stats) {
  * Side effects: reads '/proc/<pid>/stat'.
  * Error semantics: returns OK on success, ERR on I/O or parse failure.
  */
-static int procid_read_stat_fields(pid_t pid, StatFields *stats) {
+static AdbxStatus procid_read_stat_fields(pid_t pid, StatFields *stats) {
   if (pid <= 1 || !stats)
     return ERR;
 
@@ -104,7 +104,7 @@ static int procid_read_stat_fields(pid_t pid, StatFields *stats) {
   if (line[0] == '\0')
     return ERR;
 
-  int rc = procid_parse_stat_line(line, stats);
+  AdbxStatus rc = procid_parse_stat_line(line, stats);
   return rc;
 }
 
@@ -114,7 +114,7 @@ static int procid_read_stat_fields(pid_t pid, StatFields *stats) {
  * Error semantics: returns YES when wrapper-like, NO when not, ERR on invalid
  * input.
  */
-static int procid_is_wrapper_name(const char *name) {
+static AdbxTriStatus procid_is_wrapper_name(const char *name) {
   if (!name || name[0] == '\0')
     return ERR;
 
@@ -129,7 +129,7 @@ static int procid_is_wrapper_name(const char *name) {
   return NO;
 }
 
-int procid_parent_identity(ProcIdentity *out) {
+AdbxStatus procid_parent_identity(ProcIdentity *out) {
   if (!out)
     return ERR;
 

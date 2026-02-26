@@ -55,7 +55,7 @@ static DbBackend *db_backend_create(DbKind kind) {
 
 /* Makes sure 'e' refers to a connected DbBackend. Creates the backend if null.
  * Connect the backend if not already connected. Returns OK/ERR. */
-static int ensure_connected(ConnManager *m, ConnEntry *e) {
+static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
   if (!m || !e || !e->profile)
     return ERR;
 
@@ -80,7 +80,7 @@ static int ensure_connected(ConnManager *m, ConnEntry *e) {
   }
 
   // Connect
-  int rc =
+  AdbxStatus rc =
       db_connect(e->backend, e->profile, &e->profile->safe_policy, pw.data);
   if (rc != OK) {
     TLOG("ERROR - db_connect failed for %s", e->profile->connection_name);
@@ -184,8 +184,8 @@ void connm_destroy(ConnManager *m) {
   free(m);
 }
 
-int connm_get_connection(ConnManager *m, const char *connection_name,
-                         ConnView *out) {
+AdbxTriStatus connm_get_connection(ConnManager *m, const char *connection_name,
+                                   ConnView *out) {
   if (!m || !connection_name || !out)
     return ERR;
   out->db = NULL;

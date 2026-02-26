@@ -40,7 +40,7 @@ StringPool *spool_create(void) {
   return sp;
 }
 
-int spool_init(StringPool *sp) {
+AdbxStatus spool_init(StringPool *sp) {
   if (!sp)
     return ERR;
 

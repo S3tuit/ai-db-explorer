@@ -84,8 +84,8 @@ static void set_parse_unknown_key_err(char **err_out, const char *path_prefix,
  * Ownership: caller owns 's' and any output pointers are into 's'.
  * Side effects: mutates 's' by inserting NUL terminators.
  * Returns OK/ERR. */
-static int split_column_path(char *s, char **out_schema, char **out_table,
-                             char **out_col) {
+static AdbxStatus split_column_path(char *s, char **out_schema,
+                                    char **out_table, char **out_col) {
   if (!s || !out_table || !out_col)
     return ERR;
 
@@ -174,7 +174,8 @@ static int saferuletmp_cmp(const void *a, const void *b) {
   return strcmp(ra->schema, rb->schema);
 }
 
-static int split_func_path(char *input, char **out_schema, char **out_name) {
+static AdbxStatus split_func_path(char *input, char **out_schema,
+                                  char **out_name) {
   if (!input || !out_schema || !out_name)
     return ERR;
   *out_schema = NULL;
@@ -209,13 +210,14 @@ static int split_func_path(char *input, char **out_schema, char **out_name) {
  * Error semantics: returns OK on success, ERR on malformed entries, allocation
  * failures, or invalid input.
  */
-static int parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
-                                   const char *path_prefix, char **err_out) {
+static AdbxStatus parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
+                                          const char *path_prefix,
+                                          char **err_out) {
   if (!jg || !out || !path_prefix)
     return ERR;
 
   JsonArrIter it;
-  int rc = jsget_array_strings_begin(jg, "sensitiveColumns", &it);
+  AdbxTriStatus rc = jsget_array_strings_begin(jg, "sensitiveColumns", &it);
   if (rc == NO)
     return OK;
   if (rc != YES) {
@@ -409,13 +411,14 @@ error:
  * Error semantics: returns OK on success, ERR on malformed entries, allocation
  * failures, or invalid input.
  */
-static int parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
-                                const char *path_prefix, char **err_out) {
+static AdbxStatus parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
+                                       const char *path_prefix,
+                                       char **err_out) {
   if (!jg || !out || !path_prefix)
     return ERR;
 
   JsonArrIter it;
-  int rc = jsget_array_strings_begin(jg, "safeFunctions", &it);
+  AdbxTriStatus rc = jsget_array_strings_begin(jg, "safeFunctions", &it);
   if (rc == NO)
     return OK;
   if (rc != YES) {
@@ -583,8 +586,8 @@ error:
  * or unknown keys. On ERR, it sets a descriptive allocated message in
  * '*err_out' when provided.
  */
-static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
-                        const char *path_prefix, char **err_out) {
+static AdbxStatus parse_policy(const JsonGetter *jg, SafetyPolicy *out,
+                               const char *path_prefix, char **err_out) {
   if (!jg || !out || !path_prefix)
     return ERR;
 
@@ -599,7 +602,7 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
   }
 
   JsonStrSpan ro = {0};
-  int rrc = jsget_string_span(jg, "readOnly", &ro);
+  AdbxTriStatus rrc = jsget_string_span(jg, "readOnly", &ro);
   if (rrc == ERR) {
     set_parse_err(err_out, "%s.readOnly: expected string.", path_prefix);
     return ERR;
@@ -617,7 +620,7 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
   }
 
   uint32_t timeout_ms = 0;
-  int trc = jsget_u32(jg, "statementTimeoutMs", &timeout_ms);
+  AdbxTriStatus trc = jsget_u32(jg, "statementTimeoutMs", &timeout_ms);
   if (trc == ERR) {
     set_parse_err(err_out, "%s.statementTimeoutMs: expected uint32.",
                   path_prefix);
@@ -627,7 +630,7 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
     out->statement_timeout_ms = timeout_ms;
 
   uint32_t max_rows = 0;
-  int mrc = jsget_u32(jg, "maxRowReturned", &max_rows);
+  AdbxTriStatus mrc = jsget_u32(jg, "maxRowReturned", &max_rows);
   if (mrc == ERR) {
     set_parse_err(err_out, "%s.maxRowReturned: expected uint32.", path_prefix);
     return ERR;
@@ -636,7 +639,7 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
     out->max_rows = max_rows;
 
   uint32_t max_payload_kb = 0;
-  int qrc = jsget_u32(jg, "maxPayloadKiloBytes", &max_payload_kb);
+  AdbxTriStatus qrc = jsget_u32(jg, "maxPayloadKiloBytes", &max_payload_kb);
   if (qrc == ERR) {
     set_parse_err(err_out, "%s.maxPayloadKiloBytes: expected uint32.",
                   path_prefix);
@@ -652,7 +655,7 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
   }
 
   JsonGetter col = {0};
-  int crc = jsget_object(jg, "columnPolicy", &col);
+  AdbxTriStatus crc = jsget_object(jg, "columnPolicy", &col);
   if (crc == ERR) {
     set_parse_err(err_out, "%s.columnPolicy: expected object.", path_prefix);
     return ERR;
@@ -669,7 +672,7 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
     }
 
     JsonStrSpan mode = {0};
-    int mrc2 = jsget_string_span(&col, "mode", &mode);
+    AdbxTriStatus mrc2 = jsget_string_span(&col, "mode", &mode);
     if (mrc2 != YES) {
       set_parse_err(err_out, "%s.columnPolicy.mode: expected \"pseudonymize\".",
                     path_prefix);
@@ -684,7 +687,7 @@ static int parse_policy(const JsonGetter *jg, SafetyPolicy *out,
     out->column_mode = SAFETY_COLMODE_PSEUDONYMIZE;
 
     JsonStrSpan strat = {0};
-    int src = jsget_string_span(&col, "strategy", &strat);
+    AdbxTriStatus src = jsget_string_span(&col, "strategy", &strat);
     if (src != YES) {
       set_parse_err(err_out,
                     "%s.columnPolicy.strategy: expected \"deterministic\" or "
@@ -729,8 +732,9 @@ static void profile_clean(ConnProfile *p) {
  * semantics: returns OK on valid entry, ERR on malformed fields or allocation
  * failures.
  */
-static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
-                          ConnProfile *out, size_t db_index, char **err_out) {
+static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
+                                 ConnProfile *out, size_t db_index,
+                                 char **err_out) {
   if (!cat || !jg || !out)
     return ERR;
 
@@ -742,7 +746,8 @@ static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
       "username",      "database",       "options", "sensitiveColumns",
       "safeFunctions", "safetyPolicy"};
   JsonStrSpan unknown = {0};
-  int vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys), &unknown);
+  AdbxTriStatus vrc =
+      jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys), &unknown);
   if (vrc != YES) {
     set_parse_unknown_key_err(err_out, db_path, &unknown, "in database entry");
     return ERR;
@@ -795,7 +800,7 @@ static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
     goto error;
   }
 
-  int orc = jsget_string_decode_alloc(jg, "options", &options);
+  AdbxTriStatus orc = jsget_string_decode_alloc(jg, "options", &options);
   if (orc == ERR) {
     set_parse_err(err_out, "%s.options: expected string when present.",
                   db_path);
@@ -817,7 +822,7 @@ static int parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
 
   out->safe_policy = cat->policy;
   JsonGetter db_pol = {0};
-  int prc = jsget_object(jg, "safetyPolicy", &db_pol);
+  AdbxTriStatus prc = jsget_object(jg, "safetyPolicy", &db_pol);
   if (prc == ERR) {
     set_parse_err(err_out, "%s.safetyPolicy: expected object.", db_path);
     goto error;
@@ -854,13 +859,13 @@ error:
  * Side effects: allocates heap memory for profiles and nested arenas.
  * Error semantics: returns OK on valid non-empty array, ERR otherwise.
  */
-static int parse_databases(const JsonGetter *jg, ConnCatalog *cat,
-                           char **err_out) {
+static AdbxStatus parse_databases(const JsonGetter *jg, ConnCatalog *cat,
+                                  char **err_out) {
   if (!jg || !cat)
     return ERR;
 
   JsonArrIter it;
-  int rc = jsget_array_objects_begin(jg, "databases", &it);
+  AdbxTriStatus rc = jsget_array_objects_begin(jg, "databases", &it);
   if (rc != YES) {
     set_parse_err(err_out, "$.databases: expected array of objects.");
     return ERR;
@@ -929,16 +934,16 @@ error:
  * - NO: version missing or unsupported.
  * - ERR: malformed version value or internal error.
  */
-static int parse_version(const JsonGetter *jg) {
+static AdbxTriStatus parse_version(const JsonGetter *jg) {
   if (!jg)
     return ERR;
 
   char *ver = NULL;
-  int rc = jsget_string_decode_alloc(jg, "version", &ver);
+  AdbxTriStatus rc = jsget_string_decode_alloc(jg, "version", &ver);
   if (rc != YES)
     return NO;
 
-  int ok = (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) ? YES : NO;
+  AdbxTriStatus ok = (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) ? YES : NO;
   free(ver);
   return ok;
 }
@@ -978,7 +983,7 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
     goto error;
   }
 
-  int vrc = parse_version(&jg);
+  AdbxTriStatus vrc = parse_version(&jg);
   if (vrc == NO) {
     set_parse_err(&err_msg, "$.version: missing or unsupported value.");
     goto error;
@@ -1073,8 +1078,9 @@ static int saferule_cmp(const void *a, const void *b) {
   return strcmp(ra->name, rb->name);
 }
 
-int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
-                           const char *table, const char *column) {
+AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp,
+                                     const char *schema, const char *table,
+                                     const char *column) {
   if (!cp || !table || !column)
     return ERR;
 
@@ -1112,8 +1118,8 @@ int connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
   return NO;
 }
 
-int connp_is_func_safe(const ConnProfile *cp, const char *schema,
-                       const char *name) {
+AdbxTriStatus connp_is_func_safe(const ConnProfile *cp, const char *schema,
+                                 const char *name) {
   if (!cp || !name)
     return ERR;
 

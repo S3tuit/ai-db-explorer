@@ -76,7 +76,7 @@ static ssize_t stdio_writev_some(ByteChannel *ch, const ByteChannelVec *vecs,
   return writev(impl->out_fd, iov, vcnt);
 }
 
-static int stdio_flush(ByteChannel *ch) {
+static AdbxStatus stdio_flush(ByteChannel *ch) {
   StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
   if (!impl || impl->is_closed)
@@ -87,7 +87,7 @@ static int stdio_flush(ByteChannel *ch) {
   return OK;
 }
 
-static int stdio_shutdown_write(ByteChannel *ch) {
+static AdbxStatus stdio_shutdown_write(ByteChannel *ch) {
   // stdio can't half-close like a socket; closest thing is to flush.
   StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
@@ -112,7 +112,7 @@ static BytePollable stdio_get_pollable(const ByteChannel *ch) {
 
 /* Closes underlying resource/handle IF owned, but doesn not free the
  * ByteChannel itself. */
-static int stdio_close(ByteChannel *ch) {
+static AdbxStatus stdio_close(ByteChannel *ch) {
   StdioByteChannelImpl *impl = (StdioByteChannelImpl *)ch->impl;
 
   if (!impl)
@@ -120,7 +120,7 @@ static int stdio_close(ByteChannel *ch) {
   if (impl->is_closed)
     return OK;
 
-  int rc = OK;
+  AdbxStatus rc = OK;
 
   // If we don't own, just mark closed.
   if (!impl->owns_fds) {

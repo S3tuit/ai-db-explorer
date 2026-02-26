@@ -7,6 +7,7 @@
 #include "conn_catalog.h"
 #include "db_backend.h"
 #include "secret_store.h"
+#include "utils.h"
 
 typedef struct ConnManager ConnManager;
 
@@ -62,8 +63,8 @@ void connm_destroy(ConnManager *m);
  * - NO:  connection_name not found.
  * - ERR: internal error (e.g. cannot connect).
  */
-int connm_get_connection(ConnManager *m, const char *connection_name,
-                         ConnView *out);
+AdbxTriStatus connm_get_connection(ConnManager *m, const char *connection_name,
+                                   ConnView *out);
 
 /**
  * Marks a connection as "used now" (e.g., call this after exec completes,

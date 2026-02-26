@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "utils.h"
+
 #define MCP_PROTOCOL_VERSION "2025-11-25"
 
 /* Shared token length used by broker handshake secret and private-dir token
@@ -60,29 +62,29 @@ typedef struct {
  * It borrows 'req' and writes exactly HANDSHAKE_REQ_WIRE_SIZE bytes to 'out'.
  * Returns OK on success, ERR on invalid input.
  */
-int handshake_req_encode(const handshake_req_t *req,
-                         uint8_t out[HANDSHAKE_REQ_WIRE_SIZE]);
+AdbxStatus handshake_req_encode(const handshake_req_t *req,
+                                uint8_t out[HANDSHAKE_REQ_WIRE_SIZE]);
 
 /* Decodes request from fixed-size big-endian wire format.
  * It borrows 'wire' and writes decoded values to caller-owned 'out'.
  * Returns OK on success, ERR on invalid input or malformed size.
  */
-int handshake_req_decode(handshake_req_t *out, const uint8_t *wire,
-                         size_t wire_len);
+AdbxStatus handshake_req_decode(handshake_req_t *out, const uint8_t *wire,
+                                size_t wire_len);
 
 /* Encodes response into fixed-size big-endian wire format.
  * It borrows 'resp' and writes exactly HANDSHAKE_RESP_WIRE_SIZE bytes to 'out'.
  * Returns OK on success, ERR on invalid input or unknown status code.
  */
-int handshake_resp_encode(const handshake_resp_t *resp,
-                          uint8_t out[HANDSHAKE_RESP_WIRE_SIZE]);
+AdbxStatus handshake_resp_encode(const handshake_resp_t *resp,
+                                 uint8_t out[HANDSHAKE_RESP_WIRE_SIZE]);
 
 /* Decodes response from fixed-size big-endian wire format.
  * It borrows 'wire' and writes decoded values to caller-owned 'out'.
  * Returns OK on success, ERR on invalid input, malformed size, or unknown
  * status code.
  */
-int handshake_resp_decode(handshake_resp_t *out, const uint8_t *wire,
-                          size_t wire_len);
+AdbxStatus handshake_resp_decode(handshake_resp_t *out, const uint8_t *wire,
+                                 size_t wire_len);
 
 #endif

@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "utils.h"
+
 typedef enum SafetyColumnMode {
   SAFETY_COLMODE_PSEUDONYMIZE = 1,
 } SafetyColumnMode;
@@ -36,8 +38,9 @@ typedef struct SafetyPolicy {
  * Initializes 'p' with safe defaults if some pointer points to NULL. Returns
  * OK on success, ERR on bad input.
  */
-int safety_policy_init(SafetyPolicy *p, int *read_only, uint32_t *max_rows,
-                       uint32_t *max_payload_bytes,
-                       uint32_t *statement_timeout_ms);
+AdbxStatus safety_policy_init(SafetyPolicy *p, int *read_only,
+                              uint32_t *max_rows,
+                              uint32_t *max_payload_bytes,
+                              uint32_t *statement_timeout_ms);
 
 #endif

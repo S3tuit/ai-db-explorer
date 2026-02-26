@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "utils.h"
+
 typedef struct ProcIdentity {
   pid_t pid;
   uint64_t start_time_ticks;
@@ -15,6 +17,6 @@ typedef struct ProcIdentity {
  * Error semantics: returns OK on success, ERR on unsupported platform or parse
  * I/O failure.
  */
-int procid_parent_identity(ProcIdentity *out);
+AdbxStatus procid_parent_identity(ProcIdentity *out);
 
 #endif

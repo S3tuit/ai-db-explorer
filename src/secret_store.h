@@ -12,7 +12,7 @@ typedef struct SecretStoreVTable SecretStoreVTable;
 
 struct SecretStoreVTable {
   // Writes a NUL-terminated secret into 'out' and returns OK/ERR.
-  int (*get)(SecretStore *store, const char *secret_ref, StrBuf *out);
+  AdbxStatus (*get)(SecretStore *store, const char *secret_ref, StrBuf *out);
   // Destroys the store and releases resources.
   void (*destroy)(SecretStore *store);
 };
@@ -39,11 +39,12 @@ void secret_store_destroy(SecretStore *store);
 // Ownership: caller owns 'out' and should zero+clean it after use.
 // Side effects: may access OS secrets later.
 // Error semantics: OK on success, ERR on failure.
-int secret_store_get(SecretStore *store, const char *secret_ref, StrBuf *out);
+AdbxStatus secret_store_get(SecretStore *store, const char *secret_ref,
+                            StrBuf *out);
 
 /* Small helpers */
-static inline int ss_get(SecretStore *store, const char *secret_ref,
-                         StrBuf *out) {
+static inline AdbxStatus ss_get(SecretStore *store, const char *secret_ref,
+                                StrBuf *out) {
   if (!store || !store->vt || !store->vt->get)
     return ERR;
   return store->vt->get(store, secret_ref, out);

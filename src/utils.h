@@ -6,13 +6,14 @@
 
 // Return types that must be used for "mutators"; functions that do a thing,
 // for example, append, connect, exec.
-#define OK 0
-#define ERR -1
+typedef enum { OK = 0, STATUS_ERR = -1 } AdbxStatus;
 
 // Return types that must be used for functions that answer a question, for
 // example is_null, contains.
-#define YES 1
-#define NO 0
+typedef enum { YES = 1, NO = 0, TRI_STATUS_ERR = -1 } AdbxTriStatus;
+
+// ERR is a shorthand to signal an error in both cases - this works if
+// -Wenum-conversion is enabled
 #define ERR -1
 
 #define ARRLEN(x) (sizeof(x) / sizeof((x)[0]))
@@ -30,6 +31,6 @@ uint64_t now_ms_monotonic(void);
 
 /* Fills 'len' bytes of 'buf' with cryptographically secure random bytes.
  * Returns OK/ERR. */
-int fill_random(uint8_t *buf, size_t len);
+AdbxStatus fill_random(uint8_t *buf, size_t len);
 
 #endif

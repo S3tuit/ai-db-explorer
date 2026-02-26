@@ -6,6 +6,7 @@
 
 #include "arena.h"
 #include "mcp_id.h"
+#include "utils.h"
 
 typedef struct ValidatorPlan ValidatorPlan;
 typedef struct DbTokenStore DbTokenStore;
@@ -96,16 +97,16 @@ typedef struct QueryResultBuildPolicy {
  * If 'policy' is NULL, builder stores plaintext values only.
  * Returns OK on success, ERR on invalid input.
  */
-int qb_init(QueryResultBuilder *qb, QueryResult *qr,
-            const QueryResultBuildPolicy *policy);
+AdbxStatus qb_init(QueryResultBuilder *qb, QueryResult *qr,
+                   const QueryResultBuildPolicy *policy);
 
 /* Copies one column metadata entry into qb->qr at position 'col'.
  * If type is NULL it's stored as "unknown".
  * Side effects: mutates qb->qr columns and sets sensitive metadata from plan.
  * Returns OK on success, ERR on bad input or out-of-bounds.
  */
-int qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
-               const char *type, uint32_t pg_oid);
+AdbxStatus qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
+                      const char *type, uint32_t pg_oid);
 
 /* Stores one cell value in qb->qr at [row,col].
  * If the output column is sensitive, this function stores a token string
@@ -117,15 +118,15 @@ int qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
  *  NO  -> max_query_bytes reached; caller must stop populating rows
  *  ERR -> bad input or out-of-bounds
  */
-int qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
-                const char *value, size_t v_len);
+AdbxTriStatus qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
+                          const char *value, size_t v_len);
 
 /* Replaces the id stored in 'qr' with a deep copy of 'id'.
  * It borrows both pointers; any previous id storage in 'qr' is released.
  * Side effects: may allocate and free memory when ids are string-backed.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int qr_set_id(QueryResult *qr, const McpId *id);
+AdbxStatus qr_set_id(QueryResult *qr, const McpId *id);
 
 /* Creates a QueryResult with allocated storage for cells (all NULL).
  * If 'id' is non-NULL, makes an internal copy (string ids are duplicated).
@@ -161,6 +162,6 @@ const QRColumn *qr_get_col(const QueryResult *qr, uint32_t col);
 const char *qr_get_cell(const QueryResult *qr, uint32_t row, uint32_t col);
 
 /* Returns YES if cell is SQL NULL, NO if non-NULL, ERR on error. */
-int qr_is_null(const QueryResult *qr, uint32_t row, uint32_t col);
+AdbxTriStatus qr_is_null(const QueryResult *qr, uint32_t row, uint32_t col);
 
 #endif

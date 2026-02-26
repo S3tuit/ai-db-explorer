@@ -33,12 +33,12 @@ typedef struct DbBackendVTable {
   // Establishes a connection described by 'profile' using 'pwd' when needed.
   // The SafetyPolicy is borrowed and copied inside the backend.
   // Returns ok/err.
-  int (*connect)(DbBackend *db, const ConnProfile *profile,
-                 const SafetyPolicy *policy, const char *pwd);
+  AdbxStatus (*connect)(DbBackend *db, const ConnProfile *profile,
+                        const SafetyPolicy *policy, const char *pwd);
 
   // Returns YES if connected, NO if not, ERR on bad input. This should be a
   // cheap check that doesn't perform networking.
-  int (*is_connected)(DbBackend *db);
+  AdbxTriStatus (*is_connected)(DbBackend *db);
 
   // Closes the active connection, if any. Safe to call multiple times.
   void (*disconnect)(DbBackend *db);
@@ -52,20 +52,23 @@ typedef struct DbBackendVTable {
   // 'qb_policy' is optional; when non-NULL it drives sensitive-token
   // tokenization during materialization.
   // Returns OK if it was able to allocate a QueryResult, ERR otherwise.
-  int (*exec)(DbBackend *db, const char *sql,
-              const QueryResultBuildPolicy *qb_policy, QueryResult **out_qr);
+  AdbxStatus (*exec)(DbBackend *db, const char *sql,
+                     const QueryResultBuildPolicy *qb_policy,
+                     QueryResult **out_qr);
 
   // Executes one SQL statement with positional bind parameters.
   // 'params[i]' maps to SQL placeholder $(i+1).
   // Returns OK if it was able to allocate a QueryResult, ERR otherwise.
-  int (*exec_bound)(DbBackend *db, const char *sql, const DbExecParam *params,
-                    uint32_t nparams, const QueryResultBuildPolicy *qb_policy,
-                    QueryResult **out_qr);
+  AdbxStatus (*exec_bound)(DbBackend *db, const char *sql,
+                           const DbExecParam *params, uint32_t nparams,
+                           const QueryResultBuildPolicy *qb_policy,
+                           QueryResult **out_qr);
 
   // Creates a QirQueryHandle starting from 'sql'. The backend owns and
   // populates the handle, and the caller must destroy it via
   // qir_handle_destroy().
-  int (*make_query_ir)(DbBackend *db, const char *sql, QirQueryHandle *out);
+  AdbxStatus (*make_query_ir)(DbBackend *db, const char *sql,
+                              QirQueryHandle *out);
 
   // Returns a list of functions that are safe to execute (v1 uses name only).
   const DbSafeFuncList *(*safe_functions)(DbBackend *db);
@@ -81,13 +84,14 @@ struct DbBackend {
 };
 
 /* Small helpers */
-static inline int db_connect(DbBackend *db, const ConnProfile *profile,
-                             const SafetyPolicy *policy, const char *pwd) {
+static inline AdbxStatus db_connect(DbBackend *db, const ConnProfile *profile,
+                                    const SafetyPolicy *policy,
+                                    const char *pwd) {
   if (!db || !db->vt || !db->vt->connect)
     return ERR;
   return db->vt->connect(db, profile, policy, pwd);
 }
-static inline int db_is_connected(DbBackend *db) {
+static inline AdbxTriStatus db_is_connected(DbBackend *db) {
   if (!db || !db->vt || !db->vt->is_connected)
     return ERR;
   return db->vt->is_connected(db);
@@ -102,25 +106,25 @@ static inline void db_destroy(DbBackend *db) {
     return;
   db->vt->destroy(db);
 }
-static inline int db_exec(DbBackend *db, const char *sql,
-                          const QueryResultBuildPolicy *qb_policy,
-                          QueryResult **out_qr) {
+static inline AdbxStatus db_exec(DbBackend *db, const char *sql,
+                                 const QueryResultBuildPolicy *qb_policy,
+                                 QueryResult **out_qr) {
   if (!db || !db->vt || !db->vt->exec)
     return ERR;
   return db->vt->exec(db, sql, qb_policy, out_qr);
 }
 
-static inline int db_exec_bound(DbBackend *db, const char *sql,
-                                const DbExecParam *params, uint32_t nparams,
-                                const QueryResultBuildPolicy *qb_policy,
-                                QueryResult **out_qr) {
+static inline AdbxStatus
+db_exec_bound(DbBackend *db, const char *sql, const DbExecParam *params,
+              uint32_t nparams, const QueryResultBuildPolicy *qb_policy,
+              QueryResult **out_qr) {
   if (!db || !db->vt || !db->vt->exec_bound)
     return ERR;
   return db->vt->exec_bound(db, sql, params, nparams, qb_policy, out_qr);
 }
 
-static inline int db_make_query_ir(DbBackend *db, const char *sql,
-                                   QirQueryHandle *out) {
+static inline AdbxStatus db_make_query_ir(DbBackend *db, const char *sql,
+                                          QirQueryHandle *out) {
   if (!db || !db->vt || !db->vt->make_query_ir)
     return ERR;
   return db->vt->make_query_ir(db, sql, out);

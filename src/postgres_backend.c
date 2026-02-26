@@ -90,7 +90,7 @@ static char *pg_parse_alias_name(const JsonGetter *alias_obj, Arena *a) {
  * Ownership: returns a malloc'd string; caller must free or transfer.
  * Side effects: allocates memory.
  * Returns YES/NO/ERR. */
-static int pg_get_string_field(const JsonGetter *jg, const char *k1,
+static AdbxTriStatus pg_get_string_field(const JsonGetter *jg, const char *k1,
                                const char *k2, char **out) {
   int rc = jsget_string_decode_alloc(jg, k1, out);
   if (rc == YES || rc == ERR)
@@ -345,7 +345,7 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, Arena *a, QirQuery *q);
  * Ownership: all arrays are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED for unsupported shapes.
  * Returns OK/ERR on allocation failure. */
-static int pg_parse_window_def(const JsonGetter *wg, Arena *a, QirQuery *q,
+static AdbxStatus pg_parse_window_def(const JsonGetter *wg, Arena *a, QirQuery *q,
                                QirWindowFunc *wf) {
   if (!wg || !a || !q || !wf)
     return ERR;
@@ -1064,7 +1064,7 @@ fail:
  * Ownership: type names are arena-owned.
  * Side effects: allocates arena memory.
  * Returns OK on success, ERR on parse/allocation failure. */
-static int pg_parse_typename(const JsonGetter *jg, Arena *a, QirTypeRef *out) {
+static AdbxStatus pg_parse_typename(const JsonGetter *jg, Arena *a, QirTypeRef *out) {
   if (!jg || !a || !out)
     return ERR;
 
@@ -1166,7 +1166,7 @@ static int pg_parse_typename(const JsonGetter *jg, Arena *a, QirTypeRef *out) {
  * Ownership: all nodes/arrays are arena-owned.
  * Side effects: may set query flags.
  * Returns OK/ERR on allocation failure. */
-static int pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q);
+static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q);
 
 /* Parses an expression node into a QirExpr.
  * Ownership: returned expression is arena-owned.
@@ -1367,7 +1367,7 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, Arena *a) {
  * Ownership: returned array is arena-owned.
  * Side effects: allocates arena memory.
  * Returns OK/ERR. */
-static int pg_parse_alias_colnames(const JsonGetter *alias_obj, Arena *a,
+static AdbxStatus pg_parse_alias_colnames(const JsonGetter *alias_obj, Arena *a,
                                    QirIdent **out_cols, uint32_t *out_ncols) {
   if (!alias_obj || !a || !out_cols || !out_ncols)
     return ERR;
@@ -1468,14 +1468,14 @@ static void pg_resolve_cte_refs_in_query(const QirQuery *q) {
  * Ownership: from/joins vectors own their temporary buffers.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static int pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
+static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
                               PtrVec *froms, PtrVec *joins);
 
 /* Parses a join expression into from-items and joins (left-deep).
  * Ownership: join nodes are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static int pg_parse_join_expr(const JsonGetter *jg, Arena *a, QirQuery *q,
+static AdbxStatus pg_parse_join_expr(const JsonGetter *jg, Arena *a, QirQuery *q,
                               PtrVec *froms, PtrVec *joins) {
   // left
   JsonGetter ljg = {0};
@@ -1610,7 +1610,7 @@ static int pg_parse_join_expr(const JsonGetter *jg, Arena *a, QirQuery *q,
  * Ownership: from/join nodes are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static int pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
+static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
                               PtrVec *froms, PtrVec *joins) {
   if (!jg || !a || !q)
     return ERR;
@@ -1686,7 +1686,7 @@ static int pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
  * Ownership: all nodes/arrays are arena-owned.
  * Side effects: sets query flags and fills lists.
  * Returns OK/ERR on allocation failure. */
-static int pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q) {
+static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q) {
   if (!jg || !a || !q)
     return ERR;
 
@@ -1938,7 +1938,7 @@ static int pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q) {
  * Side effects: allocates arena memory.
  * Returns OK on success (including parse/unsupported), ERR on allocation
  * failure. */
-static int pg_make_query_ir(DbBackend *db, const char *sql,
+static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
                             QirQueryHandle *out) {
   (void)db;
   if (!sql || !out)
@@ -2037,7 +2037,7 @@ static void pg_set_err_pg(PgImpl *p, PGconn *conn, const char *prefix) {
 /* Executes one or more SQL commands (separated by ';') and requires COMMAND_OK.
  * Use this to send sql statements that don't return tuples. Returns ERR on bad
  * input or if the query produced an error. Stores error inside 'p'. */
-static int pg_exec_command(PgImpl *p, const char *sql) {
+static AdbxStatus pg_exec_command(PgImpl *p, const char *sql) {
   if (!p || !sql)
     return ERR;
 
@@ -2081,7 +2081,7 @@ static void pg_rollback(PgImpl *p) { pg_exec_command(p, "ROLLBACK"); }
 /* Executes commands so the current session of 'p' complies with 'p->policy'.
  * Must be called before running any query and the caller must checks this
  * returned one before sending any query. Stores error inside 'p'. */
-static int pg_apply_policy(PgImpl *p) {
+static AdbxStatus pg_apply_policy(PgImpl *p) {
   if (!p || !p->conn)
     return ERR;
   // bad things can happen if we let the max bytes to be low like 1/2...
@@ -2115,7 +2115,7 @@ static int pg_apply_policy(PgImpl *p) {
 /* Executes 'sql' and returns the result inside 'out_res'. It verify the result
  * is just one. If there are more results it doesn't store anything and returns
  * ERR (single statement policy). */
-static int pg_exec_single_result(PgImpl *p, const char *sql,
+static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
                                  PGresult **out_res) {
   if (!p || !p->conn || !sql || !out_res)
     return ERR;
@@ -2175,7 +2175,7 @@ static int pg_exec_single_result(PgImpl *p, const char *sql,
  * Error semantics: returns OK when exactly one result is produced, ERR on bad
  * input/libpq failure/multiple results.
  */
-static int pg_exec_single_result_bound(PgImpl *p, const char *sql,
+static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
                                        const DbExecParam *params,
                                        uint32_t nparams, PGresult **out_res) {
   assert(p);
@@ -2263,7 +2263,7 @@ static int pg_exec_single_result_bound(PgImpl *p, const char *sql,
  * - Executes one SQL statement on the active connection.
  * - Stores human-readable error into PgImpl on failure.
  */
-static int pg_check_safe_read_only_role(PgImpl *p) {
+static AdbxStatus pg_check_safe_read_only_role(PgImpl *p) {
   if (!p || !p->conn)
     return ERR;
 
@@ -2315,7 +2315,7 @@ done:
 
 /* --------------------------- DbBackend vtable --------------------------- */
 
-static int pg_connect(DbBackend *db, const ConnProfile *profile,
+static AdbxStatus pg_connect(DbBackend *db, const ConnProfile *profile,
                       const SafetyPolicy *policy, const char *pwd) {
   if (!db || !db->impl || !profile || !policy)
     return ERR;
@@ -2369,7 +2369,7 @@ static int pg_connect(DbBackend *db, const ConnProfile *profile,
   return OK;
 }
 
-static int pg_is_connected(DbBackend *db) {
+static AdbxTriStatus pg_is_connected(DbBackend *db) {
   if (!db || !db->impl)
     return ERR;
   PgImpl *p = (PgImpl *)db->impl;
@@ -2406,7 +2406,7 @@ static void pg_destroy(DbBackend *db) {
  * Error semantics: returns OK if a QueryResult object is produced, ERR only on
  * catastrophic allocation/input failures.
  */
-static int pg_exec_impl(DbBackend *db, const char *sql,
+static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
                         const DbExecParam *params, uint32_t nparams,
                         const QueryResultBuildPolicy *qb_policy,
                         QueryResult **out_qr) {
@@ -2601,13 +2601,13 @@ fail_bad_input:
   return (*out_qr ? OK : ERR);
 }
 
-static int pg_exec(DbBackend *db, const char *sql,
+static AdbxStatus pg_exec(DbBackend *db, const char *sql,
                    const QueryResultBuildPolicy *qb_policy,
                    QueryResult **out_qr) {
   return pg_exec_impl(db, sql, NULL, 0, qb_policy, out_qr);
 }
 
-static int pg_exec_bound(DbBackend *db, const char *sql,
+static AdbxStatus pg_exec_bound(DbBackend *db, const char *sql,
                          const DbExecParam *params, uint32_t nparams,
                          const QueryResultBuildPolicy *qb_policy,
                          QueryResult **out_qr) {

@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "utils.h"
+
 typedef struct HashTable HashTable;
 
 /* Callback used by custom-key hash tables.
@@ -21,7 +23,7 @@ typedef uint64_t (*HtHashFn)(const void *key, void *ctx);
  * - Must define an equivalence relation consistent with HtHashFn.
  * - Must not mutate keys or rely on transient external state.
  */
-typedef int (*HtEqFn)(const void *a, const void *b, void *ctx);
+typedef AdbxTriStatus (*HtEqFn)(const void *a, const void *b, void *ctx);
 
 /* Hashes arbitrary bytes using the table's default non-cryptographic hash.
  * It's up to the caller to validate input; data may be NULL only if len == 0.
@@ -73,29 +75,31 @@ HashTable *ht_create_custom_with_capacity(size_t min_slots, HtHashFn hash_fn,
  * Side effects: allocates internal slot storage.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int ht_init(HashTable *ht);
+AdbxStatus ht_init(HashTable *ht);
 
 /* Initializes a hash table with capacity at least min_slots.
  * Intended usage: re-initialize a heap-created table after ht_clean().
  * Side effects: allocates internal slot storage.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int ht_init_with_capacity(HashTable *ht, size_t min_slots);
+AdbxStatus ht_init_with_capacity(HashTable *ht, size_t min_slots);
 
 /* Initializes a custom-key hash table with default capacity.
  * Intended usage: re-initialize a heap-created table after ht_clean().
  * Side effects: allocates internal slot storage.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int ht_init_custom(HashTable *ht, HtHashFn hash_fn, HtEqFn eq_fn, void *ctx);
+AdbxStatus ht_init_custom(HashTable *ht, HtHashFn hash_fn, HtEqFn eq_fn,
+                          void *ctx);
 
 /* Initializes a custom-key hash table with capacity at least min_slots.
  * Intended usage: re-initialize a heap-created table after ht_clean().
  * Side effects: allocates internal slot storage.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int ht_init_custom_with_capacity(HashTable *ht, size_t min_slots,
-                                 HtHashFn hash_fn, HtEqFn eq_fn, void *ctx);
+AdbxStatus ht_init_custom_with_capacity(HashTable *ht, size_t min_slots,
+                                        HtHashFn hash_fn, HtEqFn eq_fn,
+                                        void *ctx);
 
 /* Releases internal allocations of a hash table but keeps the struct.
  * Ownership: caller retains the table struct and may call ht_init*() again.
@@ -120,7 +124,8 @@ size_t ht_len(const HashTable *ht);
  * Side effects: may grow/rehash the table.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int ht_put(HashTable *ht, const char *key, uint32_t key_len, const void *value);
+AdbxStatus ht_put(HashTable *ht, const char *key, uint32_t key_len,
+                  const void *value);
 
 /* Inserts or updates one key/value pair in a custom-key hash table.
  * Keys are borrowed (not copied) and must remain valid/immutable while they
@@ -128,7 +133,7 @@ int ht_put(HashTable *ht, const char *key, uint32_t key_len, const void *value);
  * Side effects: may grow/rehash the table.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int ht_put_custom(HashTable *ht, const void *key, const void *value);
+AdbxStatus ht_put_custom(HashTable *ht, const void *key, const void *value);
 
 /* Looks up a key and returns its mapped value pointer, or NULL if missing.
  * Keys are borrowed and compared by bytes.

@@ -52,7 +52,7 @@ static inline const void *slot_cptr(const PackedArray *a, uint32_t idx) {
  * Error semantics: returns OK on success, ERR on invalid input, arithmetic
  * overflow, or when min_cap exceeds configured max_bytes bound.
  */
-static int ensure_cap(PackedArray *a, size_t min_cap) {
+static AdbxStatus ensure_cap(PackedArray *a, size_t min_cap) {
   if (!a)
     return ERR;
   if (a->cap >= min_cap)
@@ -79,7 +79,7 @@ static int ensure_cap(PackedArray *a, size_t min_cap) {
   return OK;
 }
 
-static inline int parr_is_usable(const PackedArray *a) {
+static inline AdbxTriStatus parr_is_usable(const PackedArray *a) {
   if (!a)
     return NO;
   if (!a->buf && a->cap > 0)
@@ -96,13 +96,15 @@ static inline int parr_is_usable(const PackedArray *a) {
  * Side effects: none.
  * Error semantics: returns YES for in-range index, NO otherwise.
  */
-static inline int parr_idx_in_range(const PackedArray *a, uint32_t idx) {
+static inline AdbxTriStatus parr_idx_in_range(const PackedArray *a,
+                                              uint32_t idx) {
   if (!a)
     return NO;
   return (idx < a->len) ? YES : NO;
 }
 
-static int parr_init(PackedArray *a, size_t obj_sz, size_t upper_bound) {
+static AdbxStatus parr_init(PackedArray *a, size_t obj_sz,
+                            size_t upper_bound) {
   if (!a || obj_sz == 0 || upper_bound == 0)
     return ERR;
 

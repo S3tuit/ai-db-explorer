@@ -4,8 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "conn_catalog.h"
 #include "arena.h"
+#include "conn_catalog.h"
+#include "utils.h"
 typedef struct DbTokenStore DbTokenStore;
 
 /* Token prefix for sensitive-value handles. */
@@ -57,13 +58,14 @@ void stok_store_destroy(DbTokenStore *store);
  * Side effects: none.
  * Returns YES when both stores target the same connection, NO otherwise.
  */
-int stok_store_same_connection(const DbTokenStore *a, const DbTokenStore *b);
+AdbxTriStatus stok_store_same_connection(const DbTokenStore *a,
+                                         const DbTokenStore *b);
 
 /* Returns YES when store is bound to 'connection_name', NO when different.
  * Returns ERR on invalid input.
  */
-int stok_store_matches_conn_name(const DbTokenStore *store,
-                                 const char *connection_name);
+AdbxTriStatus stok_store_matches_conn_name(const DbTokenStore *store,
+                                           const char *connection_name);
 
 /* Returns number of tokens currently stored in one store.
  * Returns 0 on NULL input.
@@ -108,6 +110,6 @@ int stok_store_create_token(DbTokenStore *store, uint32_t generation,
  * Returns OK on success, ERR on invalid format/range/input (does not change
  * input token).
  */
-int stok_parse_view_inplace(char *token, ParsedTokView *out);
+AdbxStatus stok_parse_view_inplace(char *token, ParsedTokView *out);
 
 #endif

@@ -25,7 +25,8 @@
  *
  * Return OK on success, ERR on error/bad input.
  */
-static int sb_append_json_escaped(StrBuf *sb, const char *s, size_t len) {
+static AdbxStatus sb_append_json_escaped(StrBuf *sb, const char *s,
+                                         size_t len) {
   if (!sb || !s)
     return ERR;
 
@@ -94,7 +95,7 @@ static int sb_append_json_escaped(StrBuf *sb, const char *s, size_t len) {
  *  - %d appends int
  *  - %l appends long
  */
-static int json_append(StrBuf *sb, const char *fmt, ...) {
+static AdbxStatus json_append(StrBuf *sb, const char *fmt, ...) {
   if (!sb || !fmt)
     return ERR;
 
@@ -216,7 +217,7 @@ static inline void safe_mul_u32(uint32_t a, uint32_t b, uint64_t *out) {
 
 /* Adds a comma between elements when needed. This is a minimal state tracker
  * based on the last emitted non-whitespace byte. */
-static int json_maybe_comma(StrBuf *sb) {
+static AdbxStatus json_maybe_comma(StrBuf *sb) {
   if (!sb)
     return ERR;
   for (size_t i = sb->len; i > 0; i--) {
@@ -230,7 +231,7 @@ static int json_maybe_comma(StrBuf *sb) {
   return OK;
 }
 
-int json_obj_begin(StrBuf *sb) {
+AdbxStatus json_obj_begin(StrBuf *sb) {
   if (!sb)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -238,13 +239,13 @@ int json_obj_begin(StrBuf *sb) {
   return sb_append_bytes(sb, "{", 1);
 }
 
-int json_obj_end(StrBuf *sb) {
+AdbxStatus json_obj_end(StrBuf *sb) {
   if (!sb)
     return ERR;
   return sb_append_bytes(sb, "}", 1);
 }
 
-int json_arr_begin(StrBuf *sb) {
+AdbxStatus json_arr_begin(StrBuf *sb) {
   if (!sb)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -252,13 +253,13 @@ int json_arr_begin(StrBuf *sb) {
   return sb_append_bytes(sb, "[", 1);
 }
 
-int json_arr_end(StrBuf *sb) {
+AdbxStatus json_arr_end(StrBuf *sb) {
   if (!sb)
     return ERR;
   return sb_append_bytes(sb, "]", 1);
 }
 
-int json_kv_obj_begin(StrBuf *sb, const char *key) {
+AdbxStatus json_kv_obj_begin(StrBuf *sb, const char *key) {
   if (!sb || !key)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -268,7 +269,7 @@ int json_kv_obj_begin(StrBuf *sb, const char *key) {
   return sb_append_bytes(sb, "{", 1);
 }
 
-int json_kv_arr_begin(StrBuf *sb, const char *key) {
+AdbxStatus json_kv_arr_begin(StrBuf *sb, const char *key) {
   if (!sb || !key)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -278,7 +279,7 @@ int json_kv_arr_begin(StrBuf *sb, const char *key) {
   return sb_append_bytes(sb, "[", 1);
 }
 
-int json_kv_str(StrBuf *sb, const char *key, const char *val) {
+AdbxStatus json_kv_str(StrBuf *sb, const char *key, const char *val) {
   if (!sb || !key || !val)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -286,7 +287,7 @@ int json_kv_str(StrBuf *sb, const char *key, const char *val) {
   return json_append(sb, "\"%s\":\"%s\"", key, val);
 }
 
-int json_kv_u64(StrBuf *sb, const char *key, uint64_t val) {
+AdbxStatus json_kv_u64(StrBuf *sb, const char *key, uint64_t val) {
   if (!sb || !key)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -294,7 +295,7 @@ int json_kv_u64(StrBuf *sb, const char *key, uint64_t val) {
   return json_append(sb, "\"%s\":%U", key, val);
 }
 
-int json_kv_l(StrBuf *sb, const char *key, long val) {
+AdbxStatus json_kv_l(StrBuf *sb, const char *key, long val) {
   if (!sb || !key)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -302,7 +303,7 @@ int json_kv_l(StrBuf *sb, const char *key, long val) {
   return json_append(sb, "\"%s\":%l", key, val);
 }
 
-int json_kv_bool(StrBuf *sb, const char *key, int val) {
+AdbxStatus json_kv_bool(StrBuf *sb, const char *key, int val) {
   if (!sb || !key)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -310,7 +311,7 @@ int json_kv_bool(StrBuf *sb, const char *key, int val) {
   return json_append(sb, "\"%s\":%b", key, val);
 }
 
-int json_kv_null(StrBuf *sb, const char *key) {
+AdbxStatus json_kv_null(StrBuf *sb, const char *key) {
   if (!sb || !key)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -318,7 +319,7 @@ int json_kv_null(StrBuf *sb, const char *key) {
   return json_append(sb, "\"%s\":null", key);
 }
 
-int json_arr_elem_str(StrBuf *sb, const char *val) {
+AdbxStatus json_arr_elem_str(StrBuf *sb, const char *val) {
   if (!sb || !val)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -326,7 +327,7 @@ int json_arr_elem_str(StrBuf *sb, const char *val) {
   return json_append(sb, "\"%s\"", val);
 }
 
-int json_arr_elem_u64(StrBuf *sb, uint64_t val) {
+AdbxStatus json_arr_elem_u64(StrBuf *sb, uint64_t val) {
   if (!sb)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -334,7 +335,7 @@ int json_arr_elem_u64(StrBuf *sb, uint64_t val) {
   return json_append(sb, "%U", val);
 }
 
-int json_arr_elem_l(StrBuf *sb, long val) {
+AdbxStatus json_arr_elem_l(StrBuf *sb, long val) {
   if (!sb)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -342,7 +343,7 @@ int json_arr_elem_l(StrBuf *sb, long val) {
   return json_append(sb, "%l", val);
 }
 
-int json_arr_elem_bool(StrBuf *sb, int val) {
+AdbxStatus json_arr_elem_bool(StrBuf *sb, int val) {
   if (!sb)
     return ERR;
   if (json_maybe_comma(sb) != OK)
@@ -350,7 +351,7 @@ int json_arr_elem_bool(StrBuf *sb, int val) {
   return json_append(sb, "%b", val);
 }
 
-int json_rpc_begin(StrBuf *sb) {
+AdbxStatus json_rpc_begin(StrBuf *sb) {
   if (json_obj_begin(sb) != OK)
     return ERR;
   return json_kv_str(sb, "jsonrpc", "2.0");
@@ -364,7 +365,7 @@ int json_rpc_begin(StrBuf *sb) {
  * Error semantics: returns OK on success, ERR on invalid input or append
  * failures.
  */
-static int json_qr_ok_structured(StrBuf *sb, const QueryResult *qr) {
+static AdbxStatus json_qr_ok_structured(StrBuf *sb, const QueryResult *qr) {
   // nrows*ncols should fit in addressable range of cells
   uint64_t cell_count_u64 = 0;
   safe_mul_u32(qr->nrows, qr->ncols, &cell_count_u64);
@@ -461,7 +462,7 @@ static int json_qr_ok_structured(StrBuf *sb, const QueryResult *qr) {
  * Error semantics: returns OK on success, ERR on invalid input or append
  * failures.
  */
-static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
+static AdbxStatus json_qr_ok(StrBuf *sb, const QueryResult *qr) {
   if (!sb || !qr)
     return ERR;
 
@@ -494,7 +495,7 @@ static int json_qr_ok(StrBuf *sb, const QueryResult *qr) {
 }
 
 /* Protocol error: {"code":<int>,"message":"..."} */
-static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
+static AdbxStatus json_qr_err(StrBuf *sb, const QueryResult *qr) {
   const char *msg = qr->err_msg ? qr->err_msg : "";
   if (json_obj_begin(sb) != OK)
     return ERR;
@@ -508,7 +509,7 @@ static int json_qr_err(StrBuf *sb, const QueryResult *qr) {
 }
 
 /* Tool error: {"content":[{"type":"text","text":"..."}],"isError":true} */
-static int json_qr_tool_err(StrBuf *sb, const QueryResult *qr) {
+static AdbxStatus json_qr_tool_err(StrBuf *sb, const QueryResult *qr) {
   const char *msg = qr->err_msg ? qr->err_msg : "";
   if (json_obj_begin(sb) != OK)
     return ERR;
@@ -531,7 +532,8 @@ static int json_qr_tool_err(StrBuf *sb, const QueryResult *qr) {
   return OK;
 }
 
-int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len) {
+AdbxStatus qr_to_jsonrpc(const QueryResult *qr, char **out_json,
+                         size_t *out_len) {
   if (!out_json || !out_len)
     return ERR;
   *out_json = NULL;
@@ -616,7 +618,8 @@ err:
  *
  * Return OK on success, ERR on error/bad input.
  */
-static int json_string_unescape_alloc(const char *s, size_t len, char **out) {
+static AdbxStatus json_string_unescape_alloc(const char *s, size_t len,
+                                             char **out) {
   if (!s || !out)
     return ERR;
 
@@ -798,7 +801,7 @@ static int json_string_unescape_alloc(const char *s, size_t len, char **out) {
   return OK;
 }
 
-int json_decode_string_alloc(const char *s, size_t len, char **out) {
+AdbxStatus json_decode_string_alloc(const char *s, size_t len, char **out) {
   return json_string_unescape_alloc(s, len, out);
 }
 
@@ -806,7 +809,7 @@ int json_decode_string_alloc(const char *s, size_t len, char **out) {
  * Returns 1 if token 't' is a JSON primitive representing null, 0 otherwise.
  * Only valid for JSMN_PRIMITIVE tokens.
  */
-static int tok_is_null(const char *json, const jsmntok_t *t) {
+static AdbxTriStatus tok_is_null(const char *json, const jsmntok_t *t) {
   if (!json || !t)
     return 0;
   size_t n = (size_t)(t->end - t->start);
@@ -818,8 +821,8 @@ static int tok_is_null(const char *json, const jsmntok_t *t) {
  * Compares JSON token string content (WITHOUT quotes) with a string segment.
  * Return 1 if equal, 0 otherwise.
  */
-static int tok_streq_n(const char *json, const jsmntok_t *t, const char *key,
-                       size_t key_len) {
+static AdbxTriStatus tok_streq_n(const char *json, const jsmntok_t *t,
+                                 const char *key, size_t key_len) {
   if (!json || !t || !key)
     return 0;
   if (t->type != JSMN_STRING)
@@ -967,8 +970,8 @@ static int find_value_tok_path(const JsonGetter *jg, const char *path) {
  * Parses an unsigned 32-bit integer from a JSMN_PRIMITIVE token.
  * Return OK on success, ERR on error/bad input.
  */
-static int tok_parse_u32(const char *json, const jsmntok_t *t,
-                         uint32_t *out_u32) {
+static AdbxStatus tok_parse_u32(const char *json, const jsmntok_t *t,
+                                uint32_t *out_u32) {
   if (!json || !t || !out_u32)
     return ERR;
   if (t->type != JSMN_PRIMITIVE)
@@ -1002,7 +1005,8 @@ static int tok_parse_u32(const char *json, const jsmntok_t *t,
  * Parses a boolean from a JSMN_PRIMITIVE token ("true" or "false").
  * Return OK on success, ERR on error/bad input.
  */
-static int tok_parse_bool01(const char *json, const jsmntok_t *t, int *out01) {
+static AdbxStatus tok_parse_bool01(const char *json, const jsmntok_t *t,
+                                   int *out01) {
   if (!json || !t || !out01)
     return ERR;
   if (t->type != JSMN_PRIMITIVE)
@@ -1027,8 +1031,8 @@ static int tok_parse_bool01(const char *json, const jsmntok_t *t, int *out01) {
  * Parses a double from a JSMN_PRIMITIVE token.
  * Return OK on success, ERR on error/bad input.
  */
-static int tok_parse_double(const char *json, const jsmntok_t *t,
-                            double *out_double) {
+static AdbxStatus tok_parse_double(const char *json, const jsmntok_t *t,
+                                   double *out_double) {
   if (!json || !t || !out_double)
     return ERR;
   if (t->type != JSMN_PRIMITIVE)
@@ -1063,8 +1067,8 @@ static int tok_parse_double(const char *json, const jsmntok_t *t,
  * Parses a signed 64-bit integer from a JSMN_PRIMITIVE token.
  * Return OK on success, ERR on error/bad input.
  */
-static int tok_parse_long(const char *json, const jsmntok_t *t,
-                          int64_t *out_long) {
+static AdbxStatus tok_parse_long(const char *json, const jsmntok_t *t,
+                                 int64_t *out_long) {
   if (!json || !t || !out_long)
     return ERR;
   if (t->type != JSMN_PRIMITIVE)
@@ -1095,7 +1099,7 @@ static int tok_parse_long(const char *json, const jsmntok_t *t,
   return OK;
 }
 
-int jsget_init(JsonGetter *jg, const char *json, size_t json_len) {
+AdbxStatus jsget_init(JsonGetter *jg, const char *json, size_t json_len) {
   if (!jg || !json || json_len == 0)
     return ERR;
 
@@ -1122,7 +1126,8 @@ int jsget_init(JsonGetter *jg, const char *json, size_t json_len) {
   return OK;
 }
 
-int jsget_u32(const JsonGetter *jg, const char *key, uint32_t *out_u32) {
+AdbxTriStatus jsget_u32(const JsonGetter *jg, const char *key,
+                        uint32_t *out_u32) {
   if (!jg || !key || !out_u32)
     return ERR;
 
@@ -1143,7 +1148,7 @@ int jsget_u32(const JsonGetter *jg, const char *key, uint32_t *out_u32) {
   return YES;
 }
 
-int jsget_bool01(const JsonGetter *jg, const char *key, int *out01) {
+AdbxTriStatus jsget_bool01(const JsonGetter *jg, const char *key, int *out01) {
   if (!jg || !key || !out01)
     return ERR;
 
@@ -1164,7 +1169,8 @@ int jsget_bool01(const JsonGetter *jg, const char *key, int *out01) {
   return YES;
 }
 
-int jsget_f64(const JsonGetter *jg, const char *key, double *out_double) {
+AdbxTriStatus jsget_f64(const JsonGetter *jg, const char *key,
+                        double *out_double) {
   if (!jg || !key || !out_double)
     return ERR;
 
@@ -1185,7 +1191,8 @@ int jsget_f64(const JsonGetter *jg, const char *key, double *out_double) {
   return YES;
 }
 
-int jsget_i64(const JsonGetter *jg, const char *key, int64_t *out_long) {
+AdbxTriStatus jsget_i64(const JsonGetter *jg, const char *key,
+                        int64_t *out_long) {
   if (!jg || !key || !out_long)
     return ERR;
 
@@ -1210,7 +1217,7 @@ int jsget_i64(const JsonGetter *jg, const char *key, int64_t *out_long) {
  * Checks whether a key path exists and is not JSON null.
  * Return yes/no/err.
  */
-int jsget_exists_nonnull(const JsonGetter *jg, const char *key) {
+AdbxTriStatus jsget_exists_nonnull(const JsonGetter *jg, const char *key) {
   if (!jg || !key)
     return ERR;
 
@@ -1226,7 +1233,8 @@ int jsget_exists_nonnull(const JsonGetter *jg, const char *key) {
   return YES;
 }
 
-int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out) {
+AdbxTriStatus jsget_string_span(const JsonGetter *jg, const char *key,
+                                JsonStrSpan *out) {
   if (!jg || !key || !out)
     return ERR;
 
@@ -1250,8 +1258,8 @@ int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out) {
   return YES;
 }
 
-int jsget_string_decode_alloc(const JsonGetter *jg, const char *key,
-                              char **out_nul) {
+AdbxTriStatus jsget_string_decode_alloc(const JsonGetter *jg, const char *key,
+                                        char **out_nul) {
   if (!jg || !key || !out_nul)
     return ERR;
 
@@ -1265,7 +1273,7 @@ int jsget_string_decode_alloc(const JsonGetter *jg, const char *key,
   return YES;
 }
 
-int json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul) {
+AdbxTriStatus json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul) {
   if (!sp || !out_nul)
     return ERR;
   if (json_string_unescape_alloc(sp->ptr, sp->len, out_nul) != OK)
@@ -1273,7 +1281,8 @@ int json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul) {
   return YES;
 }
 
-int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out) {
+AdbxTriStatus jsget_object(const JsonGetter *jg, const char *key,
+                           JsonGetter *out) {
   if (!jg || !key || !out)
     return ERR;
 
@@ -1299,8 +1308,8 @@ int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out) {
   return YES;
 }
 
-int jsget_array_strings_begin(const JsonGetter *jg, const char *key,
-                              JsonArrIter *it) {
+AdbxTriStatus jsget_array_strings_begin(const JsonGetter *jg, const char *key,
+                                        JsonArrIter *it) {
   if (!jg || !key || !it)
     return ERR;
 
@@ -1328,8 +1337,8 @@ int jsget_array_strings_begin(const JsonGetter *jg, const char *key,
   return YES;
 }
 
-int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
-                             JsonStrSpan *out_elem) {
+AdbxTriStatus jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
+                                       JsonStrSpan *out_elem) {
   if (!jg || !it || !out_elem)
     return ERR;
 
@@ -1357,8 +1366,8 @@ int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
   return YES;
 }
 
-int jsget_array_objects_begin(const JsonGetter *jg, const char *key,
-                              JsonArrIter *it) {
+AdbxTriStatus jsget_array_objects_begin(const JsonGetter *jg, const char *key,
+                                        JsonArrIter *it) {
   if (!jg || !key || !it)
     return ERR;
 
@@ -1383,8 +1392,8 @@ int jsget_array_objects_begin(const JsonGetter *jg, const char *key,
   return YES;
 }
 
-int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
-                             JsonGetter *out_obj) {
+AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
+                                       JsonGetter *out_obj) {
   if (!jg || !it || !out_obj)
     return ERR;
   if (it->idx >= it->count)
@@ -1414,9 +1423,10 @@ int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
   return YES;
 }
 
-int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
-                               const char *const *allowed, size_t n_allowed,
-                               JsonStrSpan *out_unknown_key) {
+AdbxTriStatus
+jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
+                           const char *const *allowed, size_t n_allowed,
+                           JsonStrSpan *out_unknown_key) {
   if (!jg || !allowed)
     return ERR;
   if (out_unknown_key) {
@@ -1472,7 +1482,7 @@ int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
   return YES;
 }
 
-int jsget_simple_rpc_validation(JsonGetter *jg) {
+AdbxTriStatus jsget_simple_rpc_validation(JsonGetter *jg) {
   if (!jg || !jg->json)
     return ERR;
 

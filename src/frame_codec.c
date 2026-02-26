@@ -7,7 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-int frame_write_len(BufChannel *bc, const void *payload, uint32_t hostlong) {
+AdbxStatus frame_write_len(BufChannel *bc, const void *payload,
+                           uint32_t hostlong) {
   if (!bc)
     return ERR;
   if (!payload && hostlong != 0)
@@ -18,7 +19,7 @@ int frame_write_len(BufChannel *bc, const void *payload, uint32_t hostlong) {
   return bufch_write2v(bc, &hdr, sizeof(hdr), payload, (size_t)hostlong);
 }
 
-int frame_read_len(BufChannel *bc, StrBuf *out_payload) {
+AdbxStatus frame_read_len(BufChannel *bc, StrBuf *out_payload) {
   if (!bc || !out_payload)
     return ERR;
 
@@ -49,7 +50,7 @@ int frame_read_len(BufChannel *bc, StrBuf *out_payload) {
   return OK;
 }
 
-int frame_write_cl(BufChannel *bc, const void *payload, size_t n) {
+AdbxStatus frame_write_cl(BufChannel *bc, const void *payload, size_t n) {
   if (!bc)
     return ERR;
   if (!payload && n != 0)
@@ -65,7 +66,8 @@ int frame_write_cl(BufChannel *bc, const void *payload, size_t n) {
 }
 
 /* Parses Content-Length from a header. */
-static int parse_content_length(const char *hdr, size_t len, size_t *out_len) {
+static AdbxStatus parse_content_length(const char *hdr, size_t len,
+                                       size_t *out_len) {
   if (!hdr || !out_len)
     return ERR;
   *out_len = 0;
@@ -94,7 +96,7 @@ static int parse_content_length(const char *hdr, size_t len, size_t *out_len) {
   return OK;
 }
 
-int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
+AdbxTriStatus frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
   if (!bc || !out_payload)
     return ERR;
   out_payload->len = 0;
@@ -119,7 +121,7 @@ int frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
   hdr[hdr_len] = '\0';
 
   size_t payload_len = 0;
-  int prc = parse_content_length(hdr, hdr_len, &payload_len);
+  AdbxStatus prc = parse_content_length(hdr, hdr_len, &payload_len);
   free(hdr);
   if (prc != OK)
     return ERR;

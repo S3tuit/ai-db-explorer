@@ -7,6 +7,7 @@
 #include "packed_array.h"
 #include "sensitive_tok.h"
 #include "string_op.h"
+#include "utils.h"
 
 typedef enum ValidatorErrCode {
   VERR_NONE = 0,
@@ -82,7 +83,7 @@ typedef struct ValidatorRequest {
 /* Initializes one ValidateQueryOut.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int vq_out_init(ValidateQueryOut *out);
+AdbxStatus vq_out_init(ValidateQueryOut *out);
 
 /* Cleans one ValidateQueryOut and all memory it owns. */
 void vq_out_clean(ValidateQueryOut *out);
@@ -92,6 +93,6 @@ void vq_out_clean(ValidateQueryOut *out);
  * column) and sets out->err.code=VERR_NONE.
  * On failure, returns ERR and fills out->err with a human-readable message.
  */
-int validate_query(const ValidatorRequest *req, ValidateQueryOut *out);
+AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out);
 
 #endif

@@ -6,6 +6,7 @@
 
 #include "query_result.h"
 #include "string_op.h"
+#include "utils.h"
 
 // Avoid compiling jsmn implementation in every TU that includes this header.
 #ifndef JSMN_HEADER
@@ -41,27 +42,28 @@
  *
  * NOTE: Caller must free(*out_json).
  */
-int qr_to_jsonrpc(const QueryResult *qr, char **out_json, size_t *out_len);
+AdbxStatus qr_to_jsonrpc(const QueryResult *qr, char **out_json,
+                         size_t *out_len);
 
 /* JSON helpers for building objects/arrays with automatic comma handling. */
-int json_obj_begin(StrBuf *sb);
-int json_obj_end(StrBuf *sb);
-int json_arr_begin(StrBuf *sb);
-int json_arr_end(StrBuf *sb);
-int json_kv_obj_begin(StrBuf *sb, const char *key);
-int json_kv_arr_begin(StrBuf *sb, const char *key);
-int json_kv_str(StrBuf *sb, const char *key, const char *val);
-int json_kv_u64(StrBuf *sb, const char *key, uint64_t val);
-int json_kv_l(StrBuf *sb, const char *key, long val);
-int json_kv_bool(StrBuf *sb, const char *key, int val);
-int json_kv_null(StrBuf *sb, const char *key);
-int json_arr_elem_str(StrBuf *sb, const char *val);
-int json_arr_elem_u64(StrBuf *sb, uint64_t val);
-int json_arr_elem_l(StrBuf *sb, long val);
-int json_arr_elem_bool(StrBuf *sb, int val);
+AdbxStatus json_obj_begin(StrBuf *sb);
+AdbxStatus json_obj_end(StrBuf *sb);
+AdbxStatus json_arr_begin(StrBuf *sb);
+AdbxStatus json_arr_end(StrBuf *sb);
+AdbxStatus json_kv_obj_begin(StrBuf *sb, const char *key);
+AdbxStatus json_kv_arr_begin(StrBuf *sb, const char *key);
+AdbxStatus json_kv_str(StrBuf *sb, const char *key, const char *val);
+AdbxStatus json_kv_u64(StrBuf *sb, const char *key, uint64_t val);
+AdbxStatus json_kv_l(StrBuf *sb, const char *key, long val);
+AdbxStatus json_kv_bool(StrBuf *sb, const char *key, int val);
+AdbxStatus json_kv_null(StrBuf *sb, const char *key);
+AdbxStatus json_arr_elem_str(StrBuf *sb, const char *val);
+AdbxStatus json_arr_elem_u64(StrBuf *sb, uint64_t val);
+AdbxStatus json_arr_elem_l(StrBuf *sb, long val);
+AdbxStatus json_arr_elem_bool(StrBuf *sb, int val);
 
 // helper to init a json object and add "jsonrpc":"2.0"
-int json_rpc_begin(StrBuf *sb);
+AdbxStatus json_rpc_begin(StrBuf *sb);
 
 #define JSON_GETTER_MAX_TOKENS 1024
 
@@ -96,12 +98,12 @@ typedef struct {
  *
  * Return OK on success, ERR on error/bad input.
  */
-int jsget_init(JsonGetter *jg, const char *json, size_t json_len);
+AdbxStatus jsget_init(JsonGetter *jg, const char *json, size_t json_len);
 
 /* Validates a JSON-RPC request and initializes JsonGetter.
  * Returns YES if the payload is valid and has jsonrpc/id/method, NO if it
  * doesn't match the schema, ERR on parse errors. */
-int jsget_simple_rpc_validation(JsonGetter *jg);
+AdbxTriStatus jsget_simple_rpc_validation(JsonGetter *jg);
 
 /*
  * Gets a key path as a uint32_t (supports dot-delimited paths).
@@ -111,48 +113,52 @@ int jsget_simple_rpc_validation(JsonGetter *jg);
  *  NO  -> key not found or value is null.
  *  ERR -> type/parse error.
  */
-int jsget_u32(const JsonGetter *jg, const char *key, uint32_t *out_u32);
+AdbxTriStatus jsget_u32(const JsonGetter *jg, const char *key,
+                        uint32_t *out_u32);
 
 /*
  * Gets a key path as a boolean into *out01 (0=false, 1=true). Returns
  * yes/no/err.
  */
-int jsget_bool01(const JsonGetter *jg, const char *key, int *out01);
+AdbxTriStatus jsget_bool01(const JsonGetter *jg, const char *key, int *out01);
 
 /*
  * Gets a key path as a double. Returns yes/no/err.
  */
-int jsget_f64(const JsonGetter *jg, const char *key, double *out_double);
+AdbxTriStatus jsget_f64(const JsonGetter *jg, const char *key,
+                        double *out_double);
 
 /*
  * Gets a key path as a signed 64-bit integer. Returns yes/no/err.
  */
-int jsget_i64(const JsonGetter *jg, const char *key, int64_t *out_long);
+AdbxTriStatus jsget_i64(const JsonGetter *jg, const char *key,
+                        int64_t *out_long);
 
 /*
  * Checks whether a key path exists and is not JSON null. Returns yes/no/err.
  */
-int jsget_exists_nonnull(const JsonGetter *jg, const char *key);
+AdbxTriStatus jsget_exists_nonnull(const JsonGetter *jg, const char *key);
 
 /*
  * Gets a key path as a raw JSON string content span (WITHOUT quotes).
  * This does NOT unescape; it returns a view into the JSON buffer. Returns
  * yes/no/err.
  */
-int jsget_string_span(const JsonGetter *jg, const char *key, JsonStrSpan *out);
+AdbxTriStatus jsget_string_span(const JsonGetter *jg, const char *key,
+                                JsonStrSpan *out);
 
 /*
  * Gets a key path as a decoded (unescaped) NUL-terminated string.
  * Caller owns the returned string and must free it. Return yes/no/err.
  */
-int jsget_string_decode_alloc(const JsonGetter *jg, const char *key,
-                              char **out_nul);
+AdbxTriStatus jsget_string_decode_alloc(const JsonGetter *jg, const char *key,
+                                        char **out_nul);
 
 /* Decodes a JSON string span into a newly allocated NUL-terminated string.
  * Ownership: caller owns *out_nul and must free it.
  * Side effects: allocates memory.
  * Returns YES on success, ERR on invalid input or allocation failure. */
-int json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul);
+AdbxTriStatus json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul);
 
 /*
  * Gets a key path as a JsonGetter view rooted at the object value.
@@ -162,14 +168,15 @@ int json_span_decode_alloc(const JsonStrSpan *sp, char **out_nul);
  *
  * Returns yes/no/err.
  */
-int jsget_object(const JsonGetter *jg, const char *key, JsonGetter *out);
+AdbxTriStatus jsget_object(const JsonGetter *jg, const char *key,
+                           JsonGetter *out);
 
 /*
  * Initializes an iterator over an array of JSON strings at key path `key`.
  * Returns yes/no/err.
  */
-int jsget_array_strings_begin(const JsonGetter *jg, const char *key,
-                              JsonArrIter *it);
+AdbxTriStatus jsget_array_strings_begin(const JsonGetter *jg, const char *key,
+                                        JsonArrIter *it);
 
 /*
  * Gets next element of the array iterator as a raw JSON string content span.
@@ -179,15 +186,15 @@ int jsget_array_strings_begin(const JsonGetter *jg, const char *key,
  *  NO  -> no more elements.
  *  ERR -> element type error / token stream error.
  */
-int jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
-                             JsonStrSpan *out_elem);
+AdbxTriStatus jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
+                                       JsonStrSpan *out_elem);
 
 /*
  * Initializes an iterator over an array of JSON objects at key path `key`.
  * Returns yes/no/err.
  */
-int jsget_array_objects_begin(const JsonGetter *jg, const char *key,
-                              JsonArrIter *it);
+AdbxTriStatus jsget_array_objects_begin(const JsonGetter *jg, const char *key,
+                                        JsonArrIter *it);
 
 /*
  * Gets next element of the object array iterator as a JsonGetter view.
@@ -200,16 +207,17 @@ int jsget_array_objects_begin(const JsonGetter *jg, const char *key,
  *  NO  -> no more elements.
  *  ERR -> element type error / token stream error.
  */
-int jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
-                             JsonGetter *out_obj);
+AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
+                                       JsonGetter *out_obj);
 
 /* Makes sure the json object identified by 'obj_key' only contains the
  * 'allowed' top-level keys. If obj_key is NULL, the root object is used.
  * When the function returns NO because of an unknown key and
  * 'out_unknown_key' is non-NULL, it writes the first unknown key span there.
  * Returns YES/NO/ERR. */
-int jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
-                               const char *const *allowed, size_t n_allowed,
-                               JsonStrSpan *out_unknown_key);
+AdbxTriStatus
+jsget_top_level_validation(const JsonGetter *jg, const char *obj_key,
+                           const char *const *allowed, size_t n_allowed,
+                           JsonStrSpan *out_unknown_key);
 
 #endif

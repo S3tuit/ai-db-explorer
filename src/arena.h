@@ -2,6 +2,7 @@
 #define ARENA_H
 
 #include <stdint.h>
+#include "utils.h"
 
 /* A bump allocator that stores data in a chain of non-moving blocks.
  * Allocations are pointer-sized aligned (sizeof(uintptr_t)) with zero
@@ -49,7 +50,7 @@ typedef struct {
 Arena *arena_create(uint32_t *size_p, uint32_t *cap_p);
 
 /* Initializes an arena in-place. Returns OK on success, ERR on bad input. */
-int arena_init(Arena *ar, uint32_t *size_p, uint32_t *cap_p);
+AdbxStatus arena_init(Arena *ar, uint32_t *size_p, uint32_t *cap_p);
 
 /* Frees the memory used by 'ar' and its data. */
 void arena_destroy(Arena *ar);
@@ -60,17 +61,17 @@ void arena_clean(Arena *ar);
 /* Checks whether 'ar' is in the canonical zeroed/uninitialized state.
  * Returns YES when zeroed, NO when any field is non-zero, ERR on invalid input.
  */
-int arena_is_zeroed(const Arena *ar);
+AdbxTriStatus arena_is_zeroed(const Arena *ar);
 
 /* Validates basic arena structural consistency for initialized arenas.
  * Returns YES when valid, NO when inconsistent (or zeroed), ERR on bad input.
  * Should not be used for normal build since it's pretty slow.
  */
-int arena_is_ok(const Arena *ar);
+AdbxTriStatus arena_is_ok(const Arena *ar);
 
 /* Ensure 'extra' bytes available, growing if needed.
  * Returns OK on success, ERR if cap reached or errors occurred. */
-int arena_ensure(Arena *ar, uint32_t extra);
+AdbxStatus arena_ensure(Arena *ar, uint32_t extra);
 
 /* Allocates 'len' bytes inside the arena and returns the pointer.
  * Memory is uninitialized. Returns NULL on error. */
@@ -96,7 +97,7 @@ uint32_t arena_get_used(Arena *ar);
  * Ownership: vector owns the heap buffer for items.
  * Side effects: may realloc on heap.
  * Returns OK/ERR. */
-int ptrvec_push(PtrVec *v, void *ptr);
+AdbxStatus ptrvec_push(PtrVec *v, void *ptr);
 
 /* Copies a temporary vector into the arena and returns the new array.
  * Ownership: returned array is owned by the arena.

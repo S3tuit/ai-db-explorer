@@ -115,8 +115,8 @@ static void ht_zero(HashTable *ht) {
  * Side effects: none.
  * Error semantics: returns YES on match, NO on mismatch.
  */
-static int ht_slot_key_eq_bytes(const HashSlot *slot, uint64_t hash,
-                                const char *key, uint32_t key_len) {
+static AdbxTriStatus ht_slot_key_eq_bytes(const HashSlot *slot, uint64_t hash,
+                                          const char *key, uint32_t key_len) {
   if (!slot || !key || !slot->used)
     return NO;
   if (slot->hash != hash || slot->key_len != key_len)
@@ -131,8 +131,9 @@ static int ht_slot_key_eq_bytes(const HashSlot *slot, uint64_t hash,
  * Side effects: invokes caller eq callback.
  * Error semantics: returns YES on match, NO on mismatch.
  */
-static int ht_slot_key_eq_custom(const HashTable *ht, const HashSlot *slot,
-                                 uint64_t hash, const void *key) {
+static AdbxTriStatus ht_slot_key_eq_custom(const HashTable *ht,
+                                           const HashSlot *slot, uint64_t hash,
+                                           const void *key) {
   assert(ht);
   assert(ht->eq_fn);
   assert(slot->key);
@@ -150,8 +151,9 @@ static int ht_slot_key_eq_custom(const HashTable *ht, const HashSlot *slot,
  * Side effects: mutates one slot and increments len.
  * Returns OK on success, ERR on invalid input.
  */
-static int ht_insert_no_grow(HashTable *ht, const void *key, uint32_t key_len,
-                             uint64_t hash, const void *value) {
+static AdbxStatus ht_insert_no_grow(HashTable *ht, const void *key,
+                                    uint32_t key_len, uint64_t hash,
+                                    const void *value) {
   assert(ht);
   assert(ht->slots);
   assert(value);
@@ -183,7 +185,7 @@ static int ht_insert_no_grow(HashTable *ht, const void *key, uint32_t key_len,
  * Side effects: allocates new slot storage and frees old slot storage.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-static int ht_rehash(HashTable *ht, size_t new_cap) {
+static AdbxStatus ht_rehash(HashTable *ht, size_t new_cap) {
   assert(ht);
   assert(ht->slots);
   if (ht->cap == 0)
@@ -226,7 +228,7 @@ static int ht_rehash(HashTable *ht, size_t new_cap) {
  * Side effects: may allocate and move slots.
  * Returns OK on success, ERR on invalid input or allocation/overflow failure.
  */
-static int ht_ensure_room(HashTable *ht) {
+static AdbxStatus ht_ensure_room(HashTable *ht) {
   assert(ht);
   assert(ht->slots);
   assert(ht->cap != 0);
@@ -243,8 +245,8 @@ static int ht_ensure_room(HashTable *ht) {
  * Error semantics: returns OK on success, ERR on invalid input/allocation
  * failure.
  */
-static int ht_init_common(HashTable *ht, size_t min_slots, HtMode mode,
-                          HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
+static AdbxStatus ht_init_common(HashTable *ht, size_t min_slots, HtMode mode,
+                                 HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
   if (!ht)
     return ERR;
   if (mode != HT_MODE_BYTES && mode != HT_MODE_CUSTOM)
@@ -277,18 +279,22 @@ static int ht_init_common(HashTable *ht, size_t min_slots, HtMode mode,
   return OK;
 }
 
-int ht_init_with_capacity(HashTable *ht, size_t min_slots) {
+AdbxStatus ht_init_with_capacity(HashTable *ht, size_t min_slots) {
   return ht_init_common(ht, min_slots, HT_MODE_BYTES, NULL, NULL, NULL);
 }
 
-int ht_init(HashTable *ht) { return ht_init_with_capacity(ht, HT_MIN_CAP); }
+AdbxStatus ht_init(HashTable *ht) {
+  return ht_init_with_capacity(ht, HT_MIN_CAP);
+}
 
-int ht_init_custom_with_capacity(HashTable *ht, size_t min_slots,
-                                 HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
+AdbxStatus ht_init_custom_with_capacity(HashTable *ht, size_t min_slots,
+                                        HtHashFn hash_fn, HtEqFn eq_fn,
+                                        void *ctx) {
   return ht_init_common(ht, min_slots, HT_MODE_CUSTOM, hash_fn, eq_fn, ctx);
 }
 
-int ht_init_custom(HashTable *ht, HtHashFn hash_fn, HtEqFn eq_fn, void *ctx) {
+AdbxStatus ht_init_custom(HashTable *ht, HtHashFn hash_fn, HtEqFn eq_fn,
+                          void *ctx) {
   return ht_init_custom_with_capacity(ht, HT_MIN_CAP, hash_fn, eq_fn, ctx);
 }
 
@@ -302,7 +308,7 @@ static HashTable *ht_create_common(size_t min_slots, HtMode mode,
   HashTable *ht = (HashTable *)xmalloc(sizeof(*ht));
   ht_zero(ht);
 
-  int rc =
+  AdbxStatus rc =
       (mode == HT_MODE_CUSTOM)
           ? ht_init_custom_with_capacity(ht, min_slots, hash_fn, eq_fn, ctx)
           : ht_init_with_capacity(ht, min_slots);
@@ -348,8 +354,8 @@ size_t ht_len(const HashTable *ht) {
   return ht->len;
 }
 
-int ht_put(HashTable *ht, const char *key, uint32_t key_len,
-           const void *value) {
+AdbxStatus ht_put(HashTable *ht, const char *key, uint32_t key_len,
+                  const void *value) {
   if (!ht || ht->mode != HT_MODE_BYTES || !key || !value)
     return ERR;
   assert(ht->slots);
@@ -402,7 +408,7 @@ const void *ht_get(const HashTable *ht, const char *key, uint32_t key_len) {
   return NULL;
 }
 
-int ht_put_custom(HashTable *ht, const void *key, const void *value) {
+AdbxStatus ht_put_custom(HashTable *ht, const void *key, const void *value) {
   if (!ht || ht->mode != HT_MODE_CUSTOM || !key || !value)
     return ERR;
   assert(ht->slots);

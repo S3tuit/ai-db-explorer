@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "arena.h"
+#include "utils.h"
 
 /* StringPool interns repeated strings so equal content shares one pointer.
  *
@@ -35,7 +36,7 @@ StringPool *spool_create(void);
  * Side effects: initializes arena and hash table internals.
  * Returns OK on success, ERR on invalid input or allocation failure.
  */
-int spool_init(StringPool *sp);
+AdbxStatus spool_init(StringPool *sp);
 
 /* Releases resources owned by an initialized pool, keeping the struct.
  * Ownership: caller retains the struct and may call spool_init() again.

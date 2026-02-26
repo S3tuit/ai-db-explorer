@@ -13,7 +13,7 @@
  * Ownership: caller owns the handle and must call qir_handle_destroy().
  * Side effects: allocates arena blocks.
  * Returns OK on success, ERR on bad input or allocation failure. */
-int qir_handle_init(QirQueryHandle *h) {
+AdbxStatus qir_handle_init(QirQueryHandle *h) {
   if (!h)
     return ERR;
 
@@ -213,15 +213,16 @@ static QirTouchKind qir_resolve_qualifier_kind(const QirQuery *q,
 }
 
 /* Appends a new touch record to the report. */
-static int qir_touch_report_add(QirTouchReport *tr, QirScope scope,
-                                QirTouchKind kind, const QirColRef *col,
-                                const QirQuery *source_query, PtrVec *touches) {
+static AdbxStatus qir_touch_report_add(QirTouchReport *tr, QirScope scope,
+                                       QirTouchKind kind, const QirColRef *col,
+                                       const QirQuery *source_query,
+                                       PtrVec *touches) {
   if (!tr || !col)
-    return -1;
+    return ERR;
 
   QirTouch *t = (QirTouch *)arena_calloc(&tr->arena, (uint32_t)sizeof(*t));
   if (!t)
-    return -1;
+    return ERR;
 
   t->scope = scope;
   t->kind = kind;
@@ -229,12 +230,12 @@ static int qir_touch_report_add(QirTouchReport *tr, QirScope scope,
   t->source_query = source_query;
   // Keep a temporary pointer vector and flatten it once at the end.
   if (ptrvec_push(touches, t) != OK)
-    return -1;
+    return ERR;
   tr->ntouches++;
 
   if (kind == QIR_TOUCH_UNKNOWN)
     tr->has_unknown_touches = true;
-  return 0;
+  return OK;
 }
 
 // Forward declaration for mutual recursion (expr can contain subquery; query
@@ -265,7 +266,7 @@ static void qir_extract_from_expr_rec(const QirQuery *owner_query,
       kind = QIR_TOUCH_UNKNOWN;
     }
     if (qir_touch_report_add(tr, scope, kind, &e->u.colref, owner_query,
-                             touches) != 0) {
+                             touches) != OK) {
       tr->has_unsupported =
           true; // allocation failure treated as "cannot safely proceed"
     }

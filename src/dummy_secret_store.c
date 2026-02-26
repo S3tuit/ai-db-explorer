@@ -27,8 +27,8 @@ static const SecretPair DUMMY_SECRETS[] = {
  * Ownership: caller owns 'out' and should zero+clean after use.
  * Side effects: none.
  * Error semantics: ERR on bad input, missing ref, or allocation failure. */
-static int secret_store_dummy_get(SecretStore *store, const char *secret_ref,
-                                  StrBuf *out) {
+static AdbxStatus secret_store_dummy_get(SecretStore *store,
+                                         const char *secret_ref, StrBuf *out) {
   (void)store;
   if (!secret_ref || !out)
     return ERR;
@@ -93,7 +93,8 @@ void secret_store_destroy(SecretStore *store) {
  * Ownership: caller owns 'out' and should zero+clean it after use.
  * Side effects: none for dummy; real impl may access OS stores.
  * Error semantics: OK on success, ERR on failure. */
-int secret_store_get(SecretStore *store, const char *secret_ref, StrBuf *out) {
+AdbxStatus secret_store_get(SecretStore *store, const char *secret_ref,
+                            StrBuf *out) {
   if (!store || !store->vt || !store->vt->get)
     return ERR;
   return store->vt->get(store, secret_ref, out);

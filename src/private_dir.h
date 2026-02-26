@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "handshake_codec.h"
+#include "utils.h"
 
 #define PRIVDIR_APPNAME "ai-dbexplorer"
 #define PRIVDIR_SOCK_FILENAME "broker.sock"
@@ -28,15 +29,15 @@ PrivDir *privdir_resolve(const char *base);
 
 /* mkdir with 0700 for base, run/, secret/. Verifies ownership if dir already
  * exists. Returns OK/ERR. */
-int privdir_create_layout(const PrivDir *pd);
+AdbxStatus privdir_create_layout(const PrivDir *pd);
 
 /* Fills PRIVDIR_TOKEN_LEN bytes from OS CSPRNG, writes to token_path with 0600
  * perms.
  * Returns OK/ERR. */
-int privdir_generate_token(const PrivDir *pd);
+AdbxStatus privdir_generate_token(const PrivDir *pd);
 
 /* Reads PRIVDIR_TOKEN_LEN bytes from token_path into 'out'. Returns OK/ERR. */
-int privdir_read_token(const PrivDir *pd, uint8_t *out);
+AdbxStatus privdir_read_token(const PrivDir *pd, uint8_t *out);
 
 /* Best-effort unlink of socket + token, rmdir of all dirs. */
 void privdir_cleanup(const PrivDir *pd);

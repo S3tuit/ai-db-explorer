@@ -6,6 +6,7 @@
 
 #include "arena.h"
 #include "string_op.h"
+#include "utils.h"
 
 // DB-agnostic IR for a restricted SQL subset.
 // Built by backend-specific parsers (e.g., Postgres via libpg_query AST).
@@ -351,7 +352,7 @@ typedef struct QirTouchReport {
 
 // Initializes a QirQueryHandle and allocates a blank QirQuery inside it.
 // Returns OK on success, ERR on bad input or allocation failure.
-int qir_handle_init(QirQueryHandle *h);
+AdbxStatus qir_handle_init(QirQueryHandle *h);
 
 // Frees the arena owned by the handle and resets it.
 void qir_handle_destroy(QirQueryHandle *h);

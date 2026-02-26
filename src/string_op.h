@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "utils.h"
+
 /* Returns a pointer to a duplicated value of 's' of at most 'cap' bytes or
  * NULL if 's' is NULL. If the duplicated string gets truncated, this appends
  * "\0" without going past the 'cap'. Caller should free the result. */
@@ -34,11 +36,11 @@ typedef struct StrBuf {
 void sb_init(StrBuf *sb);
 
 /* Adds 'n' bytes starting from 'src' to sb. Returns OK/ERR. */
-int sb_append_bytes(StrBuf *sb, const void *src, size_t n);
+AdbxStatus sb_append_bytes(StrBuf *sb, const void *src, size_t n);
 
 /* Reserves and exposes a writable span of length 'n'. The returned pointer
  * points to the new region at the end of sb and sb->len is advanced. */
-int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst);
+AdbxStatus sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst);
 
 /* Returns a NUL-terminated C-string view of sb.
  * Best-effort: returns "" if sb is NULL, uninitialized, or growth fails.

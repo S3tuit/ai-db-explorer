@@ -17,7 +17,7 @@
 
 /* mkdir with mode 0700. If the dir already exists, verify it is a directory,
  * owned by us, and has mode 0700. Returns OK/ERR. */
-static int mkdir_0700(const char *path) {
+static AdbxStatus mkdir_0700(const char *path) {
   if (mkdir(path, 0700) == 0) {
     /* Override umask to ensure exact permissions. */
     if (chmod(path, 0700) != 0)
@@ -142,7 +142,7 @@ PrivDir *privdir_resolve(const char *input_base) {
   return pd;
 }
 
-int privdir_create_layout(const PrivDir *pd) {
+AdbxStatus privdir_create_layout(const PrivDir *pd) {
   if (!pd)
     return ERR;
   if (mkdir_0700(pd->base) != OK)
@@ -154,7 +154,7 @@ int privdir_create_layout(const PrivDir *pd) {
   return OK;
 }
 
-int privdir_generate_token(const PrivDir *pd) {
+AdbxStatus privdir_generate_token(const PrivDir *pd) {
   if (!pd || !pd->token_path)
     return ERR;
 
@@ -165,7 +165,7 @@ int privdir_generate_token(const PrivDir *pd) {
   return fileio_write_exact(pd->token_path, token, sizeof(token), 0600);
 }
 
-int privdir_read_token(const PrivDir *pd, uint8_t *out) {
+AdbxStatus privdir_read_token(const PrivDir *pd, uint8_t *out) {
   if (!pd || !pd->token_path || !out)
     return ERR;
 

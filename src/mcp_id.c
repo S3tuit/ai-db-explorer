@@ -13,7 +13,7 @@ void mcp_id_init_u32(McpId *id, uint32_t v) {
 
 /* Initializes a string id by copying 's'. Ownership: allocates and must be
  * cleaned with mcp_id_clean(). Returns OK/ERR. */
-int mcp_id_init_str_copy(McpId *id, const char *s) {
+AdbxStatus mcp_id_init_str_copy(McpId *id, const char *s) {
   if (!id || !s)
     return ERR;
   size_t len = strlen(s) + 1;

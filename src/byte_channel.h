@@ -51,10 +51,10 @@ typedef struct ByteChannelVTable {
 
   // Optional: flush buffered output if any. Returns ok/err.
   // For sockets/pipes implement to NULL, then bytech_flush helper returns ok.
-  int (*flush)(ByteChannel *ch);
+  AdbxStatus (*flush)(ByteChannel *ch);
 
   // Half-close: indicates "no more writes". Returns ok/error.
-  int (*shutdown_write)(ByteChannel *ch);
+  AdbxStatus (*shutdown_write)(ByteChannel *ch);
 
   // Returns an OS pollable handle for multiplexing. The handle should be the
   // one used to poll for readability (data available to read)
@@ -83,13 +83,13 @@ static inline ssize_t bytech_writev_some(ByteChannel *ch,
     return -1;
   return ch->vt->writev_some(ch, vecs, vcnt);
 }
-static inline int bytech_flush(ByteChannel *ch) {
+static inline AdbxStatus bytech_flush(ByteChannel *ch) {
   if (!ch->vt->flush)
     return OK;
   return ch->vt->flush(ch);
 }
-static inline int bytech_shutdown_write(ByteChannel *ch) {
-  return ch->vt->shutdown_write ? ch->vt->shutdown_write(ch) : 0;
+static inline AdbxStatus bytech_shutdown_write(ByteChannel *ch) {
+  return ch->vt->shutdown_write ? ch->vt->shutdown_write(ch) : OK;
 }
 static inline BytePollable bytech_get_pollable(const ByteChannel *ch) {
   return ch->vt->get_pollable(ch);

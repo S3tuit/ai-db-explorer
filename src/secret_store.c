@@ -8,8 +8,8 @@
  * Ownership: caller owns 'out' and should zero+clean it after use.
  * Side effects: none.
  * Error semantics: always ERR. */
-static int secret_store_real_get(SecretStore *store, const char *secret_ref,
-                                 StrBuf *out) {
+static AdbxStatus secret_store_real_get(SecretStore *store,
+                                        const char *secret_ref, StrBuf *out) {
   (void)store;
   (void)secret_ref;
   if (out) {
@@ -53,7 +53,8 @@ void secret_store_destroy(SecretStore *store) {
  * Ownership: caller owns 'out' and should zero+clean it after use.
  * Side effects: real impl may access OS stores (not yet).
  * Error semantics: OK on success, ERR on failure. */
-int secret_store_get(SecretStore *store, const char *secret_ref, StrBuf *out) {
+AdbxStatus secret_store_get(SecretStore *store, const char *secret_ref,
+                            StrBuf *out) {
   if (!store || !store->vt || !store->vt->get)
     return ERR;
   return store->vt->get(store, secret_ref, out);

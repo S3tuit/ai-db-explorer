@@ -65,17 +65,19 @@ typedef struct ValidatorCtx {
   StrBuf scratch;
 } ValidatorCtx;
 
-static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q);
+static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
+                                           const QirQuery *q);
 static inline const QirFromItem *find_from_alias(const QirQuery *q,
                                                  const char *alias);
-static inline int colref_is_sensitive(const QirQuery *q, const ConnProfile *cp,
-                                      const QirColRef *c);
+static inline AdbxTriStatus colref_is_sensitive(const QirQuery *q,
+                                                const ConnProfile *cp,
+                                                const QirColRef *c);
 
 #define MAX_ERR_MSG_LEN 512
 /* Resets 'ctx->err->msg' and writes a string into it using 'fmt' like printf().
  */
-static int set_err(ValidatorCtx *ctx, ValidatorErrCode code, const char *fmt,
-                   ...) {
+static AdbxStatus set_err(ValidatorCtx *ctx, ValidatorErrCode code,
+                          const char *fmt, ...) {
   va_list args;
   char buffer[MAX_ERR_MSG_LEN];
   int len;
@@ -108,7 +110,7 @@ static int set_err(ValidatorCtx *ctx, ValidatorErrCode code, const char *fmt,
  * Error semantics: returns OK on success, ERR on invalid input or allocation
  * failure.
  */
-static int vq_out_reset(ValidateQueryOut *out) {
+static AdbxStatus vq_out_reset(ValidateQueryOut *out) {
   assert(out != NULL);
   assert(out->plan.cols != NULL);
 
@@ -135,11 +137,12 @@ static int vq_out_reset(ValidateQueryOut *out) {
  * and may set validator errors. Error semantics: returns OK on success, ERR on
  * invalid input/alloc failures.
  */
-static int validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
-                                           const QirColRef *cr,
-                                           ValidatorPlan *plan,
-                                           const char **out_id,
-                                           uint32_t *out_id_len) {
+static AdbxStatus validator_make_sensitive_col_id(ValidatorCtx *ctx,
+                                                  const QirQuery *q,
+                                                  const QirColRef *cr,
+                                                  ValidatorPlan *plan,
+                                                  const char **out_id,
+                                                  uint32_t *out_id_len) {
   assert(ctx != NULL);
   assert(q != NULL);
   assert(cr != NULL);
@@ -196,8 +199,8 @@ static int validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
  * Error semantics: returns OK on success, ERR on invalid input/allocation
  * failures; may set validator errors.
  */
-static int validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
-                                ValidatorPlan *out_plan) {
+static AdbxStatus validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
+                                       ValidatorPlan *out_plan) {
   assert(ctx != NULL);
   assert(q != NULL);
   assert(out_plan != NULL);
@@ -293,10 +296,10 @@ static const char *validator_expr_diag(ValidatorCtx *ctx, const QirExpr *e) {
  * Error semantics: returns YES on exact scope match, NO on mismatch, ERR on
  * invalid input or unresolved source relation.
  */
-static int validator_colref_scope_matches(const QirQuery *q,
-                                          const QirColRef *cr,
-                                          const char *scope,
-                                          uint32_t scope_len) {
+static AdbxTriStatus validator_colref_scope_matches(const QirQuery *q,
+                                                    const QirColRef *cr,
+                                                    const char *scope,
+                                                    uint32_t scope_len) {
   assert(q);
   assert(cr);
   assert(scope);
@@ -350,10 +353,9 @@ static int validator_colref_scope_matches(const QirQuery *q,
  * Error semantics: returns YES on success, NO on policy mismatch, ERR on bad
  * input/internal inconsistency.
  */
-static int validator_validate_param_scope_for_col(ValidatorCtx *ctx,
-                                                  const QirQuery *q,
-                                                  const QirColRef *sensitive_cr,
-                                                  int param_idx) {
+static AdbxTriStatus validator_validate_param_scope_for_col(
+    ValidatorCtx *ctx, const QirQuery *q, const QirColRef *sensitive_cr,
+    int param_idx) {
   assert(ctx);
   assert(q);
   assert(sensitive_cr);
@@ -414,8 +416,9 @@ static int validator_validate_param_scope_for_col(ValidatorCtx *ctx,
  * we enforced that sensitive columns can only appear in the main SELECT, this
  * can be used to understand if a colref, of the main SELECT, contains sensitive
  * data. This should be called only on columns of the main SELECT. */
-static inline int colref_is_sensitive(const QirQuery *q, const ConnProfile *cp,
-                                      const QirColRef *c) {
+static inline AdbxTriStatus colref_is_sensitive(const QirQuery *q,
+                                                const ConnProfile *cp,
+                                                const QirColRef *c) {
   if (!q || !cp || !c)
     return ERR;
 
@@ -436,7 +439,8 @@ static inline int colref_is_sensitive(const QirQuery *q, const ConnProfile *cp,
 
 /* Validates that every QirFromItem and QirJoin has an alias. Returns YES, or
  * NO/ERR and sets '*err'. */
-static int validate_range_aliases(ValidatorCtx *ctx, const QirQuery *q) {
+static AdbxTriStatus validate_range_aliases(ValidatorCtx *ctx,
+                                            const QirQuery *q) {
   if (!q)
     return ERR;
 
@@ -462,13 +466,13 @@ static int validate_range_aliases(ValidatorCtx *ctx, const QirQuery *q) {
 
 /* Validates all the subqueries embedded inside 'e'. Return YES/NO/ERR. Sets
  * '*err' if it doesn't return YES. */
-typedef int (*ValidateQueryFn)(ValidatorCtx *, const QirQuery *);
+typedef AdbxTriStatus (*ValidateQueryFn)(ValidatorCtx *, const QirQuery *);
 
 /* Walks an expression tree and validates all nested subqueries via the
  * callback provided by the caller. The callback controls the policy (Pass A
  * vs Pass B). */
-static int validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
-                                    ValidateQueryFn validate_query_fn) {
+static AdbxTriStatus validate_expr_subqueries(
+    ValidatorCtx *ctx, const QirExpr *e, ValidateQueryFn validate_query_fn) {
   if (!e)
     return YES;
 
@@ -576,8 +580,8 @@ static int validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
   return ERR;
 }
 
-static int validate_expr_subqueries_pass_a(ValidatorCtx *ctx,
-                                           const QirExpr *e) {
+static AdbxTriStatus validate_expr_subqueries_pass_a(ValidatorCtx *ctx,
+                                                     const QirExpr *e) {
   return validate_expr_subqueries(ctx, e, validate_query_pass_a);
 }
 
@@ -590,9 +594,9 @@ static int validate_expr_subqueries_pass_a(ValidatorCtx *ctx,
  * query so alias resolution is scoped correctly.
  *
  * Side effects: writes a human-readable reason into err on failure. */
-static int validate_sensitive_touches_scope(ValidatorCtx *ctx,
-                                            const QirTouchReport *tr,
-                                            bool *found_sensitive) {
+static AdbxTriStatus validate_sensitive_touches_scope(ValidatorCtx *ctx,
+                                                      const QirTouchReport *tr,
+                                                      bool *found_sensitive) {
   if (!tr || !ctx)
     return ERR;
 
@@ -646,8 +650,9 @@ static int name_cpm(const void *s1, const void *s2) {
 
 /* Returns YES if a function is safe to call for 'db' or is present in the
  * user-defined list of 'cp'. Returns YES/NO/ERR. */
-static int validator_is_function_safe(ValidatorCtx *ctx, const char *schema,
-                                      const char *name) {
+static AdbxTriStatus validator_is_function_safe(ValidatorCtx *ctx,
+                                                const char *schema,
+                                                const char *name) {
   if (!ctx || !ctx->db || !name || name[0] == '\0')
     return ERR;
   const DbSafeFuncList *list = db_safe_functions(ctx->db);
@@ -665,7 +670,8 @@ static int validator_is_function_safe(ValidatorCtx *ctx, const char *schema,
 
 /* Validates that all function calls in an expression tree are safe to call.
  * Returns YES/NO/ERR and sets err when returning NO/ERR. */
-static int validate_expr_functions(ValidatorCtx *ctx, const QirExpr *e) {
+static AdbxTriStatus validate_expr_functions(ValidatorCtx *ctx,
+                                             const QirExpr *e) {
   if (!e)
     return YES;
 
@@ -805,8 +811,9 @@ static int validate_expr_functions(ValidatorCtx *ctx, const QirExpr *e) {
 /* Returns YES if the expression tree contains a sensitive column reference.
  * Subqueries are treated as separate scopes and do not contribute to this
  * check. */
-static int expr_has_sensitive(const QirQuery *q, const ConnProfile *cp,
-                              const QirExpr *e) {
+static AdbxTriStatus expr_has_sensitive(const QirQuery *q,
+                                        const ConnProfile *cp,
+                                        const QirExpr *e) {
   if (!q || !cp || !e)
     return ERR;
 
@@ -906,7 +913,7 @@ static int expr_has_sensitive(const QirQuery *q, const ConnProfile *cp,
 }
 
 /* Returns YES if the expression tree contains a parameter reference. */
-static int expr_has_param(const QirExpr *e) {
+static AdbxTriStatus expr_has_param(const QirExpr *e) {
   if (!e)
     return NO;
 
@@ -1004,8 +1011,9 @@ static int expr_has_param(const QirExpr *e) {
 
 /* Validates that parameters are only used inside WHERE and only compared to
  * sensitive columns. This is enforced in Pass A to avoid data exfiltration. */
-static int validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
-                                 const QirExpr *e) {
+static AdbxTriStatus validate_params_where(ValidatorCtx *ctx,
+                                           const QirQuery *q,
+                                           const QirExpr *e) {
   if (!q || !ctx || !e)
     return ERR;
 
@@ -1115,7 +1123,8 @@ static int validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
 
 /* Pass A: validates alias requirements, function safety, and validates
  * all nested queries. This pass is mode-independent and is always required. */
-static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q) {
+static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
+                                           const QirQuery *q) {
   if (!ctx || !ctx->db || !ctx->cp || !q)
     return ERR;
 
@@ -1240,10 +1249,11 @@ static int validate_query_pass_a(ValidatorCtx *ctx, const QirQuery *q) {
 
 // PASS B START
 
-static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q);
+static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
+                                           const QirQuery *q);
 
-static int validate_expr_subqueries_pass_b(ValidatorCtx *ctx,
-                                           const QirExpr *e) {
+static AdbxTriStatus validate_expr_subqueries_pass_b(ValidatorCtx *ctx,
+                                                     const QirExpr *e) {
   return validate_expr_subqueries(ctx, e, validate_query_pass_b);
 }
 
@@ -1256,8 +1266,10 @@ static inline bool expr_is_simple_operand(const QirExpr *e) {
 /* Validates Sensitive Mode expression rules based on location.
  * Returns YES/NO/ERR and writes a human-friendly reason to ctx->err on NO.
  * Read the start of validator.c for doc. */
-static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
-                                   const QirExpr *e, SensitiveLoc loc) {
+static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
+                                             const QirQuery *main_q,
+                                             const QirExpr *e,
+                                             SensitiveLoc loc) {
   if (!ctx || !main_q || !e)
     return ERR;
 
@@ -1467,7 +1479,8 @@ static int validate_sensitive_expr(ValidatorCtx *ctx, const QirQuery *main_q,
 
 /* Pass B: enforces Sensitive Mode rules on this query and all nested queries.
  * This pass should only be executed when Sensitive Mode is enabled. */
-static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
+static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
+                                           const QirQuery *q) {
   if (!ctx || !ctx->db || !ctx->cp || !q)
     return ERR;
 
@@ -1601,7 +1614,7 @@ static int validate_query_pass_b(ValidatorCtx *ctx, const QirQuery *q) {
   return YES;
 }
 
-int vq_out_init(ValidateQueryOut *out) {
+AdbxStatus vq_out_init(ValidateQueryOut *out) {
   if (!out)
     return ERR;
 
@@ -1631,7 +1644,7 @@ void vq_out_clean(ValidateQueryOut *out) {
   out->err.code = VERR_NONE;
 }
 
-int validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
+AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
   if (!req || !out)
     return ERR;
   if (!req->db || !req->profile || !req->sql)

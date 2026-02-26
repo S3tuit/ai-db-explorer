@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "handshake_codec.h"
+#include "utils.h"
 
 /* All strings are owned by the struct and freed by restok_clean(). */
 typedef struct ResumeTokenStore {
@@ -20,7 +21,7 @@ typedef struct ResumeTokenStore {
  * Error semantics: returns YES when enabled, NO when disabled fail-safe for
  * this process, ERR on invalid input.
  */
-int restok_init(ResumeTokenStore *store);
+AdbxTriStatus restok_init(ResumeTokenStore *store);
 
 /* Loads a persisted token into 'out' if available.
  * Ownership: borrows 'store'; writes into caller-owned 'out'.
@@ -29,7 +30,8 @@ int restok_init(ResumeTokenStore *store);
  * Error semantics: returns YES when token is loaded, NO when absent/corrupted/
  * disabled, ERR on invalid input.
  */
-int restok_load(ResumeTokenStore *store, uint8_t out[ADBX_RESUME_TOKEN_LEN]);
+AdbxTriStatus restok_load(ResumeTokenStore *store,
+                          uint8_t out[ADBX_RESUME_TOKEN_LEN]);
 
 /* Stores the provided raw token bytes for this process scope.
  * Ownership: borrows 'store' and 'token'; no caller-owned allocations.
@@ -38,8 +40,8 @@ int restok_load(ResumeTokenStore *store, uint8_t out[ADBX_RESUME_TOKEN_LEN]);
  * Error semantics: returns OK on success or no-op when disabled, ERR on invalid
  * input or write failure.
  */
-int restok_store(ResumeTokenStore *store,
-                 const uint8_t token[ADBX_RESUME_TOKEN_LEN]);
+AdbxStatus restok_store(ResumeTokenStore *store,
+                        const uint8_t token[ADBX_RESUME_TOKEN_LEN]);
 
 /* Deletes the persisted token for this process scope.
  * Ownership: borrows 'store'; no caller-owned allocations.
@@ -47,7 +49,7 @@ int restok_store(ResumeTokenStore *store,
  * Error semantics: returns OK when deleted/absent/disabled, ERR on invalid
  * input or filesystem failure.
  */
-int restok_delete(ResumeTokenStore *store);
+AdbxStatus restok_delete(ResumeTokenStore *store);
 
 /* Frees any memory owned by 'store' and resets it to empty.
  * Ownership: consumes internal owned strings but not 'store' itself.

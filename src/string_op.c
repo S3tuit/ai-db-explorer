@@ -70,7 +70,7 @@ void sb_zero_clean(StrBuf *sb) {
 
 /* Makes sure 'sb' has enough space for 'add' more bytes. Returns OK on success,
  * ERR on bad input or overflow. */
-int sb_reserve(StrBuf *sb, size_t add) {
+AdbxStatus sb_reserve(StrBuf *sb, size_t add) {
   if (!sb)
     return ERR;
   if (add > STRBUF_MAX_BYTES)
@@ -105,7 +105,7 @@ int sb_reserve(StrBuf *sb, size_t add) {
   return OK;
 }
 
-int sb_append_bytes(StrBuf *sb, const void *src, size_t n) {
+AdbxStatus sb_append_bytes(StrBuf *sb, const void *src, size_t n) {
   if (!sb || (!src && n != 0))
     return ERR;
   if (n == 0)
@@ -117,7 +117,7 @@ int sb_append_bytes(StrBuf *sb, const void *src, size_t n) {
   return OK;
 }
 
-int sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst) {
+AdbxStatus sb_prepare_for_write(StrBuf *sb, size_t n, char **out_dst) {
   if (!sb || !out_dst)
     return ERR;
   *out_dst = NULL;

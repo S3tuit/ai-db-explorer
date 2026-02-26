@@ -96,7 +96,7 @@ static char *restok_build_token_path(const char *dir_path,
  * Side effects: performs stat-like filesystem metadata reads.
  * Error semantics: returns OK on strict match, ERR otherwise.
  */
-static int restok_validate_dir_policy(const char *path) {
+static AdbxStatus restok_validate_dir_policy(const char *path) {
   if (!path)
     return ERR;
 
@@ -117,7 +117,7 @@ static int restok_validate_dir_policy(const char *path) {
  * Side effects: may create directory and call chmod.
  * Error semantics: returns OK on success, ERR on create/validation failure.
  */
-static int restok_ensure_dir_policy(const char *path) {
+static AdbxStatus restok_ensure_dir_policy(const char *path) {
   if (!path)
     return ERR;
 
@@ -137,7 +137,7 @@ static int restok_ensure_dir_policy(const char *path) {
  * Side effects: none.
  * Error semantics: returns OK on strict match, ERR otherwise.
  */
-static int restok_validate_token_stat(const struct stat *st) {
+static AdbxStatus restok_validate_token_stat(const struct stat *st) {
   if (!st)
     return ERR;
   if (!S_ISREG(st->st_mode))
@@ -155,7 +155,7 @@ static int restok_validate_token_stat(const struct stat *st) {
  * Error semantics: returns OK when absent/deleted, ERR on invalid input or
  * unlink failure.
  */
-static int restok_delete_path(const char *path) {
+static AdbxStatus restok_delete_path(const char *path) {
   if (!path)
     return ERR;
   if (unlink(path) != 0 && errno != ENOENT)
@@ -163,7 +163,7 @@ static int restok_delete_path(const char *path) {
   return OK;
 }
 
-int restok_init(ResumeTokenStore *store) {
+AdbxTriStatus restok_init(ResumeTokenStore *store) {
   if (!store)
     return ERR;
 
@@ -200,7 +200,8 @@ int restok_init(ResumeTokenStore *store) {
   return YES;
 }
 
-int restok_load(ResumeTokenStore *store, uint8_t out[ADBX_RESUME_TOKEN_LEN]) {
+AdbxTriStatus restok_load(ResumeTokenStore *store,
+                          uint8_t out[ADBX_RESUME_TOKEN_LEN]) {
   if (!store || !out)
     return ERR;
   if (store->enabled != YES)
@@ -244,8 +245,8 @@ int restok_load(ResumeTokenStore *store, uint8_t out[ADBX_RESUME_TOKEN_LEN]) {
   return NO;
 }
 
-int restok_store(ResumeTokenStore *store,
-                 const uint8_t token[ADBX_RESUME_TOKEN_LEN]) {
+AdbxStatus restok_store(ResumeTokenStore *store,
+                        const uint8_t token[ADBX_RESUME_TOKEN_LEN]) {
   if (!store || !token)
     return ERR;
   if (store->enabled != YES)
@@ -280,7 +281,7 @@ int restok_store(ResumeTokenStore *store,
   return OK;
 }
 
-int restok_delete(ResumeTokenStore *store) {
+AdbxStatus restok_delete(ResumeTokenStore *store) {
   if (!store)
     return ERR;
   if (store->enabled != YES)

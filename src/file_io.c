@@ -15,7 +15,7 @@
  * Side effects: none.
  * Error semantics: returns OK on valid input, ERR otherwise.
  */
-static int fileio_validate_common(const char *path, size_t max_bytes) {
+static AdbxStatus fileio_validate_common(const char *path, size_t max_bytes) {
   if (!path)
     return ERR;
   if (max_bytes > STRBUF_MAX_BYTES || max_bytes > (size_t)SSIZE_MAX)
@@ -29,8 +29,9 @@ static int fileio_validate_common(const char *path, size_t max_bytes) {
  * Error semantics: returns OK on success, ERR on invalid input, I/O failure,
  * or strict-over-limit failure when 'require_eof' is YES.
  */
-static int fileio_sb_read_impl(const char *path, size_t max_bytes, StrBuf *out,
-                               int require_eof, ssize_t *out_nread) {
+static AdbxStatus fileio_sb_read_impl(const char *path, size_t max_bytes,
+                                      StrBuf *out, AdbxTriStatus require_eof,
+                                      ssize_t *out_nread) {
   if (!out || !out_nread || fileio_validate_common(path, max_bytes) != OK)
     return ERR;
 
@@ -41,7 +42,7 @@ static int fileio_sb_read_impl(const char *path, size_t max_bytes, StrBuf *out,
   if (fd < 0)
     return ERR;
 
-  int rc = OK;
+  AdbxStatus rc = OK;
   size_t total = 0;
   uint8_t buf[FILEIO_READ_CHUNK];
 
@@ -107,9 +108,10 @@ static int fileio_sb_read_impl(const char *path, size_t max_bytes, StrBuf *out,
  * Error semantics: returns OK on success, ERR on invalid input, I/O failure,
  * or strict-over-limit failure when 'require_eof' is YES.
  */
-static int fileio_raw_read_impl(const char *path, size_t max_bytes,
-                                uint8_t *out, int require_eof,
-                                size_t *out_nread) {
+static AdbxStatus fileio_raw_read_impl(const char *path, size_t max_bytes,
+                                       uint8_t *out,
+                                       AdbxTriStatus require_eof,
+                                       size_t *out_nread) {
   if (!out_nread || fileio_validate_common(path, max_bytes) != OK)
     return ERR;
   if (!out && max_bytes != 0)
@@ -121,7 +123,7 @@ static int fileio_raw_read_impl(const char *path, size_t max_bytes,
   if (fd < 0)
     return ERR;
 
-  int rc = OK;
+  AdbxStatus rc = OK;
   size_t total = 0;
 
   for (;;) {
@@ -174,7 +176,8 @@ static int fileio_raw_read_impl(const char *path, size_t max_bytes,
   return OK;
 }
 
-int fileio_sb_read_limit(const char *path, size_t max_bytes, StrBuf *out) {
+AdbxStatus fileio_sb_read_limit(const char *path, size_t max_bytes,
+                                StrBuf *out) {
   ssize_t nread = -1;
   if (fileio_sb_read_impl(path, max_bytes, out, YES, &nread) != OK)
     return ERR;
@@ -188,8 +191,8 @@ ssize_t fileio_sb_read_up_to(const char *path, size_t max_bytes, StrBuf *out) {
   return nread;
 }
 
-int fileio_read_limit(const char *path, size_t max_bytes, uint8_t *out,
-                      size_t *out_nread) {
+AdbxStatus fileio_read_limit(const char *path, size_t max_bytes, uint8_t *out,
+                             size_t *out_nread) {
   return fileio_raw_read_impl(path, max_bytes, out, YES, out_nread);
 }
 
@@ -200,8 +203,8 @@ ssize_t fileio_read_up_to(const char *path, size_t max_bytes, uint8_t *out) {
   return (ssize_t)nread;
 }
 
-int fileio_write_exact(const char *path, const uint8_t *src, size_t size,
-                       mode_t mode) {
+AdbxStatus fileio_write_exact(const char *path, const uint8_t *src,
+                              size_t size, mode_t mode) {
   if (!path)
     return ERR;
   if (!src && size != 0)
