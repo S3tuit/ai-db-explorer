@@ -181,6 +181,28 @@ static void test_create_tool_error(void) {
   qr_destroy(qr);
 }
 
+static void test_create_error_fmt(void) {
+  McpId id = id_u32(5);
+  QueryResult *qr = qr_create_err(&id, QRERR_INPARAM,
+                                  "Invalid token '%s' at position %u.",
+                                  "tok_bad", 3u);
+
+  ASSERT_TRUE(qr != NULL);
+  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
+  ASSERT_TRUE(qr->id.u32 == 5);
+  ASSERT_TRUE(qr->status == QR_ERROR);
+  ASSERT_TRUE(qr->err_code == QRERR_INPARAM);
+  ASSERT_STREQ(qr->err_msg, "Invalid token 'tok_bad' at position 3.");
+  qr_destroy(qr);
+
+  QueryResult *tool_qr = qr_create_tool_err(&id, "Connection '%s' is stale.",
+                                            "analytics");
+  ASSERT_TRUE(tool_qr != NULL);
+  ASSERT_TRUE(tool_qr->status == QR_TOOL_ERROR);
+  ASSERT_STREQ(tool_qr->err_msg, "Connection 'analytics' is stale.");
+  qr_destroy(tool_qr);
+}
+
 static void test_create_msg(void) {
   McpId id = id_u32(9);
   QueryResult *qr = qr_create_msg(&id, "Hello");
@@ -508,6 +530,7 @@ int main(void) {
   test_bounds_and_bad_inputs();
   test_create_error();
   test_create_tool_error();
+  test_create_error_fmt();
   test_create_msg();
   test_qb_init_input_validation();
   test_qb_init_policy_and_reset();

@@ -86,6 +86,25 @@ Token cap:
 
 * maximum 10 token parameters per query (Sensitive Mode only).
 
+### 4.4 Token lifecycle policy
+
+All the tokens get lost if the broker crashes or get closed. That happens because
+tokens are held in memory and not persisted. 
+
+Tokens are designed to be valid only within a specific scope so they can’t be
+replayed broadly.
+
+* Tokens are valid for the current **Broker session**.
+* Tokens are bound to a specific **table + column**.
+
+When the agent submits a query containing a token, the Broker verifies:
+
+1. the token belongs to the active session scope, and
+2. the token is authorized for the specific table/column context,
+then it resolves the token internally and binds the real value to the SQL parameter.
+
+Tokens are owned by the MCP Server - Broker session and follow its lifecycle.
+
 ---
 
 ## 5. SQL acceptance policy

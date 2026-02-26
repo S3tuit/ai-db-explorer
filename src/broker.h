@@ -14,14 +14,6 @@
  * commands of the clients. */
 typedef struct Broker Broker;
 
-// TODO: we should be able to accept more than 1 McpServer with just one Broker.
-// We should make the code async, and use a real connection pool.
-#define MAX_CLIENTS 1
-#define MAX_IDLE_SESSIONS (MAX_CLIENTS * 2)
-
-#define ABSOLUTE_TTL (8 * 60 * 60) // 8 hours
-#define IDLE_TTL (20 * 60)         // 20 minutes
-
 /* Run broker event loop (blocking).
  * Returns OK on clean stop, ERR on fatal error.
  *

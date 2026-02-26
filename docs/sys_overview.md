@@ -136,7 +136,7 @@ The flow is:
 token valid + not expired. If the token is expired or not valid, Broker returns
 error.
 
-The token may have an idle TTL of 20 min and absolute TTL 8h.
+The MCP Server - Broker session have an idle TTL of 20 min and absolute TTL 8h.
 
 ---
 
@@ -154,22 +154,6 @@ This lets the agent remain useful (it can still join logic and refine results)
 while preventing it from “seeing” sensitive values.
 
 A more in-depth documentation about tokens can be found at pseudonymize.md.
-
----
-
-### Token binding rules
-
-Tokens are designed to be valid only within a specific scope so they can’t be
-replayed broadly.
-
-* Tokens are valid for the current **Broker session** (more on this later).
-* Tokens are bound to a specific **table + column**.
-
-When the agent submits a query containing a token, the Broker verifies:
-
-1. the token belongs to the active session scope, and
-2. the token is authorized for the specific table/column context,
-then it resolves the token internally and binds the real value to the SQL parameter.
 
 ---
 
@@ -198,8 +182,8 @@ Once running:
 * The Broker validates and executes read-only queries.
 * If sensitive columns are involved, the Broker returns tokens instead of
 plaintext.
-* The agent can refine queries using tokens in strictly limited WHERE patterns,
-and the Broker resolves those tokens internally.
+* The agent can refine queries using tokens and the Broker resolves those tokens
+internally.
 
 This keeps the agent productive while keeping secrets and write capability out
 of the untrusted environment.

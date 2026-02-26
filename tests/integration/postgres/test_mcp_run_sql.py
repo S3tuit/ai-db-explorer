@@ -89,6 +89,36 @@ def test_run_sql_another_db():
             shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+def test_run_sql_unknown_table():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    try:
+        broker, server, privdir, runtime_dir, resp = do_full_handshake(req_id=5)
+        assert resp["jsonrpc"] == "2.0"
+
+        resp = send_tools_call(
+            server,
+            51,
+            "AnotherPostgres",
+            "SELECT g.name FROM unknown g WHERE g.noob_weight = 40",
+        )
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == 51
+        # this should be a tool error
+        assert resp["result"]["isError"] == True
+        assert resp["result"]["content"][0]["type"] == "text"
+        assert resp["result"]["content"][0]["text"] != ""
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
 def test_run_sql_unknown_db():
     broker = None
     server = None
@@ -133,7 +163,7 @@ def test_run_sql_unsafe_role():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 6
-        assert "error" in resp
+        assert resp["result"]["isError"] == True
     finally:
         stop_proc(server)
         stop_proc(broker)
@@ -208,6 +238,7 @@ def test_run_sql_sensitive():
 def main():
     test_run_sql_my_db()
     test_run_sql_another_db()
+    test_run_sql_unknown_table()
     test_run_sql_unknown_db()
     test_run_sql_unsafe_role()
     test_run_sql_sensitive()

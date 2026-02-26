@@ -275,7 +275,8 @@ def test_token_input_cross_connection_token_fails():
             [tok],
         )
         _assert_tools_call_failed(resp, "tok-cross-run")
-        assert "connection mismatch" in resp["error"]["message"]
+        assert "connection mismatch" in resp["result"]["content"][0]["text"]
+        assert resp["result"]["isError"] == True
     finally:
         stop_proc(server)
         stop_proc(broker)

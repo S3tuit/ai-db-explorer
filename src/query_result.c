@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -195,9 +196,44 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
   return qr;
 }
 
-/* Shared helper for QR_ERROR and QR_TOOL_ERROR. */
-static QueryResult *qr_create_err_impl(const McpId *id, QRStatus status,
-                                       QrErrorCode code, const char *err_msg) {
+/* Formats one error message from printf-like inputs.
+ * It borrows 'fmt' and 'args' and returns a newly allocated C string; caller
+ * owns and frees the returned pointer.
+ * Side effects: allocates heap memory.
+ * Error semantics: returns an allocated empty string when formatting fails.
+ */
+static char *qr_format_err_msg(const char *fmt, va_list args) {
+  const char *safe_fmt = fmt ? fmt : "";
+
+  va_list args_len;
+  va_copy(args_len, args);
+  int need = vsnprintf(NULL, 0, safe_fmt, args_len);
+  va_end(args_len);
+
+  if (need < 0) {
+    char *fallback = xmalloc(1);
+    fallback[0] = '\0';
+    return fallback;
+  }
+
+  size_t buf_len = (size_t)need + 1u;
+  char *msg = xmalloc(buf_len);
+  int written = vsnprintf(msg, buf_len, safe_fmt, args);
+  if (written < 0 || (size_t)written >= buf_len) {
+    msg[0] = '\0';
+  }
+  return msg;
+}
+
+/* Shared helper for QR_ERROR and QR_TOOL_ERROR.
+ * It borrows 'id' and formatting arguments, and returns a new QueryResult that
+ * owns its copied id/error message.
+ * Side effects: allocates heap memory for QueryResult internals.
+ * Error semantics: returns NULL only when id copy fails.
+ */
+static QueryResult *qr_create_err_impl_v(const McpId *id, QRStatus status,
+                                         QrErrorCode code, const char *fmt,
+                                         va_list args) {
   QueryResult *qr = xmalloc(sizeof(*qr));
 
   qr->id = (McpId){0};
@@ -210,22 +246,26 @@ static QueryResult *qr_create_err_impl(const McpId *id, QRStatus status,
   qr->status = status;
   qr->exec_ms = 0;
   qr->err_code = code;
-
-  const char *err = err_msg ? err_msg : "";
-  size_t len = strlen(err) + 1; // null term
-  qr->err_msg = xmalloc(len);
-  memcpy(qr->err_msg, err, len);
+  qr->err_msg = qr_format_err_msg(fmt, args);
 
   return qr;
 }
 
 QueryResult *qr_create_err(const McpId *id, QrErrorCode code,
-                           const char *err_msg) {
-  return qr_create_err_impl(id, QR_ERROR, code, err_msg);
+                           const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  QueryResult *qr = qr_create_err_impl_v(id, QR_ERROR, code, fmt, args);
+  va_end(args);
+  return qr;
 }
 
-QueryResult *qr_create_tool_err(const McpId *id, const char *err_msg) {
-  return qr_create_err_impl(id, QR_TOOL_ERROR, 0, err_msg);
+QueryResult *qr_create_tool_err(const McpId *id, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  QueryResult *qr = qr_create_err_impl_v(id, QR_TOOL_ERROR, 0, fmt, args);
+  va_end(args);
+  return qr;
 }
 
 QueryResult *qr_create_msg(const McpId *id, const char *msg) {

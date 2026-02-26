@@ -44,6 +44,14 @@
 #define REQUEST_READ_TIMEOUT_SEC 3
 #endif
 
+// TODO: we should be able to accept more than 1 McpServer with just one Broker.
+// We should make the code async, and use a real connection pool.
+#define MAX_CLIENTS 1
+#define MAX_IDLE_SESSIONS (MAX_CLIENTS * 2)
+
+#define ABSOLUTE_TTL (8 * 60 * 60) // 8 hours
+#define IDLE_TTL (20 * 60)         // 20 minutes
+
 struct Broker {
   int listen_fd;   // file descriptor of the socket used to
                    // accept incoming connection requets
@@ -652,7 +660,10 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
       jsget_string_decode_alloc(jg, "params.arguments.query", &query) != YES) {
     free(conn_name);
     free(query);
-    *out_query = qr_create_err(id, QRERR_INPARAM, "Invalid tool arguments.");
+    *out_query =
+        qr_create_err(id, QRERR_INPARAM,
+                      "Invalid run_sql_query arguments: expected string fields "
+                      "'connectionName' and 'query'.");
     goto free_n_return;
   }
 
@@ -660,13 +671,14 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
   ConnView cv = {0};
   AdbxTriStatus rc = connm_get_connection(b->cm, conn_name, &cv);
   if (rc == NO) {
-    *out_query =
-        qr_create_tool_err(id, "Unable to find the requested connectionName");
+    *out_query = qr_create_err(id, QRERR_RESOURCE,
+                               "Unknown connectionName '%s'.", conn_name);
+    goto free_n_return;
   }
   if (rc != YES || !cv.db || !cv.profile) {
     TLOG("ERROR - unable to connect to %s", conn_name);
-    *out_query = qr_create_err(id, QRERR_RESOURCE,
-                               "Unable to connect to the requested database.");
+    *out_query = qr_create_tool_err(
+        id, "Unable to connect to connectionName '%s'.", conn_name);
     goto free_n_return;
   }
 
@@ -674,14 +686,15 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
   if (broker_get_or_init_store(sess, cv.profile, &store) != OK || !store) {
     TLOG("ERROR - failed to initialize session token store for %s", conn_name);
     *out_query = qr_create_tool_err(
-        id, "Internal error while preparing sensitive token storage.");
+        id, "Internal error while preparing sensitive token storage for '%s'.",
+        conn_name);
     goto free_n_return;
   }
 
   ValidateQueryOut vout = {0};
   if (vq_out_init(&vout) != OK) {
     *out_query = qr_create_tool_err(
-        id, "Internal error while preparing query validation.");
+        id, "Internal error while preparing run_sql_query validation.");
     goto free_n_return;
   }
   ValidatorRequest vreq = {
@@ -697,7 +710,8 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
       err_desc = "Unknown error while validating the query. Please make sure "
                  "the query is valid and formatted correctly.";
     }
-    *out_query = qr_create_tool_err(id, err_desc);
+    *out_query =
+        qr_create_tool_err(id, "Query validation failed: %s", err_desc);
     vq_out_clean(&vout);
     goto free_n_return;
   }
@@ -712,7 +726,7 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
     vq_out_clean(&vout);
     TLOG("ERROR - error while communicating with %s", conn_name);
     *out_query = qr_create_tool_err(
-        id, "Something went wrong while communicating with the database.");
+        id, "Database execution failed on connectionName '%s'.", conn_name);
     goto free_n_return;
   }
   // db_exec leaves the id zeroed; stamp it with the request id
@@ -759,26 +773,31 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
       jsget_string_decode_alloc(jg, "params.arguments.query", &query) != YES) {
     free(conn_name);
     free(query);
-    *out_query = qr_create_err(id, QRERR_INPARAM, "Invalid tool arguments.");
+    *out_query = qr_create_err(
+        id, QRERR_INPARAM,
+        "Invalid run_sql_query_tokens arguments: expected string fields "
+        "'connectionName' and 'query'.");
     return;
   }
 
   ConnView cv = {0};
   AdbxTriStatus rc = connm_get_connection(b->cm, conn_name, &cv);
   if (rc == NO) {
-    *out_query =
-        qr_create_tool_err(id, "Unable to find the requested connectionName");
+    *out_query = qr_create_err(id, QRERR_RESOURCE,
+                               "Unknown connectionName '%s'.", conn_name);
+    goto free_n_return;
   }
   if (rc != YES || !cv.db || !cv.profile) {
-    *out_query = qr_create_err(id, QRERR_RESOURCE,
-                               "Unable to connect to the requested database.");
+    *out_query = qr_create_tool_err(
+        id, "Unable to connect to connectionName '%s'.", conn_name);
     goto free_n_return;
   }
 
   DbTokenStore *store = NULL;
   if (broker_get_or_init_store(sess, cv.profile, &store) != OK || !store) {
     *out_query = qr_create_tool_err(
-        id, "Internal error while preparing sensitive token storage.");
+        id, "Internal error while preparing sensitive token storage for '%s'.",
+        conn_name);
     goto free_n_return;
   }
 
@@ -787,12 +806,16 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
       jsget_array_strings_begin(jg, "params.arguments.parameters", &it);
   if (arc != YES) {
     *out_query =
-        qr_create_err(id, QRERR_INPARAM, "Missing arguments.parameters array.");
+        qr_create_err(id, QRERR_INPARAM,
+                      "Invalid run_sql_query_tokens arguments: missing "
+                      "'params.arguments.parameters' array.");
     goto free_n_return;
   }
   if (it.count <= 0 || (uint32_t)it.count > MAX_TOKEN_PARAMS) {
-    *out_query = qr_create_err(id, QRERR_INPARAM,
-                               "Token parameters must contain 1..10 entries.");
+    *out_query = qr_create_err(
+        id, QRERR_INPARAM,
+        "Invalid token parameter count %d: expected 1..%u entries.", it.count,
+        MAX_TOKEN_PARAMS);
     goto free_n_return;
   }
 
@@ -808,55 +831,66 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     if (nrc == NO)
       break;
     if (nrc != YES) {
-      *out_query =
-          qr_create_err(id, QRERR_INPARAM, "Invalid token parameter entry.");
+      *out_query = qr_create_err(
+          id, QRERR_INPARAM,
+          "Invalid token parameter at index %d: expected a JSON string.",
+          it.idx);
       goto free_n_return;
     }
 
     char *tok = NULL;
     AdbxTriStatus drc = json_span_decode_alloc(&sp, &tok);
     if (drc != YES || !tok) {
+      *out_query = qr_create_err(
+          id, QRERR_INPARAM,
+          "Invalid token parameter at index %d: malformed JSON string value.",
+          it.idx - 1);
       free(tok);
-      *out_query =
-          qr_create_err(id, QRERR_INPARAM, "Invalid token parameter entry.");
       goto free_n_return;
     }
 
     ParsedTokView parsed = {0};
     if (stok_parse_view_inplace(tok, &parsed) != OK) {
+      *out_query = qr_create_tool_err(id,
+                                      "Invalid token format '%s'. Expected "
+                                      "tok_<connection>_<generation>_<index>.",
+                                      tok);
       free(tok);
-      // TODO: log the wrong formatted token
-      *out_query =
-          qr_create_tool_err(id, "Invalid token format. Expected "
-                                 "tok_<connection>_<generation>_<index>.");
       goto free_n_return;
     }
 
     if (strcmp(parsed.connection_name, conn_name) != 0) {
+      *out_query = qr_create_tool_err(
+          id,
+          "Token connection mismatch: token is bound to '%s' but "
+          "request connectionName is '%s'.",
+          parsed.connection_name, conn_name);
       free(tok);
-      *out_query =
-          qr_create_tool_err(id, "Token connection mismatch; it was generated "
-                                 "from a different connection.");
       goto free_n_return;
     }
     if (parsed.generation != sess->generation) {
-      free(tok);
       *out_query = qr_create_tool_err(
-          id, "Stale token generation. Please run a fresh sensitive query.");
+          id,
+          "Stale token generation: token=%u current=%u. Run a fresh "
+          "sensitive query first.",
+          parsed.generation, sess->generation);
+      free(tok);
       goto free_n_return;
     }
 
     const SensitiveTok *bound = stok_store_get(store, parsed.index);
     if (!bound) {
+      *out_query = qr_create_tool_err(
+          id, "Unknown token index %u for this session.", parsed.index);
       free(tok);
-      *out_query = qr_create_tool_err(id, "Unknown token index.");
       goto free_n_return;
     }
 
     if (nparams >= MAX_TOKEN_PARAMS) {
-      free(tok);
       *out_query = qr_create_tool_err(
-          id, "Token parameters must contain 1..10 entries.");
+          id, "Token parameters exceed maximum supported entries (%u).",
+          MAX_TOKEN_PARAMS);
+      free(tok);
       goto free_n_return;
     }
     vparams[nparams++] = *bound;
@@ -868,7 +902,7 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   ValidateQueryOut vout = {0};
   if (vq_out_init(&vout) != OK) {
     *out_query = qr_create_tool_err(
-        id, "Internal error while preparing query validation.");
+        id, "Internal error while preparing run_sql_query_tokens validation.");
     goto free_n_return;
   }
   ValidatorRequest vreq = {
@@ -884,7 +918,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
       err_desc = "Unknown error while validating the query. Please make sure "
                  "the query is valid and formatted correctly.";
     }
-    *out_query = qr_create_tool_err(id, err_desc);
+    *out_query =
+        qr_create_tool_err(id, "Query validation failed: %s", err_desc);
     vq_out_clean(&vout);
     goto free_n_return;
   }
@@ -914,7 +949,7 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     TLOG("ERROR - bound execution failed while communicating with %s",
          conn_name);
     *out_query = qr_create_tool_err(
-        id, "Something went wrong while communicating with the database.");
+        id, "Database execution failed on connectionName '%s'.", conn_name);
     goto free_n_return;
   }
   // db_exec_bound leaves the id zeroed; stamp it with the request id
@@ -970,26 +1005,32 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
 
   AdbxTriStatus vrc = jsget_simple_rpc_validation(&jg);
   if (vrc != YES) {
-    *out_res = qr_create_err(&id, QRERR_INREQ, "Invalid JSON-RPC request.");
+    *out_res = qr_create_err(
+        &id, QRERR_INREQ,
+        "Invalid JSON-RPC request: expected 'jsonrpc':'2.0' with valid "
+        "'id', 'method', and 'params'.");
     goto return_res;
   }
   // exec command
   JsonStrSpan method_sp = {0};
   if (jsget_string_span(&jg, "method", &method_sp) != YES) {
     *out_res =
-        qr_create_err(&id, QRERR_INREQ, "Can't find the 'method' object.");
+        qr_create_err(&id, QRERR_INREQ, "Missing required field 'method'.");
     goto return_res;
   }
 
   if (!STREQ(method_sp.ptr, method_sp.len, "tools/call")) {
-    *out_res = qr_create_err(&id, QRERR_INMETHOD, "Tool not supported.");
+    *out_res = qr_create_err(
+        &id, QRERR_INMETHOD,
+        "Unsupported RPC method '%.*s'; only 'tools/call' is supported.",
+        (int)method_sp.len, method_sp.ptr);
     goto return_res;
   }
 
   JsonStrSpan name_sp = {0};
   if (jsget_string_span(&jg, "params.name", &name_sp) != YES) {
-    *out_res =
-        qr_create_err(&id, QRERR_INPARAM, "Tool call missing params.name.");
+    *out_res = qr_create_err(&id, QRERR_INPARAM,
+                             "Tool call is missing 'params.name'.");
     goto return_res;
   }
 
@@ -1008,7 +1049,8 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
 
     // Unknown tools
   } else {
-    *out_res = qr_create_err(&id, QRERR_INMETHOD, "Unknown tool.");
+    *out_res = qr_create_err(&id, QRERR_INMETHOD, "Unknown tool '%.*s'.",
+                             (int)name_sp.len, name_sp.ptr);
   }
 
 return_res:
@@ -1404,12 +1446,12 @@ AdbxStatus broker_run(Broker *b) {
         if (req.len > MAX_REQ_LEN) {
           char buf[128];
           snprintf(buf, sizeof(buf),
-                   "Error. Broker ignores message longer than %d bytes. "
-                   "Please, respect the limit",
-                   MAX_REQ_LEN);
+                   "Request too large: received %zu bytes; maximum allowed is "
+                   "%d bytes.",
+                   req.len, MAX_REQ_LEN);
           McpId id = {0};
           mcp_id_init_u32(&id, 0);
-          q_res = qr_create_err(&id, QRERR_INREQ, buf);
+          q_res = qr_create_err(&id, QRERR_INREQ, "%s", buf);
           goto send_q_res;
         }
 

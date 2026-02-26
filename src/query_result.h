@@ -136,14 +136,16 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
                           uint8_t result_truncated, uint64_t max_query_bytes);
 
 /* Creates a QueryResult that represents a protocol error (JSON-RPC error).
+ * 'fmt' uses printf-style formatting; when NULL an empty message is used.
  * If 'id' is NULL, the id field is zeroed. Returns NULL on failure. */
 QueryResult *qr_create_err(const McpId *id, QrErrorCode code,
-                           const char *err_msg);
+                           const char *fmt, ...);
 
 /* Creates a QueryResult that represents a tool execution error.
+ * 'fmt' uses printf-style formatting; when NULL an empty message is used.
  * Serialized as a successful JSON-RPC result with isError=true.
  * If 'id' is NULL, the id field is zeroed. Returns NULL on failure. */
-QueryResult *qr_create_tool_err(const McpId *id, const char *err_msg);
+QueryResult *qr_create_tool_err(const McpId *id, const char *fmt, ...);
 
 /* Creates a QueryResult with a single text column named "message" and one row.
  * If 'id' is NULL, the id field is zeroed. If msg is NULL, stores an empty

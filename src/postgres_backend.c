@@ -91,7 +91,7 @@ static char *pg_parse_alias_name(const JsonGetter *alias_obj, Arena *a) {
  * Side effects: allocates memory.
  * Returns YES/NO/ERR. */
 static AdbxTriStatus pg_get_string_field(const JsonGetter *jg, const char *k1,
-                               const char *k2, char **out) {
+                                         const char *k2, char **out) {
   int rc = jsget_string_decode_alloc(jg, k1, out);
   if (rc == YES || rc == ERR)
     return rc;
@@ -345,8 +345,8 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, Arena *a, QirQuery *q);
  * Ownership: all arrays are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED for unsupported shapes.
  * Returns OK/ERR on allocation failure. */
-static AdbxStatus pg_parse_window_def(const JsonGetter *wg, Arena *a, QirQuery *q,
-                               QirWindowFunc *wf) {
+static AdbxStatus pg_parse_window_def(const JsonGetter *wg, Arena *a,
+                                      QirQuery *q, QirWindowFunc *wf) {
   if (!wg || !a || !q || !wf)
     return ERR;
 
@@ -1064,7 +1064,8 @@ fail:
  * Ownership: type names are arena-owned.
  * Side effects: allocates arena memory.
  * Returns OK on success, ERR on parse/allocation failure. */
-static AdbxStatus pg_parse_typename(const JsonGetter *jg, Arena *a, QirTypeRef *out) {
+static AdbxStatus pg_parse_typename(const JsonGetter *jg, Arena *a,
+                                    QirTypeRef *out) {
   if (!jg || !a || !out)
     return ERR;
 
@@ -1166,7 +1167,8 @@ static AdbxStatus pg_parse_typename(const JsonGetter *jg, Arena *a, QirTypeRef *
  * Ownership: all nodes/arrays are arena-owned.
  * Side effects: may set query flags.
  * Returns OK/ERR on allocation failure. */
-static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q);
+static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
+                                       QirQuery *q);
 
 /* Parses an expression node into a QirExpr.
  * Ownership: returned expression is arena-owned.
@@ -1368,7 +1370,8 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, Arena *a) {
  * Side effects: allocates arena memory.
  * Returns OK/ERR. */
 static AdbxStatus pg_parse_alias_colnames(const JsonGetter *alias_obj, Arena *a,
-                                   QirIdent **out_cols, uint32_t *out_ncols) {
+                                          QirIdent **out_cols,
+                                          uint32_t *out_ncols) {
   if (!alias_obj || !a || !out_cols || !out_ncols)
     return ERR;
   *out_cols = NULL;
@@ -1468,15 +1471,16 @@ static void pg_resolve_cte_refs_in_query(const QirQuery *q) {
  * Ownership: from/joins vectors own their temporary buffers.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
-                              PtrVec *froms, PtrVec *joins);
+static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a,
+                                     QirQuery *q, PtrVec *froms, PtrVec *joins);
 
 /* Parses a join expression into from-items and joins (left-deep).
  * Ownership: join nodes are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static AdbxStatus pg_parse_join_expr(const JsonGetter *jg, Arena *a, QirQuery *q,
-                              PtrVec *froms, PtrVec *joins) {
+static AdbxStatus pg_parse_join_expr(const JsonGetter *jg, Arena *a,
+                                     QirQuery *q, PtrVec *froms,
+                                     PtrVec *joins) {
   // left
   JsonGetter ljg = {0};
   if (jsget_object(jg, "larg", &ljg) != YES)
@@ -1610,8 +1614,9 @@ static AdbxStatus pg_parse_join_expr(const JsonGetter *jg, Arena *a, QirQuery *q
  * Ownership: from/join nodes are arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
  * Returns OK/ERR. */
-static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q,
-                              PtrVec *froms, PtrVec *joins) {
+static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a,
+                                     QirQuery *q, PtrVec *froms,
+                                     PtrVec *joins) {
   if (!jg || !a || !q)
     return ERR;
 
@@ -1686,7 +1691,8 @@ static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a, QirQuery *q
  * Ownership: all nodes/arrays are arena-owned.
  * Side effects: sets query flags and fills lists.
  * Returns OK/ERR on allocation failure. */
-static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery *q) {
+static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
+                                       QirQuery *q) {
   if (!jg || !a || !q)
     return ERR;
 
@@ -1939,7 +1945,7 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a, QirQuery 
  * Returns OK on success (including parse/unsupported), ERR on allocation
  * failure. */
 static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
-                            QirQueryHandle *out) {
+                                   QirQueryHandle *out) {
   (void)db;
   if (!sql || !out)
     return ERR;
@@ -2116,7 +2122,7 @@ static AdbxStatus pg_apply_policy(PgImpl *p) {
  * is just one. If there are more results it doesn't store anything and returns
  * ERR (single statement policy). */
 static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
-                                 PGresult **out_res) {
+                                        PGresult **out_res) {
   if (!p || !p->conn || !sql || !out_res)
     return ERR;
   assert(p);
@@ -2176,8 +2182,9 @@ static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
  * input/libpq failure/multiple results.
  */
 static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
-                                       const DbExecParam *params,
-                                       uint32_t nparams, PGresult **out_res) {
+                                              const DbExecParam *params,
+                                              uint32_t nparams,
+                                              PGresult **out_res) {
   assert(p);
   assert(p->conn);
   assert(sql);
@@ -2316,7 +2323,7 @@ done:
 /* --------------------------- DbBackend vtable --------------------------- */
 
 static AdbxStatus pg_connect(DbBackend *db, const ConnProfile *profile,
-                      const SafetyPolicy *policy, const char *pwd) {
+                             const SafetyPolicy *policy, const char *pwd) {
   if (!db || !db->impl || !profile || !policy)
     return ERR;
   PgImpl *p = (PgImpl *)db->impl;
@@ -2407,9 +2414,9 @@ static void pg_destroy(DbBackend *db) {
  * catastrophic allocation/input failures.
  */
 static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
-                        const DbExecParam *params, uint32_t nparams,
-                        const QueryResultBuildPolicy *qb_policy,
-                        QueryResult **out_qr) {
+                               const DbExecParam *params, uint32_t nparams,
+                               const QueryResultBuildPolicy *qb_policy,
+                               QueryResult **out_qr) {
 
   const char *err_msg;
   QueryResult *qr = NULL;
@@ -2597,20 +2604,25 @@ fail:
     qr_destroy(qr);
 fail_bad_input:
   // if bad input, we can't rely on the buffer for the error of PgImpl
-  *out_qr = qr_create_tool_err(NULL, err_msg);
+  const char *safe_msg =
+      (err_msg && err_msg[0] != '\0') ? err_msg : "Unknown backend error.";
+  // TODO: relying on the internal state of the entity to log the error is bad,
+  // we should use a sort of context.
+  *out_qr = qr_create_tool_err(NULL, "PostgreSQL execution failed: %s",
+                               safe_msg);
   return (*out_qr ? OK : ERR);
 }
 
 static AdbxStatus pg_exec(DbBackend *db, const char *sql,
-                   const QueryResultBuildPolicy *qb_policy,
-                   QueryResult **out_qr) {
+                          const QueryResultBuildPolicy *qb_policy,
+                          QueryResult **out_qr) {
   return pg_exec_impl(db, sql, NULL, 0, qb_policy, out_qr);
 }
 
 static AdbxStatus pg_exec_bound(DbBackend *db, const char *sql,
-                         const DbExecParam *params, uint32_t nparams,
-                         const QueryResultBuildPolicy *qb_policy,
-                         QueryResult **out_qr) {
+                                const DbExecParam *params, uint32_t nparams,
+                                const QueryResultBuildPolicy *qb_policy,
+                                QueryResult **out_qr) {
   return pg_exec_impl(db, sql, params, nparams, qb_policy, out_qr);
 }
 
