@@ -41,5 +41,12 @@ services:
       PGDATABASE: my_db
       PGUSER: my_user
       PGPASSWORD: my_secret
+      XDG_CONFIG_HOME: /tmp/adbx-config
+    # We copy the config.json inside the XDG_CONFIG_HOME, that's where the broker expects it to be.
     # PIE_LDFLAGS needed for Debian’s default PIE toolchain
-    command: ["sh", "-lc", "make clean && make PIE_LDFLAGS=-no-pie -j4 test-postgres"]
+    command:
+      [
+        "sh",
+        "-lc",
+        "set -e; cfg=\"$$XDG_CONFIG_HOME/ai-dbexplorer/config.json\"; mkdir -p \"$$XDG_CONFIG_HOME/ai-dbexplorer\"; cp tests/integration/postgres/config.json \"$$cfg\"; make clean && make PIE_LDFLAGS=-no-pie -j4 test-postgres",
+      ]

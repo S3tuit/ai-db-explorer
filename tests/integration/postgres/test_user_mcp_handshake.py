@@ -76,18 +76,23 @@ def read_frame(proc):
     return payload
 
 
-def start_broker(privdir=DEFAULT_PRIVDIR, env=None):
+def start_broker(privdir=DEFAULT_PRIVDIR, env=None, config_path=None):
     sock = broker_sock_path(privdir)
     if os.path.exists(sock):
         os.unlink(sock)
 
+    cmd = [BIN, "-broker", "-privdir", privdir]
+    if config_path:
+        cmd.extend(["-config", config_path])
+    proc_env = merge_env(env)
+
     proc = subprocess.Popen(
-        [BIN, "-broker", "-privdir", privdir, "-config", CONFIG],
+        cmd,
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         # Forward broker logs to the test runner so failures aren't silent.
         stderr=None,
-        env=merge_env(env),
+        env=proc_env,
     )
 
     for _ in range(50):

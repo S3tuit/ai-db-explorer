@@ -96,9 +96,8 @@ typedef struct {
 } JsonStrSpan;
 
 /* Initializes JsonGetter by tokenizing the entire JSON text into caller-owned
- * fixed token storage.
- * It borrows 'json' and 'tok_buf'; no allocations are performed.
- * Requirements:
+ * fixed token storage. Use this for short json strings. It borrows 'json' and
+ * 'tok_buf'. 'jg' is caller owned and stack-allocated. Requirements:
  *  - json is not required to be NUL-terminated; use json_len.
  *  - root must be a JSON object.
  *  - token buffer is capped to JSON_GETTER_MAX_TOKENS.

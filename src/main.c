@@ -1,4 +1,5 @@
 #include "broker.h"
+#include "config_dir.h"
 #include "conn_catalog.h"
 #include "log.h"
 #include "mcp_server.h"
@@ -7,8 +8,8 @@
 #include "utils.h"
 
 #include <signal.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void print_usage(const char *prog) {
@@ -24,7 +25,7 @@ int main(int argc, char **argv) {
   // process. This makes test failures observable via error handling/logging.
   (void)signal(SIGPIPE, SIG_IGN);
   const char *privdir_base = NULL;
-  const char *config_path = "template-config.json";
+  const char *config_input = NULL;
   int run_client = 1;
 
   for (int i = 1; i < argc; i++) {
@@ -43,7 +44,7 @@ int main(int argc, char **argv) {
         print_usage(argv[0]);
         return 1;
       }
-      config_path = argv[++i];
+      config_input = argv[++i];
     } else {
       print_usage(argv[0]);
       return 1;
@@ -103,8 +104,20 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  char *config_path = NULL;
+  char *config_path_err = NULL;
+  if (confdir_resolve(config_input, &config_path, &config_path_err) != OK) {
+    fprintf(stderr, "ERROR: config path setup failed: %s\n",
+            config_path_err ? config_path_err : "unknown error");
+    free(config_path_err);
+    privdir_cleanup(pd);
+    privdir_free(pd);
+    return 1;
+  }
+
   char *cat_err = NULL;
   ConnCatalog *cat = catalog_load_from_file(config_path, &cat_err);
+  free(config_path);
   if (!cat) {
     fprintf(stderr, "ERROR: catalog init failed: %s\n",
             cat_err ? cat_err : "unknown error");

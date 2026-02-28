@@ -83,7 +83,7 @@ typedef struct ConnCatalog {
 // Creates a catalog from a config file path.
 // Catalog owns all memory referenced by returned ConnProfile pointers.
 // On failure: returns NULL and sets *err_out to an allocated message that the
-// caller must free(3). On success, *err_out is set to NULL.
+// caller must free(). On success, *err_out is set to NULL.
 ConnCatalog *catalog_load_from_file(const char *path, char **err_out);
 
 // Free catalog and all owned memory.
