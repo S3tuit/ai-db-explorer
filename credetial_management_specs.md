@@ -17,8 +17,8 @@ typedef struct SecretStore SecretStore;
 typedef struct SecretStoreVTable SecretStoreVTable;
 
 struct SecretStoreVTable {
-    /// Writes a NUL-terminated secret into `out`. Returns OK or ERR.
-    AdbxStatus (*get)(SecretStore *store, const char *ref, StrBuf *out);
+    /// Writes a NUL-terminated secret into `out`. If 'ref' not present inside 'store', returns NO.
+    AdbxTriStatus (*get)(SecretStore *store, const char *ref, StrBuf *out);
 
     /// Stores a NUL-terminated secret. Returns OK or ERR.
     AdbxStatus (*set)(SecretStore *store, const char *ref, const char *secret);

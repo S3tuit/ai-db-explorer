@@ -8,7 +8,7 @@ import time
 
 # root is not '/', but is the root of our repo copied inside the docker
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BIN = os.path.join(ROOT, "build", "ai-db-explorer-asan")
+BIN = os.path.join(ROOT, "build", "adbxplorer-asan")
 DEFAULT_PRIVDIR = os.path.join(ROOT, "build", "privdir")
 CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -152,7 +152,7 @@ def test_handshake_ok():
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
         assert "tools" in resp["result"]["capabilities"]
         assert "resources" in resp["result"]["capabilities"]
-        assert resp["result"]["serverInfo"]["name"] == "ai-db-explorer"
+        assert resp["result"]["serverInfo"]["name"] == "adbxplorer"
         assert resp["result"]["serverInfo"]["version"] == "0.0.1"
 
         # Double initialize should fail.

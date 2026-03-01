@@ -52,7 +52,7 @@ static void cleanup_runtime_dir(const char *tmpdir, ResumeTokenStore *store) {
     return;
 
   char p[512];
-  snprintf(p, sizeof(p), "%s/ai-dbexplorer-mcp", tmpdir);
+  snprintf(p, sizeof(p), "%s/adbxplorer-mcp", tmpdir);
   (void)rmdir(p);
   (void)rmdir(tmpdir);
 }

@@ -63,7 +63,7 @@ static void test_default_config_from_xdg(void) {
   ASSERT_TRUE(path != NULL);
 
   char expected[512];
-  snprintf(expected, sizeof(expected), "%s/ai-dbexplorer/config.json", tmpdir);
+  snprintf(expected, sizeof(expected), "%s/adbxplorer/config.json", tmpdir);
   ASSERT_TRUE(strcmp(path, expected) == 0);
 
   struct stat st = {0};
@@ -99,10 +99,10 @@ static void test_default_config_from_home_fallback(void) {
 #ifdef __APPLE__
   char expected[512];
   snprintf(expected, sizeof(expected),
-           "%s/Library/Application Support/ai-dbexplorer/config.json", tmpdir);
+           "%s/Library/Application Support/adbxplorer/config.json", tmpdir);
 #else
   char expected[512];
-  snprintf(expected, sizeof(expected), "%s/.config/ai-dbexplorer/config.json",
+  snprintf(expected, sizeof(expected), "%s/.config/adbxplorer/config.json",
            tmpdir);
 #endif
   ASSERT_TRUE(strcmp(path, expected) == 0);

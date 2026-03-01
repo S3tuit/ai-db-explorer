@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define CFG_APPNAME "ai-dbexplorer"
+#define CFG_APPNAME "adbxplorer"
 #define CFG_FILENAME "config.json"
 
 static const char CFG_DEFAULT_JSON[] =

@@ -9,10 +9,10 @@
  * Behavior:
  * - If 'input_path' is non-NULL and non-empty, that path is used.
  * - Otherwise the default path is used:
- *   - $XDG_CONFIG_HOME/ai-dbexplorer/config.json when XDG_CONFIG_HOME is set.
- *   - Linux fallback: $HOME/.config/ai-dbexplorer/config.json
+ *   - $XDG_CONFIG_HOME/adbxplorer/config.json when XDG_CONFIG_HOME is set.
+ *   - Linux fallback: $HOME/.config/adbxplorer/config.json
  *   - macOS fallback: $HOME/Library/Application
- * Support/ai-dbexplorer/config.json
+ * Support/adbxplorer/config.json
  *
  * If the file does not exist, a built-in default config is created.
  *

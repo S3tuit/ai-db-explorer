@@ -1,4 +1,4 @@
-# ai-db-explorer v1 Sensitive Columns: Security & Execution Contract
+# adbxplorer v1 Sensitive Columns: Security & Execution Contract
 
 ## 1. Terminology
 

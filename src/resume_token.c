@@ -14,7 +14,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define RESTOK_DIR_NAME "ai-dbexplorer-mcp"
+#define RESTOK_DIR_NAME "adbxplorer-mcp"
 
 /* Logs and marks resume persistence as disabled for this process.
  * Ownership: borrows 'store' and 'reason'; no allocations.

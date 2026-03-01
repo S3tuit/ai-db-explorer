@@ -9,8 +9,8 @@
 /* All strings are owned by the struct and freed by restok_clean(). */
 typedef struct ResumeTokenStore {
   int enabled;      /* YES when persistence is active, NO when fail-disabled. */
-  char *dir_path;   /* e.g. /run/user/1000/ai-dbexplorer-mcp */
-  char *token_path; /* e.g. /run/user/1000/ai-dbexplorer-mcp/token-<pid>-<ts> */
+  char *dir_path;   /* e.g. /run/user/1000/adbxplorer-mcp */
+  char *token_path; /* e.g. /run/user/1000/adbxplorer-mcp/token-<pid>-<ts> */
 } ResumeTokenStore;
 
 /* Initializes process-scoped resume-token persistence.

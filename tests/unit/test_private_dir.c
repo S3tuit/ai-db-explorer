@@ -55,7 +55,7 @@ static void test_resolve_with_env_var(void) {
   PrivDir *pd = privdir_resolve(NULL);
   ASSERT_TRUE(pd != NULL);
 
-  /* base should end with /ai-dbexplorer/ */
+  /* base should end with /adbxplorer/ */
   size_t base_len = strlen(pd->base);
   const char *suffix = "/" PRIVDIR_APPNAME "/";
   size_t suffix_len = strlen(suffix);
@@ -97,7 +97,7 @@ static void test_resolve_fallback(void) {
   PrivDir *pd = privdir_resolve(NULL);
   ASSERT_TRUE(pd != NULL);
 
-  /* base should match /tmp/ai-dbexplorer-<uid>/ */
+  /* base should match /tmp/adbxplorer-<uid>/ */
   char expected[128];
   snprintf(expected, sizeof(expected), "/tmp/%s-%u/", PRIVDIR_APPNAME,
            (unsigned)getuid());

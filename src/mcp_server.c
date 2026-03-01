@@ -234,7 +234,8 @@ static AdbxStatus mcpser_connect_and_handshake_broker(McpServer *s) {
       return OK;
     }
 
-    // Broker closes on handshake errors; mirror state locally before retry/fail.
+    // Broker closes on handshake errors; mirror state locally before
+    // retry/fail.
     (void)mcpser_invalidate_broker(s);
 
     if (have_resume == YES && (resp.status == HS_ERR_TOKEN_EXPIRED ||
@@ -483,7 +484,7 @@ static AdbxStatus mcpser_user_initialize_handshake(McpServer *s) {
     goto fail;
   if (json_kv_obj_begin(&sb, "serverInfo") != OK)
     goto fail;
-  if (json_kv_str(&sb, "name", "ai-db-explorer") != OK)
+  if (json_kv_str(&sb, "name", "adbxplorer") != OK)
     goto fail;
   if (json_kv_str(&sb, "version", "0.0.1") != OK)
     goto fail;

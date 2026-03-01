@@ -1,6 +1,6 @@
 # AGENTS Guidelines for This Repository
 
-This repository contains a C application named **ai-db-explorer**.
+This repository contains a C application named **adbxplorer**.
 An overview of the architecture can be found at `./docs/sys_overview.md`.
 
 Agents working on this repository **must** read this file in full before making

@@ -34,8 +34,8 @@ APP_SRC  := $(filter-out $(APP_MAIN),$(wildcard src/*.c))
 
 # App bin
 APP_OBJ := $(APP_SRC:src/%.c=build/%.o) build/main.o
-BIN := build/ai-db-explorer
-ASAN_BIN := build/ai-db-explorer-asan
+BIN := build/adbxplorer
+ASAN_BIN := build/adbxplorer-asan
 PG_DUMP_AST_BIN := build/pg_dump_ast
 PG_DUMP_AST_SRC := py_utils/pg_dump_ast.c
 
@@ -163,7 +163,7 @@ test-postgres: clean-testobj $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
 # We use a symlink so the integration tests always run the ASAN binary.
 # We use set -e so failures in .py tests stop the target.
 	@set -e; \
-	ln -sf ai-db-explorer-asan build/ai-db-explorer; \
+	ln -sf adbxplorer-asan build/adbxplorer; \
 	for t in $(INTEGRATION_TEST_BINS); do \
 	  echo "==> $$t"; \
 	  ASAN_OPTIONS=$(ASAN_RUN_OPTS) $$t; \

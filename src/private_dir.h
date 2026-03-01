@@ -7,18 +7,18 @@
 #include "handshake_codec.h"
 #include "utils.h"
 
-#define PRIVDIR_APPNAME "ai-dbexplorer"
+#define PRIVDIR_APPNAME "adbxplorer"
 #define PRIVDIR_SOCK_FILENAME "broker.sock"
 #define PRIVDIR_TOKEN_FILENAME "token"
 #define PRIVDIR_TOKEN_LEN ADBX_SHARED_TOKEN_LEN
 
 /* All strings are owned by the struct and freed by privdir_free(). */
 typedef struct PrivDir {
-  char *base;       /* e.g. /run/user/1000/ai-dbexplorer/          */
-  char *run_dir;    /* e.g. /run/user/1000/ai-dbexplorer/run/      */
-  char *secret_dir; /* e.g. /run/user/1000/ai-dbexplorer/secret/   */
-  char *sock_path;  /* e.g. /run/user/1000/ai-dbexplorer/run/broker.sock */
-  char *token_path; /* e.g. /run/user/1000/ai-dbexplorer/secret/token    */
+  char *base;       /* e.g. /run/user/1000/adbxplorer/          */
+  char *run_dir;    /* e.g. /run/user/1000/adbxplorer/run/      */
+  char *secret_dir; /* e.g. /run/user/1000/adbxplorer/secret/   */
+  char *sock_path;  /* e.g. /run/user/1000/adbxplorer/run/broker.sock */
+  char *token_path; /* e.g. /run/user/1000/adbxplorer/secret/token    */
 } PrivDir;
 
 /* Reads env vars, computes all paths, validates sun_path fit. If 'base' is not

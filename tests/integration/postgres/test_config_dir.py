@@ -39,7 +39,7 @@ def test_xdg_empty_dir_creates_default_config():
     try:
         broker = start_broker(privdir, env={"XDG_CONFIG_HOME": xdg_home})
 
-        expected = os.path.join(xdg_home, "ai-dbexplorer", "config.json")
+        expected = os.path.join(xdg_home, "adbxplorer", "config.json")
         _wait_for_file(expected)
         assert os.path.getsize(expected) > 0
     finally:
@@ -59,7 +59,7 @@ def test_explicit_config_overrides_xdg_default_path():
             config_path=CONFIG,
         )
 
-        default_path = os.path.join(xdg_home, "ai-dbexplorer", "config.json")
+        default_path = os.path.join(xdg_home, "adbxplorer", "config.json")
         assert not os.path.exists(default_path)
     finally:
         stop_proc(broker)
@@ -80,7 +80,7 @@ def test_home_fallback_creates_default_config_without_xdg():
             },
         )
 
-        expected = os.path.join(home_dir, ".config", "ai-dbexplorer", "config.json")
+        expected = os.path.join(home_dir, ".config", "adbxplorer", "config.json")
         _wait_for_file(expected)
         assert os.path.getsize(expected) > 0
     finally:

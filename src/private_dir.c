@@ -56,7 +56,7 @@ static char *resolve_base_path(void) {
   char *base = NULL;
 
   if (env_val && env_val[0] == '/' && strlen(env_val) < 200) {
-    /* Use env var: <env_val>/ai-dbexplorer/ */
+    /* Use env var: <env_val>/adbxplorer/ */
     size_t len = strlen(env_val);
     /* Strip trailing slash if present for consistent formatting. */
     while (len > 1 && env_val[len - 1] == '/')
@@ -66,7 +66,7 @@ static char *resolve_base_path(void) {
     base = xmalloc(base_len);
     snprintf(base, base_len, "%.*s/%s/", (int)len, env_val, PRIVDIR_APPNAME);
   } else {
-    /* Fallback: /tmp/ai-dbexplorer-<uid>/ */
+    /* Fallback: /tmp/adbxplorer-<uid>/ */
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "/tmp/%s-%u/", PRIVDIR_APPNAME,
                      (unsigned)getuid());
