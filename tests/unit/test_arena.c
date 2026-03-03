@@ -201,6 +201,43 @@ static void test_add_nul(void) {
   arena_destroy(ar);
 }
 
+static void test_zero_mem(void) {
+  Arena *ar = arena_create(NULL, NULL);
+  ASSERT_TRUE(ar != NULL);
+
+  char *a = (char *)arena_add_nul(ar, (void *)"alpha", 5);
+  char *b = (char *)arena_add_nul(ar, (void *)"beta", 4);
+  ASSERT_TRUE(a != NULL);
+  ASSERT_TRUE(b != NULL);
+  ASSERT_TRUE(a[0] == 'a');
+  ASSERT_TRUE(b[0] == 'b');
+
+  // Grow to multiple blocks so zero pass covers chained blocks too.
+  char blob[1500];
+  memset(blob, 0x7A, sizeof(blob));
+  uint8_t *p = (uint8_t *)arena_add(ar, blob, (uint32_t)sizeof(blob));
+  ASSERT_TRUE(p != NULL);
+  ASSERT_TRUE(p[0] == 0x7A);
+
+  arena_zero_mem(ar);
+
+  ASSERT_TRUE(memcmp(a, "\0\0\0\0\0\0", 6) == 0);
+  ASSERT_TRUE(memcmp(b, "\0\0\0\0\0", 5) == 0);
+  for (size_t i = 0; i < sizeof(blob); i++) {
+    ASSERT_TRUE(p[i] == 0);
+  }
+  ASSERT_TRUE(arena_is_ok(ar) == YES);
+
+  // Arena remains usable after zeroing.
+  char *c = (char *)arena_add_nul(ar, (void *)"ok", 2);
+  ASSERT_TRUE(c != NULL);
+  ASSERT_TRUE(c[0] == 'o');
+  ASSERT_TRUE(c[1] == 'k');
+  ASSERT_TRUE(c[2] == '\0');
+
+  arena_destroy(ar);
+}
+
 int main(void) {
   test_basic_add_get();
   test_alignment_and_empty();
@@ -213,6 +250,7 @@ int main(void) {
   test_calloc_zeroes_payload();
   test_alloc_rejects_overflow_len();
   test_add_nul();
+  test_zero_mem();
   fprintf(stderr, "OK: test_arena\n");
   return 0;
 }

@@ -97,17 +97,42 @@ typedef struct {
   SecretStore base;
 } FakeSecretStore;
 
-static int fake_ss_get(SecretStore *store, const char *ref, StrBuf *out) {
+static AdbxTriStatus fake_ss_get(SecretStore *store, const char *ref,
+                                 StrBuf *out) {
   (void)store;
   (void)ref;
   const char *pwd = "pwd";
-  return sb_append_bytes(out, pwd, strlen(pwd) + 1);
+  if (sb_append_bytes(out, pwd, strlen(pwd) + 1) != OK)
+    return ERR;
+  return YES;
+}
+
+static AdbxStatus fake_ss_set(SecretStore *store, const char *ref,
+                              const char *secret) {
+  (void)store;
+  (void)ref;
+  (void)secret;
+  return OK;
+}
+
+static AdbxStatus fake_ss_delete(SecretStore *store, const char *ref) {
+  (void)store;
+  (void)ref;
+  return OK;
+}
+
+static AdbxStatus fake_ss_wipe_all(SecretStore *store) {
+  (void)store;
+  return OK;
 }
 
 static void fake_ss_destroy(SecretStore *store) { free(store); }
 
 static const SecretStoreVTable FAKE_SS_VT = {
     .get = fake_ss_get,
+    .set = fake_ss_set,
+    .delete = fake_ss_delete,
+    .wipe_all = fake_ss_wipe_all,
     .destroy = fake_ss_destroy,
 };
 

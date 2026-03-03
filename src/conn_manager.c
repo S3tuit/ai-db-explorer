@@ -44,6 +44,8 @@ static ConnEntry *find_entry(ConnManager *m, const char *connection_name) {
 }
 
 /* Returns the right DbBackend based on 'kind'. */
+// TODO: probably choosing which *_backend_create() to call is a responsibility
+// of db_backend.h/.c not conn_manager
 static DbBackend *db_backend_create(DbKind kind) {
   switch (kind) {
   case DB_KIND_POSTGRES:
@@ -74,8 +76,16 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
   // Fetch password if needed
   StrBuf pw;
   sb_init(&pw);
-  if (secret_store_get(m->secrets, e->profile->connection_name, &pw) != OK) {
+  AdbxTriStatus s_rc =
+      secret_store_get(m->secrets, e->profile->connection_name, &pw);
+  if (s_rc == NO) {
+    TLOG("ERROR - missing secret for %s", e->profile->connection_name);
+    sb_zero_clean(&pw);
+    return ERR;
+  }
+  if (s_rc != YES) {
     TLOG("ERROR - secret_store_get failed for %s", e->profile->connection_name);
+    sb_zero_clean(&pw);
     return ERR;
   }
 

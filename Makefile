@@ -1,7 +1,10 @@
 CC      := gcc
 PKG_CONFIG ?= pkg-config
+UNAME_S := $(shell uname -s)
 LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
 LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
+LIBSECRET_CFLAGS := $(shell $(PKG_CONFIG) --cflags libsecret-1 2>/dev/null)
+LIBSECRET_LIBS   := $(shell $(PKG_CONFIG) --libs   libsecret-1 2>/dev/null)
 
 # Third party flags, these are built separately to allow docker cache in
 # integration tests
@@ -13,8 +16,14 @@ LIBPG_QUERY_INC := -I$(LIBPG_QUERY_DIR)
 CFLAGS  := -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O2 -flto
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
 CFLAGS  += -DNDEBUG
-INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBPG_QUERY_INC)
-LDFLAGS := $(LIBPQ_LIBS) $(LIBPG_QUERY_LIB)
+ifneq ($(strip $(LIBSECRET_LIBS)),)
+CFLAGS += -DHAVE_LIBSECRET
+endif
+INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBSECRET_CFLAGS) $(LIBPG_QUERY_INC)
+LDFLAGS := $(LIBPQ_LIBS) $(LIBSECRET_LIBS) $(LIBPG_QUERY_LIB)
+ifeq ($(UNAME_S),Darwin)
+LDFLAGS += -framework Security -framework CoreFoundation
+endif
 
 # Benchmark flags (optimized, no sanitizers)
 BENCH_CFLAGS := -Wall -Wextra -Werror -std=c11 -O3 -DNDEBUG -flto \

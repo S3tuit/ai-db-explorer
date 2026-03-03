@@ -110,6 +110,17 @@ void arena_clean(Arena *ar) {
   ar->block_sz = 0;
 }
 
+void arena_zero_mem(Arena *ar) {
+  if (!ar)
+    return;
+  ArenaBlock *b = ar->head;
+  while (b) {
+    if (b->cap > 0)
+      memset(b->data, 0, b->cap);
+    b = b->next;
+  }
+}
+
 AdbxTriStatus arena_is_zeroed(const Arena *ar) {
   if (!ar)
     return ERR;

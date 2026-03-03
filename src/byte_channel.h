@@ -66,6 +66,7 @@ typedef struct ByteChannelVTable {
 
 struct ByteChannel {
   const ByteChannelVTable *vt;
+  // TODO: use the same interfae pattern as src/secret_store.h
   void *impl; // channel-specific
 };
 

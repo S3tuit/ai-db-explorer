@@ -80,6 +80,7 @@ typedef struct DbBackendVTable {
 
 struct DbBackend {
   const DbBackendVTable *vt;
+  // TODO: use the same interfae pattern as src/secret_store.h
   void *impl; // db specific
 };
 
@@ -114,10 +115,11 @@ static inline AdbxStatus db_exec(DbBackend *db, const char *sql,
   return db->vt->exec(db, sql, qb_policy, out_qr);
 }
 
-static inline AdbxStatus
-db_exec_bound(DbBackend *db, const char *sql, const DbExecParam *params,
-              uint32_t nparams, const QueryResultBuildPolicy *qb_policy,
-              QueryResult **out_qr) {
+static inline AdbxStatus db_exec_bound(DbBackend *db, const char *sql,
+                                       const DbExecParam *params,
+                                       uint32_t nparams,
+                                       const QueryResultBuildPolicy *qb_policy,
+                                       QueryResult **out_qr) {
   if (!db || !db->vt || !db->vt->exec_bound)
     return ERR;
   return db->vt->exec_bound(db, sql, params, nparams, qb_policy, out_qr);

@@ -1,8 +1,8 @@
 #ifndef ARENA_H
 #define ARENA_H
 
-#include <stdint.h>
 #include "utils.h"
+#include <stdint.h>
 
 /* A bump allocator that stores data in a chain of non-moving blocks.
  * Allocations are pointer-sized aligned (sizeof(uintptr_t)) with zero
@@ -26,9 +26,9 @@
 typedef struct {
   struct ArenaBlock *head; // first block
   struct ArenaBlock *tail; // last block (append target)
-  uint32_t used;             // total bytes used across blocks
-  uint32_t cap;              // hard bytes-cap for total used
-  uint32_t block_sz;         // size of the next block to allocate
+  uint32_t used;           // total bytes used across blocks
+  uint32_t cap;            // hard bytes-cap for total used
+  uint32_t block_sz;       // size of the next block to allocate
 } Arena;
 
 /* A small pointer vector used to collect elements before flattening them
@@ -58,6 +58,10 @@ void arena_destroy(Arena *ar);
 /* Frees the memory used by 'ar' but not the arena itself. */
 void arena_clean(Arena *ar);
 
+/* Best-effort to set all the bytes of 'ar' to zero. Use this before
+ * clean/destroy if 'ar' holds data that should not be leaked. */
+void arena_zero_mem(Arena *ar);
+
 /* Checks whether 'ar' is in the canonical zeroed/uninitialized state.
  * Returns YES when zeroed, NO when any field is non-zero, ERR on invalid input.
  */
@@ -68,10 +72,6 @@ AdbxTriStatus arena_is_zeroed(const Arena *ar);
  * Should not be used for normal build since it's pretty slow.
  */
 AdbxTriStatus arena_is_ok(const Arena *ar);
-
-/* Ensure 'extra' bytes available, growing if needed.
- * Returns OK on success, ERR if cap reached or errors occurred. */
-AdbxStatus arena_ensure(Arena *ar, uint32_t extra);
 
 /* Allocates 'len' bytes inside the arena and returns the pointer.
  * Memory is uninitialized. Returns NULL on error. */

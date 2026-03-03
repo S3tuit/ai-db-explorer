@@ -11,8 +11,16 @@ typedef struct SecretStore SecretStore;
 typedef struct SecretStoreVTable SecretStoreVTable;
 
 struct SecretStoreVTable {
-  // Writes a NUL-terminated secret into 'out' and returns OK/ERR.
-  AdbxStatus (*get)(SecretStore *store, const char *secret_ref, StrBuf *out);
+  // Writes a NUL-terminated secret into 'out'.
+  // Returns YES when found, NO when missing, ERR on failure.
+  AdbxTriStatus (*get)(SecretStore *store, const char *secret_ref, StrBuf *out);
+  // Stores one NUL-terminated secret.
+  AdbxStatus (*set)(SecretStore *store, const char *secret_ref,
+                    const char *secret);
+  // Deletes one stored secret.
+  AdbxStatus (*delete)(SecretStore *store, const char *secret_ref);
+  // Deletes all stored secrets in this store namespace.
+  AdbxStatus (*wipe_all)(SecretStore *store);
   // Destroys the store and releases resources.
   void (*destroy)(SecretStore *store);
 };
@@ -29,31 +37,49 @@ struct SecretStore {
 // Error semantics: returns NULL on allocation failure.
 SecretStore *secret_store_create(void);
 
-// Destroy the store and release resources.
-// Ownership: consumes the store pointer.
-// Side effects: may release OS secrets later.
-// Error semantics: no return value.
+/* -------------------------------- HELPERS -------------------------------- */
+
 void secret_store_destroy(SecretStore *store);
 
-// Lookup a secret by reference key.
-// Ownership: caller owns 'out' and should zero+clean it after use.
-// Side effects: may access OS secrets later.
-// Error semantics: OK on success, ERR on failure.
-AdbxStatus secret_store_get(SecretStore *store, const char *secret_ref,
-                            StrBuf *out);
+AdbxTriStatus secret_store_get(SecretStore *store, const char *secret_ref,
+                               StrBuf *out);
 
-/* Small helpers */
-static inline AdbxStatus ss_get(SecretStore *store, const char *secret_ref,
-                                StrBuf *out) {
-  if (!store || !store->vt || !store->vt->get)
-    return ERR;
-  return store->vt->get(store, secret_ref, out);
-}
+AdbxStatus secret_store_set(SecretStore *store, const char *secret_ref,
+                            const char *secret);
 
-static inline void ss_destroy(SecretStore *store) {
-  if (!store || !store->vt || !store->vt->destroy)
-    return;
-  store->vt->destroy(store);
-}
+AdbxStatus secret_store_delete(SecretStore *store, const char *secret_ref);
+
+AdbxStatus secret_store_wipe_all(SecretStore *store);
+
+/* ---------------------------- SUPPORTED STORES --------------------------- */
+
+/* Creates the file-backed SecretStore implementation.
+ * Ownership: returned SecretStore owned by caller and must be destroyed.
+ * Side effects: may touch filesystem paths and files used by the backend.
+ * Error semantics: returns NULL on failure.
+ */
+SecretStore *secret_store_file_backend_create(void);
+
+/* Creates the macOS Keychain-backed SecretStore implementation.
+ * Ownership: returned SecretStore owned by caller and must be destroyed.
+ * Side effects: may probe OS Keychain services.
+ * Error semantics: returns NULL on failure.
+ */
+SecretStore *secret_store_keychain_backend_create(void);
+
+/* Creates the libsecret-backed SecretStore implementation.
+ * Ownership: returned SecretStore owned by caller and must be destroyed.
+ * Side effects: may probe D-Bus Secret Service endpoints.
+ * Error semantics: returns NULL on failure.
+ */
+SecretStore *secret_store_libsecret_backend_create(void);
+
+#ifdef DUMMY_SECRET_STORE_WARNING
+/* Creates a dummy SecretStore implementation. Use this only in test env.
+ * Ownership: returned SecretStore owned by caller and must be destroyed.
+ * Error semantics: returns NULL on failure.
+ */
+SecretStore *secret_store_dummy_backend_create(void);
+#endif
 
 #endif
