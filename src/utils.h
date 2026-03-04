@@ -33,4 +33,9 @@ uint64_t now_ms_monotonic(void);
  * Returns OK/ERR. */
 AdbxStatus fill_random(uint8_t *buf, size_t len);
 
+/* Fills 'len' bytes of 'buf' with random lowercase hex digits [0-9a-f].
+ * This does not append a trailing NUL terminator.
+ * Returns OK/ERR. */
+AdbxStatus fill_random_hex(char *buf, size_t len);
+
 #endif

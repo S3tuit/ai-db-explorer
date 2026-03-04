@@ -64,3 +64,30 @@ AdbxStatus fill_random(uint8_t *buf, size_t len) {
   return OK;
 #endif
 }
+
+AdbxStatus fill_random_hex(char *buf, size_t len) {
+  if (!buf && len > 0)
+    return ERR;
+  if (len == 0)
+    return OK;
+
+  static const char HEX[] = "0123456789abcdef";
+  uint8_t rnd[128];
+  size_t out_i = 0;
+
+  while (out_i < len) {
+    size_t rem_hex = len - out_i;
+    size_t need_rnd = (rem_hex + 1) / 2;
+    if (need_rnd > sizeof(rnd))
+      need_rnd = sizeof(rnd);
+    if (fill_random(rnd, need_rnd) != OK)
+      return ERR;
+
+    for (size_t i = 0; i < need_rnd && out_i < len; i++) {
+      buf[out_i++] = HEX[rnd[i] >> 4];
+      if (out_i < len)
+        buf[out_i++] = HEX[rnd[i] & 0x0F];
+    }
+  }
+  return OK;
+}

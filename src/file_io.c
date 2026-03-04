@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -109,8 +110,7 @@ static AdbxStatus fileio_sb_read_impl(const char *path, size_t max_bytes,
  * or strict-over-limit failure when 'require_eof' is YES.
  */
 static AdbxStatus fileio_raw_read_impl(const char *path, size_t max_bytes,
-                                       uint8_t *out,
-                                       AdbxTriStatus require_eof,
+                                       uint8_t *out, AdbxTriStatus require_eof,
                                        size_t *out_nread) {
   if (!out_nread || fileio_validate_common(path, max_bytes) != OK)
     return ERR;
@@ -203,8 +203,8 @@ ssize_t fileio_read_up_to(const char *path, size_t max_bytes, uint8_t *out) {
   return (ssize_t)nread;
 }
 
-AdbxStatus fileio_write_exact(const char *path, const uint8_t *src,
-                              size_t size, mode_t mode) {
+AdbxStatus fileio_write_exact(const char *path, const uint8_t *src, size_t size,
+                              mode_t mode) {
   if (!path)
     return ERR;
   if (!src && size != 0)
@@ -249,4 +249,67 @@ AdbxStatus fileio_write_exact(const char *path, const uint8_t *src,
     return ERR;
   }
   return OK;
+}
+
+#ifdef _WIN32
+#define PATH_JOIN_SEPARATOR '\\'
+#define PATH_JOIN_SEPARATOR_STR "\\"
+#else
+#define PATH_JOIN_SEPARATOR '/'
+#define PATH_JOIN_SEPARATOR_STR "/"
+#endif
+
+char *path_join(const char *dir, const char *file) {
+  if (dir == NULL || file == NULL)
+    return NULL;
+
+  size_t dir_len = strlen(dir);
+  size_t file_len = strlen(file);
+
+  int dir_has_sep = (dir_len > 0 && dir[dir_len - 1] == PATH_JOIN_SEPARATOR);
+  int file_has_sep = (file_len > 0 && file[0] == PATH_JOIN_SEPARATOR);
+
+  // We want exactly one separator between dir and file (unless one side is
+  // empty).
+  size_t need_sep = 0;
+  size_t skip_file = 0;
+
+  if (dir_len > 0 && file_len > 0) {
+    if (dir_has_sep && file_has_sep) {
+      skip_file = 1; // avoid double separator
+    } else if (!dir_has_sep && !file_has_sep) {
+      need_sep = 1; // add missing separator
+    }
+  }
+
+  // total length = dir + (sep?) + (file minus skipped leading sep) + '\0'
+  size_t file_part_len = file_len - skip_file;
+  if (dir_len > SIZE_MAX - file_part_len)
+    return NULL;
+  size_t out_len = dir_len + file_part_len;
+  if (need_sep && out_len == SIZE_MAX)
+    return NULL;
+  out_len += need_sep;
+
+  char *buf = (char *)xmalloc(out_len + 1);
+
+  // Copy dir
+  if (dir_len > 0)
+    memcpy(buf, dir, dir_len);
+
+  size_t pos = dir_len;
+
+  // Add separator if needed
+  if (need_sep) {
+    buf[pos++] = PATH_JOIN_SEPARATOR;
+  }
+
+  // Copy file (skipping leading separator if needed)
+  if (file_len > skip_file) {
+    memcpy(buf + pos, file + skip_file, file_len - skip_file);
+    pos += (file_len - skip_file);
+  }
+
+  buf[pos] = '\0';
+  return buf;
 }

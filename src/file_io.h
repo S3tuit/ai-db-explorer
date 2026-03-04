@@ -16,6 +16,9 @@
 AdbxStatus fileio_sb_read_limit(const char *path, size_t max_bytes,
                                 StrBuf *out);
 
+/* Same as 'fileio_sb_read_limit' but reads from an already opened 'fd'. */
+AdbxStatus fileio_sb_read_limit_fd(int fd, size_t max_bytes, StrBuf *out);
+
 /* Fast, one-shot read. Reads up to 'max_bytes' from 'path' into 'out'.
  * Ownership: borrows 'path'; 'out' is caller-owned and reset by this function.
  * Side effects: performs filesystem I/O and mutates StrBuf 'out'.
@@ -45,7 +48,11 @@ ssize_t fileio_read_up_to(const char *path, size_t max_bytes, uint8_t *out);
  * 'src' may be NULL only when 'size' is 0. 'mode' must use permission bits
  * only (0..0777). Note: this may not work if writing to symlink.
  */
-AdbxStatus fileio_write_exact(const char *path, const uint8_t *src,
-                              size_t size, mode_t mode);
+AdbxStatus fileio_write_exact(const char *path, const uint8_t *src, size_t size,
+                              mode_t mode);
+
+/* Joins 'dir' and 'path' into a caller owned string representing a path.
+ * Returns a heap-allocated string of a valid path or NULL. */
+char *path_join(const char *dir, const char *file);
 
 #endif
