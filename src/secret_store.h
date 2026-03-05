@@ -34,7 +34,7 @@ struct SecretStore {
 // and emits a warning on creation.
 // Ownership: caller owns the returned store and must destroy it.
 // Side effects: none.
-// Error semantics: returns NULL on allocation failure.
+// Error semantics: returns NULL when no backend can be initialized safely.
 SecretStore *secret_store_create(void);
 
 /* -------------------------------- HELPERS -------------------------------- */
@@ -59,6 +59,13 @@ AdbxStatus secret_store_wipe_all(SecretStore *store);
  * Error semantics: returns NULL on failure.
  */
 SecretStore *secret_store_file_backend_create(void);
+/* Probes and creates the file-backed SecretStore.
+ * Ownership: on YES, caller owns *out_store and must destroy it.
+ * Side effects: may touch filesystem paths and files used by the backend.
+ * Error semantics: returns YES on success, ERR on invalid input or
+ * initialization failure.
+ */
+AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store);
 
 /* Creates the macOS Keychain-backed SecretStore implementation.
  * Ownership: returned SecretStore owned by caller and must be destroyed.
@@ -66,6 +73,13 @@ SecretStore *secret_store_file_backend_create(void);
  * Error semantics: returns NULL on failure.
  */
 SecretStore *secret_store_keychain_backend_create(void);
+/* Probes and creates the macOS Keychain-backed SecretStore.
+ * Ownership: on YES, caller owns *out_store and must destroy it.
+ * Side effects: may probe OS Keychain services.
+ * Error semantics: returns YES on success, NO when backend unavailable, ERR on
+ * runtime failures.
+ */
+AdbxTriStatus secret_store_keychain_backend_probe(SecretStore **out_store);
 
 /* Creates the libsecret-backed SecretStore implementation.
  * Ownership: returned SecretStore owned by caller and must be destroyed.
@@ -73,6 +87,13 @@ SecretStore *secret_store_keychain_backend_create(void);
  * Error semantics: returns NULL on failure.
  */
 SecretStore *secret_store_libsecret_backend_create(void);
+/* Probes and creates the libsecret-backed SecretStore.
+ * Ownership: on YES, caller owns *out_store and must destroy it.
+ * Side effects: may probe D-Bus Secret Service endpoints.
+ * Error semantics: returns YES on success, NO when backend unavailable, ERR on
+ * runtime failures.
+ */
+AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store);
 
 #ifdef DUMMY_SECRET_STORE_WARNING
 /* Creates a dummy SecretStore implementation. Use this only in test env.

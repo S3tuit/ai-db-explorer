@@ -1,62 +1,81 @@
-#ifndef DUMMY_SECRET_STORE_WARNING
 #include "secret_store.h"
-#include "utils.h"
 
-// Placeholder for the real secret store implementation.
-
-/* Returns ERR since no real secret store is wired yet.
- * Ownership: caller owns 'out' and should zero+clean it after use.
- * Side effects: none.
- * Error semantics: always ERR. */
-static AdbxStatus secret_store_real_get(SecretStore *store,
-                                        const char *secret_ref, StrBuf *out) {
-  (void)store;
-  (void)secret_ref;
-  if (out) {
-    out->len = 0;
-  }
-  return ERR;
+/* Tries one backend probe and enforces fail-closed semantics.
+ * It borrows probe/out_store and performs no allocations.
+ * Side effects: may initialize one backend through the probe callback.
+ * Error semantics: returns YES when backend created, NO when unavailable, ERR
+ * when probe reports failure.
+ */
+static AdbxTriStatus
+ss_try_probe(AdbxTriStatus (*probe)(SecretStore **), SecretStore **out_store) {
+  if (!probe || !out_store)
+    return ERR;
+  *out_store = NULL;
+  AdbxTriStatus rc = probe(out_store);
+  if (rc != YES && rc != NO && rc != ERR)
+    return ERR;
+  return rc;
 }
 
-/* Destroys the real store placeholder.
- * Ownership: consumes the store pointer.
- * Side effects: none.
- * Error semantics: no return value. */
-static void secret_store_real_destroy(SecretStore *store) { free(store); }
-
-static const SecretStoreVTable SECRET_STORE_REAL_VT = {
-    .get = secret_store_real_get,
-    .destroy = secret_store_real_destroy,
-};
-
-/* Creates a SecretStore placeholder.
- * Ownership: caller owns the returned store and must destroy it.
- * Side effects: none.
- * Error semantics: returns NULL on allocation failure. */
 SecretStore *secret_store_create(void) {
-  SecretStore *store = xmalloc(sizeof(*store));
-  store->vt = &SECRET_STORE_REAL_VT;
-  return store;
+#ifdef DUMMY_SECRET_STORE_WARNING
+  return secret_store_dummy_backend_create();
+#endif
+
+  SecretStore *store = NULL;
+
+#ifdef __APPLE__
+  AdbxTriStatus krc = ss_try_probe(secret_store_keychain_backend_probe, &store);
+  if (krc == YES)
+    return store;
+  if (krc == ERR)
+    return NULL;
+#endif
+
+#ifdef HAVE_LIBSECRET
+  AdbxTriStatus lrc =
+      ss_try_probe(secret_store_libsecret_backend_probe, &store);
+  if (lrc == YES)
+    return store;
+  if (lrc == ERR)
+    return NULL;
+#endif
+
+  AdbxTriStatus frc = ss_try_probe(secret_store_file_backend_probe, &store);
+  if (frc == YES)
+    return store;
+  return NULL;
 }
 
-/* Destroys the SecretStore using its vtable.
- * Ownership: consumes the store pointer.
- * Side effects: none.
- * Error semantics: no return value. */
+/* ----------------------------------- HELPERS ----------------------------- */
 void secret_store_destroy(SecretStore *store) {
   if (!store || !store->vt || !store->vt->destroy)
     return;
   store->vt->destroy(store);
 }
 
-/* Writes the secret into 'out' as a NUL-terminated string.
- * Ownership: caller owns 'out' and should zero+clean it after use.
- * Side effects: real impl may access OS stores (not yet).
- * Error semantics: OK on success, ERR on failure. */
-AdbxStatus secret_store_get(SecretStore *store, const char *secret_ref,
-                            StrBuf *out) {
+AdbxTriStatus secret_store_get(SecretStore *store, const char *secret_ref,
+                               StrBuf *out) {
   if (!store || !store->vt || !store->vt->get)
     return ERR;
   return store->vt->get(store, secret_ref, out);
 }
-#endif
+
+AdbxStatus secret_store_set(SecretStore *store, const char *secret_ref,
+                            const char *secret) {
+  if (!store || !store->vt || !store->vt->set)
+    return ERR;
+  return store->vt->set(store, secret_ref, secret);
+}
+
+AdbxStatus secret_store_delete(SecretStore *store, const char *secret_ref) {
+  if (!store || !store->vt || !store->vt->delete)
+    return ERR;
+  return store->vt->delete(store, secret_ref);
+}
+
+AdbxStatus secret_store_wipe_all(SecretStore *store) {
+  if (!store || !store->vt || !store->vt->wipe_all)
+    return ERR;
+  return store->vt->wipe_all(store);
+}

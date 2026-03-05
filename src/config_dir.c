@@ -1,5 +1,6 @@
 #include "config_dir.h"
 
+#include "file_io.h"
 #include "utils.h"
 
 #include <errno.h>
@@ -70,27 +71,6 @@ static char *dup_range(const char *start, const char *end) {
   char *out = (char *)xmalloc(len + 1);
   memcpy(out, start, len);
   out[len] = '\0';
-  return out;
-}
-
-/* Joins two path fragments as "a/b".
- * It borrows inputs and returns a heap string owned by caller.
- * Side effects: allocates memory.
- * Error semantics: returns NULL on invalid input.
- */
-static char *join_path2(const char *a, const char *b) {
-  if (!a || !b)
-    return NULL;
-  size_t a_len = strlen(a);
-  size_t b_len = strlen(b);
-  int has_slash = (a_len > 0 && a[a_len - 1] == '/');
-  size_t out_len = a_len + (has_slash ? 0u : 1u) + b_len;
-  char *out = (char *)xmalloc(out_len + 1);
-  if (has_slash) {
-    snprintf(out, out_len + 1, "%s%s", a, b);
-  } else {
-    snprintf(out, out_len + 1, "%s/%s", a, b);
-  }
   return out;
 }
 
@@ -274,8 +254,8 @@ static AdbxStatus ensure_config_file(const char *path) {
 static char *resolve_default_config_path(void) {
   const char *xdg = getenv("XDG_CONFIG_HOME");
   if (is_abs_path(xdg) == YES && xdg[0] != '\0') {
-    char *dir = join_path2(xdg, CFG_APPNAME);
-    char *path = join_path2(dir, CFG_FILENAME);
+    char *dir = path_join(xdg, CFG_APPNAME);
+    char *path = path_join(dir, CFG_FILENAME);
     free(dir);
     return path;
   }
@@ -285,19 +265,19 @@ static char *resolve_default_config_path(void) {
     return NULL;
 
 #ifdef __APPLE__
-  char *base = join_path2(home, "Library/Application Support");
+  char *base = path_join(home, "Library/Application Support");
 #else
-  char *base = join_path2(home, ".config");
+  char *base = path_join(home, ".config");
 #endif
   if (!base)
     return NULL;
 
-  char *dir = join_path2(base, CFG_APPNAME);
+  char *dir = path_join(base, CFG_APPNAME);
   free(base);
   if (!dir)
     return NULL;
 
-  char *path = join_path2(dir, CFG_FILENAME);
+  char *path = path_join(dir, CFG_FILENAME);
   free(dir);
   return path;
 }

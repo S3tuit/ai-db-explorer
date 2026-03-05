@@ -6,9 +6,11 @@
 #include "string_op.h"
 #include "utils.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,91 +36,14 @@ typedef struct {
   Arena arena; // owns all the strings and arrays of SecretEntryList
 } SecretEntryList;
 
-// Temporary struct used to load all the entries in memory and then sort them.
-// Aftert sorted, they become SecretEntry and gets added to the arena
-typedef struct {
-  char *ref;
-  char *secret;
-} SecretEntryTmp;
-
-// holds the metadata to understand whether a file is changed from our last
-// snapshot
-typedef struct {
-  int exists;
-  dev_t dev;
-  ino_t ino;
-  off_t size;
-  time_t mtime_sec;
-  long mtime_nsec;
-} SsFileMeta;
-
 typedef struct {
   SecretStore base;
-  char *dir_path;
-  char *file_path;
+  int dir_fd; // file descriptor of the configuration directory
 
   SecretEntryList cache;
-  SsFileMeta cache_meta;
+  FileMeta cache_meta;
   int cache_loaded;
 } FileSecretStore;
-
-/* Returns nanosecond component from one stat mtime field.
- */
-static long ss_mtime_nsec(const struct stat *st) {
-  if (!st)
-    return 0;
-#if defined(__APPLE__)
-  return st->st_mtimespec.tv_nsec;
-#else
-  return st->st_mtim.tv_nsec;
-#endif
-}
-
-/* Stores file identity metadata from one stat struct.
- * It borrows 'st' and writes to caller-owned 'out'.
- * Side effects: mutates out metadata fields.
- * Error semantics: returns OK on success, ERR on invalid input.
- */
-static AdbxStatus ss_meta_from_stat(const struct stat *st, SsFileMeta *out) {
-  if (!st || !out)
-    return ERR;
-  out->exists = 1;
-  out->dev = st->st_dev;
-  out->ino = st->st_ino;
-  out->size = st->st_size;
-  out->mtime_sec = st->st_mtime;
-  out->mtime_nsec = ss_mtime_nsec(st);
-  return OK;
-}
-
-/* Compares 2 file metadata snapshots.
- * It borrows both inputs and performs no allocations.
- * Side effects: none.
- * Error semantics: returns YES when equal, NO when different, ERR on invalid
- * input.
- */
-static AdbxTriStatus ss_meta_equal(const SsFileMeta *a, const SsFileMeta *b) {
-  if (!a || !b)
-    return ERR;
-
-  if (a->exists != b->exists)
-    return NO;
-  if (!a->exists)
-    return YES;
-
-  if (a->dev != b->dev)
-    return NO;
-  if (a->ino != b->ino)
-    return NO;
-  if (a->size != b->size)
-    return NO;
-  if (a->mtime_sec != b->mtime_sec)
-    return NO;
-  if (a->mtime_nsec != b->mtime_nsec)
-    return NO;
-
-  return YES;
-}
 
 /* Zeroes and frees one heap-allocated secret string.
  * It consumes '*s'.
@@ -132,22 +57,6 @@ static void ss_secret_free(char **s) {
   memset(*s, 0, n);
   free(*s);
   *s = NULL;
-}
-
-/* Cleans temporary parsed entries allocated on heap.
- * It consumes temporary arrays and strings.
- * Side effects: overwrites and frees secret strings.
- * Error semantics: none.
- */
-static void ss_tmp_clean(SecretEntryTmp *tmp, size_t n) {
-  if (!tmp)
-    return;
-  for (size_t i = 0; i < n; i++) {
-    free(tmp[i].ref);
-    tmp[i].ref = NULL;
-    ss_secret_free(&tmp[i].secret);
-  }
-  free(tmp);
 }
 
 /* Clears one cached entry list and zeroes stored values.
@@ -201,8 +110,7 @@ static inline char *ss_arena_dup_cstr(Arena *arena, const char *s) {
  * failure.
  */
 static AdbxStatus ss_list_init_with_n_entries(SecretEntryList *out, size_t n) {
-  if (!out)
-    return ERR;
+  assert(out);
 
   out->entries = NULL;
   out->n_entries = 0;
@@ -232,13 +140,15 @@ static AdbxStatus ss_list_init_with_n_entries(SecretEntryList *out, size_t n) {
 /* Copies one ref/secret pair into one list entry.
  * It borrows all inputs and writes arena-owned strings in list[idx].
  * Side effects: allocates strings in list arena.
- * Error semantics: returns OK on success, ERR on invalid input or allocation
- * failure.
+ * Error semantics: returns OK on success, ERR on allocation failure.
  */
-static AdbxStatus ss_list_set_entry_copy(SecretEntryList *list, size_t idx,
-                                         const char *ref, const char *secret) {
-  if (!list || !ref || !secret || idx >= list->n_entries)
-    return ERR;
+static inline AdbxStatus ss_list_set_entry_copy(SecretEntryList *list,
+                                                size_t idx, const char *ref,
+                                                const char *secret) {
+  assert(list);
+  assert(ref);
+  assert(secret);
+  assert(idx < list->n_entries);
 
   list->entries[idx].ref = ss_arena_dup_cstr(&list->arena, ref);
   list->entries[idx].secret = ss_arena_dup_cstr(&list->arena, secret);
@@ -252,12 +162,13 @@ static AdbxStatus ss_list_set_entry_copy(SecretEntryList *list, size_t idx,
  * It borrows list/ref and writes one position to out_pos.
  * Side effects: none.
  * Error semantics: returns YES when found, NO when missing (out_pos is insert
- * point), ERR on invalid input.
+ * point).
  */
 static AdbxTriStatus ss_list_find_ref_pos(const SecretEntryList *list,
                                           const char *ref, size_t *out_pos) {
-  if (!list || !ref || !out_pos)
-    return ERR;
+  assert(list);
+  assert(ref);
+  assert(out_pos);
 
   size_t lo = 0;
   size_t hi = list->n_entries;
@@ -278,8 +189,8 @@ static AdbxTriStatus ss_list_find_ref_pos(const SecretEntryList *list,
   return NO;
 }
 
-/* Builds next list by upserting one ref/secret pair into a sorted source list.
- * It borrows all inputs and writes owned result in out_next.
+/* Builds 'out_next' list by upserting one ref/secret pair into a sorted source
+ * list. It borrows all inputs and creates a new object that can outlive 'src'.
  * Side effects: allocates output arena memory.
  * Error semantics: returns OK on success, ERR on invalid input or allocation
  * failure.
@@ -301,6 +212,8 @@ static AdbxStatus ss_list_build_with_upsert(const SecretEntryList *src,
 
   size_t src_i = 0;
   for (size_t dst_i = 0; dst_i < out_n; dst_i++) {
+    // If not found, the new entry will be the first element of the array.
+    // Else, this updates the list at the index of the element found.
     if (dst_i == pos) {
       if (ss_list_set_entry_copy(out_next, dst_i, ref, secret) != OK) {
         ss_entries_clean(out_next);
@@ -323,8 +236,8 @@ static AdbxStatus ss_list_build_with_upsert(const SecretEntryList *src,
   return OK;
 }
 
-/* Builds next list by removing one entry index from sorted source list.
- * It borrows src and writes owned result in out_next.
+/* Builds 'out_next' list by removing one entry index from sorted source list.
+ * It borrows src and creates a new object that can outlive 'src'.
  * Side effects: allocates output arena memory.
  * Error semantics: returns OK on success, ERR on invalid input or allocation
  * failure.
@@ -355,322 +268,186 @@ static AdbxStatus ss_list_build_without_index(const SecretEntryList *src,
   return OK;
 }
 
-/* Appends one owned tmp entry into a dynamic temporary vector.
- * It consumes 'ref' and 'secret' on success.
- * Side effects: may grow heap storage for tmp vector.
- * Error semantics: returns OK on success, ERR on invalid input or overflow.
+/* Validates that the opened directory 'dir_fd' is user-owned 0700.
+ * Side effects: reads filesystem metadata and may chmod once to repair mode.
+ * Error semantics: returns OK when valid, else ERR.
  */
-static AdbxStatus ss_tmp_push_owned(SecretEntryTmp **tmp, size_t *n,
-                                    size_t *cap, char *ref, char *secret) {
-  if (!tmp || !n || !cap || !ref || !secret)
+static AdbxStatus ss_validate_config_dir(const int dir_fd) {
+  assert(dir_fd >= 0);
+  if (dir_fd < 0)
     return ERR;
 
-  if (*n == *cap) {
-    size_t new_cap = (*cap == 0) ? 8u : (*cap * 2u);
-    if (new_cap < *cap)
-      return ERR;
-    *tmp = (SecretEntryTmp *)xrealloc(*tmp, new_cap * sizeof(**tmp));
-    *cap = new_cap;
-  }
-
-  (*tmp)[*n].ref = ref;
-  (*tmp)[*n].secret = secret;
-  (*n)++;
-  return OK;
-}
-
-/* Creates an arena-backed sorted entry list from a sorted temporary array.
- * It borrows 'tmp' and writes owned storage in 'out'.
- * Side effects: initializes and allocates one arena.
- * Error semantics: returns OK on success, ERR on invalid input or allocation
- * failure.
- */
-static AdbxStatus ss_list_init_from_tmp_sorted(const SecretEntryTmp *tmp,
-                                               size_t n, SecretEntryList *out) {
-  if (!tmp && n != 0)
+  struct stat st;
+  if (fstat(dir_fd, &st) != 0)
     return ERR;
 
-  if (ss_list_init_with_n_entries(out, n) != OK)
+  if (st.st_uid != getuid())
     return ERR;
-  for (size_t i = 0; i < n; i++) {
-    if (ss_list_set_entry_copy(out, i, tmp[i].ref, tmp[i].secret) != OK) {
-      ss_entries_clean(out);
+
+  // if the permissions are wrong, we try to adjust them once before failing
+  for (int retries = 0; retries <= 1; retries++) {
+    if ((st.st_mode & 0777) != 0700) {
+      if (retries == 0 && fchmod(dir_fd, 0700) == 0) {
+        // reload stat
+        if (fstat(dir_fd, &st) != 0) {
+          return ERR;
+        }
+        continue;
+      }
       return ERR;
     }
-  }
-  return OK;
-}
-
-/* Returns YES when path is absolute.
- * It borrows input and performs no allocations.
- * Side effects: none.
- * Error semantics: returns NO for NULL/non-absolute input.
- */
-static AdbxTriStatus ss_is_abs_path(const char *path) {
-  if (!path || path[0] != '/')
-    return NO;
-  return YES;
-}
-
-/* Duplicates one [start,end) range into a heap NUL-terminated string.
- * It borrows input pointers and returns caller-owned memory.
- * Side effects: allocates memory.
- * Error semantics: returns NULL on invalid input.
- */
-static char *ss_dup_range(const char *start, const char *end) {
-  if (!start || !end || end < start)
-    return NULL;
-  size_t len = (size_t)(end - start);
-  char *out = xmalloc(len + 1);
-  memcpy(out, start, len);
-  out[len] = '\0';
-  return out;
-}
-
-/* Joins path fragments as "a/b".
- * It borrows both inputs and returns caller-owned memory.
- * Side effects: allocates memory.
- * Error semantics: returns NULL on invalid input.
- */
-static char *ss_join_path2(const char *a, const char *b) {
-  if (!a || !b)
-    return NULL;
-  size_t alen = strlen(a);
-  size_t blen = strlen(b);
-  int has_slash = (alen > 0 && a[alen - 1] == '/');
-  size_t out_len = alen + (has_slash ? 0u : 1u) + blen;
-  char *out = xmalloc(out_len + 1);
-  if (has_slash) {
-    snprintf(out, out_len + 1, "%s%s", a, b);
-  } else {
-    snprintf(out, out_len + 1, "%s/%s", a, b);
-  }
-  return out;
-}
-
-/* Computes parent directory path of one file path.
- * It borrows 'path' and returns caller-owned memory in out_dir.
- * Side effects: allocates memory.
- * Error semantics: returns OK on success, ERR on invalid input.
- */
-static AdbxStatus ss_parent_dir(const char *path, char **out_dir) {
-  if (!path || !out_dir)
-    return ERR;
-  *out_dir = NULL;
-
-  size_t len = strlen(path);
-  if (len == 0 || path[len - 1] == '/')
-    return ERR;
-
-  const char *last = strrchr(path, '/');
-  if (!last) {
-    *out_dir = dup_or_null(".");
-    return *out_dir ? OK : ERR;
-  }
-  if (last == path) {
-    *out_dir = dup_or_null("/");
-    return *out_dir ? OK : ERR;
-  }
-
-  *out_dir = ss_dup_range(path, last);
-  return *out_dir ? OK : ERR;
-}
-
-/* Ensures one directory exists with expected type.
- * It borrows 'path'.
- * Side effects: may create directory and chmod it.
- * Error semantics: returns OK on success, ERR on invalid input or syscall
- * failure.
- */
-static AdbxStatus ss_ensure_one_dir(const char *path, mode_t create_mode) {
-  if (!path || path[0] == '\0')
-    return ERR;
-
-  if (mkdir(path, create_mode) == 0) {
-    if (chmod(path, create_mode) != 0)
-      return ERR;
     return OK;
   }
 
-  if (errno != EEXIST)
-    return ERR;
-
-  struct stat st = {0};
-  if (lstat(path, &st) != 0)
-    return ERR;
-  return S_ISDIR(st.st_mode) ? OK : ERR;
+  return ERR;
 }
 
-/* Ensures all path components in dir_path exist.
- * It borrows input and uses one temporary mutable path copy.
- * Side effects: may create directory tree.
- * Error semantics: returns OK on success, ERR on invalid input or syscall
- * failure.
+/* Opens the app directory used for file-backed credentials and stores its fd
+ * inside 'out_fd'. Side effects: opens a fd that caller must close and may
+ * create SS_APPNAME dir. Error semantics: returns ERR on invalid environment or
+ * input.
  */
-static AdbxStatus ss_ensure_dir_tree(const char *dir_path) {
-  if (!dir_path || dir_path[0] == '\0')
+static AdbxStatus ss_open_config_dir(int *out_fd) {
+  if (!out_fd)
     return ERR;
+  *out_fd = -1;
 
-  char *tmp = dup_or_null(dir_path);
-  if (!tmp)
-    return ERR;
-
-  size_t len = strlen(tmp);
-  for (size_t i = 1; i < len; i++) {
-    if (tmp[i] != '/')
-      continue;
-    tmp[i] = '\0';
-    if (tmp[0] != '\0' && ss_ensure_one_dir(tmp, 0700) != OK) {
-      free(tmp);
-      return ERR;
-    }
-    tmp[i] = '/';
-  }
-
-  AdbxStatus rc = ss_ensure_one_dir(tmp, 0700);
-  free(tmp);
-  return rc;
-}
-
-/* Validates one user-owned 0700 directory.
- * It borrows 'path' and performs no allocations.
- * Side effects: reads filesystem metadata.
- * Error semantics: returns YES when valid, NO when missing, ERR on mismatch or
- * syscall failure.
- */
-static AdbxTriStatus ss_validate_user_dir_0700(const char *path) {
-  if (!path)
-    return ERR;
-
-  struct stat st = {0};
-  if (lstat(path, &st) != 0) {
-    if (errno == ENOENT)
-      return NO;
-    return ERR;
-  }
-
-  if (!S_ISDIR(st.st_mode))
-    return ERR;
-  if (st.st_uid != getuid())
-    return ERR;
-  // TODO: maybe instead of failing we could try to set the right cred for the
-  // dir
-  if ((st.st_mode & 0777) != 0700)
-    return ERR;
-
-  return YES;
-}
-
-/* Resolves the app directory used for file-backed credentials.
- * It borrows environment variables and returns caller-owned absolute path.
- * Side effects: allocates memory.
- * Error semantics: returns NULL on missing/invalid environment inputs.
- */
-static char *ss_resolve_app_dir(void) {
+  // We use XDG_CONFIG_HOME directly when present; HOME is only a fallback.
+  char *base = NULL;
   const char *xdg = getenv("XDG_CONFIG_HOME");
-  if (ss_is_abs_path(xdg) == YES && xdg[0] != '\0')
-    return ss_join_path2(xdg, SS_APPNAME);
-
-  const char *home = getenv("HOME");
-  if (ss_is_abs_path(home) != YES || home[0] == '\0')
-    return NULL;
-
-#ifdef __APPLE__
-  char *base = ss_join_path2(home, "Library/Application Support");
-#else
-  char *base = ss_join_path2(home, ".config");
-#endif
-  if (!base)
-    return NULL;
-
-  char *dir = ss_join_path2(base, SS_APPNAME);
-  free(base);
-  return dir;
-}
-
-/* Resolves and validates store paths and directory policy.
- * It returns owned strings in out_dir/out_file.
- * Side effects: may create parent directories.
- * Error semantics: returns OK on success, ERR on invalid environment or policy
- * mismatch.
- */
-static AdbxStatus ss_prepare_paths(char **out_dir, char **out_file) {
-  if (!out_dir || !out_file)
-    return ERR;
-  *out_dir = NULL;
-  *out_file = NULL;
-
-  char *dir = ss_resolve_app_dir();
-  if (!dir)
-    return ERR;
-
-  char *parent = NULL;
-  if (ss_parent_dir(dir, &parent) != OK) {
-    free(dir);
-    return ERR;
-  }
-
-  if (ss_ensure_dir_tree(parent) != OK) {
-    free(parent);
-    free(dir);
-    return ERR;
-  }
-  free(parent);
-
-  AdbxTriStatus vrc = ss_validate_user_dir_0700(dir);
-  if (vrc == NO) {
-    if (ss_ensure_one_dir(dir, 0700) != OK) {
-      free(dir);
+  if (xdg && xdg[0] == '/') {
+    base = dup_or_null(xdg);
+  } else {
+    const char *home = getenv("HOME");
+    if (!home || home[0] != '/')
       return ERR;
-    }
-    vrc = ss_validate_user_dir_0700(dir);
+#ifdef __APPLE__
+    base = path_join(home, "Library/Application Support");
+#else
+    base = path_join(home, ".config");
+#endif
   }
-  if (vrc != YES) {
-    free(dir);
+  if (!base)
+    return ERR;
+
+  int flags = O_RDONLY | O_DIRECTORY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+  int base_fd = open(base, flags);
+  free(base);
+  if (base_fd < 0)
+    return ERR;
+
+  // create the app directory if it doesn't exist
+  if (mkdirat(base_fd, SS_APPNAME, 0700) != 0 && errno != EEXIST) {
+    close(base_fd);
     return ERR;
   }
 
-  char *file = ss_join_path2(dir, SS_CRED_FILE);
-  if (!file) {
-    free(dir);
+  int app_flags = O_RDONLY | O_DIRECTORY;
+#ifdef O_NOFOLLOW
+  app_flags |= O_NOFOLLOW;
+#endif
+  int app_fd = openat(base_fd, SS_APPNAME, app_flags);
+  close(base_fd);
+  if (app_fd < 0)
     return ERR;
-  }
 
-  *out_dir = dir;
-  *out_file = file;
+  *out_fd = app_fd;
   return OK;
 }
 
-/* Stats one file path and validates strict file policy.
- * It borrows 'path' and writes metadata into out_meta.
- * Side effects: reads filesystem metadata.
- * Error semantics: returns YES when file exists and is valid, NO when missing,
- * ERR on mode/ownership/type mismatch or syscall failure.
+/* Returns the file descriptor of the directory where FileSecretStore stores its
+ * files. Returns -1 on error. Side effects: may create the directory. Error
+ * semantics: returns OK on success, ERR on invalid environment or policy
+ * mismatch.
  */
-static AdbxTriStatus ss_stat_file_strict(const char *path,
-                                         SsFileMeta *out_meta) {
-  if (!path || !out_meta)
-    return ERR;
+static inline int ss_get_dir_fd(FileSecretStore *store) {
+  if (!store)
+    return -1;
 
-  memset(out_meta, 0, sizeof(*out_meta));
+  int dir_fd = store->dir_fd;
+  // dir_fd already opened
+  if (dir_fd >= 0) {
+    if (fcntl(dir_fd, F_GETFD) >= 0)
+      return dir_fd;
+  }
+
+  if (ss_open_config_dir(&dir_fd) != OK || dir_fd < 0) {
+    store->dir_fd = -1;
+    return -1;
+  }
+
+  if (ss_validate_config_dir(dir_fd) != OK) {
+    store->dir_fd = -1;
+    close(dir_fd);
+    return -1;
+  }
+
+  store->dir_fd = dir_fd;
+  return dir_fd;
+}
+
+/* Validates one opened credentials file descriptor and snapshots metadata.
+ * It borrows 'file_fd' and writes into caller-owned 'out_meta'.
+ * Side effects: reads file metadata.
+ * Error semantics: returns OK when file is a valid user-owned regular file
+ * with mode 0600, ERR otherwise.
+ */
+static AdbxStatus ss_validate_credfile_fd(int file_fd, FileMeta *out_meta) {
+  if (file_fd < 0 || !out_meta)
+    return ERR;
 
   struct stat st = {0};
-  if (lstat(path, &st) != 0) {
-    if (errno == ENOENT)
-      return NO;
+  if (fstat(file_fd, &st) != 0)
     return ERR;
-  }
 
   if (!S_ISREG(st.st_mode))
     return ERR;
   if (st.st_uid != getuid())
     return ERR;
-  // TODO: instead of failing close we may try to se the correct credentials
-  // once
   if ((st.st_mode & 0777) != 0600)
     return ERR;
 
-  return ss_meta_from_stat(&st, out_meta) == OK ? YES : ERR;
+  return fileio_meta_from_stat(&st, out_meta);
+}
+
+/* Opens credentials file in read mode and validates ownership/permissions.
+ * It borrows 'store' and writes outputs to caller-owned 'out_fd/out_meta'.
+ * Side effects: opens one fd and reads metadata; does not create files.
+ * Error semantics: returns YES on success, NO when file is missing, ERR on
+ * invalid input or filesystem/policy failures.
+ */
+static AdbxTriStatus ss_open_credfile_read(FileSecretStore *store, int *out_fd,
+                                           FileMeta *out_meta) {
+  if (!store || !out_fd || !out_meta)
+    return ERR;
+  *out_fd = -1;
+  memset(out_meta, 0, sizeof(*out_meta));
+
+  int dir_fd = ss_get_dir_fd(store);
+  if (dir_fd < 0)
+    return ERR;
+
+  int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+  int file_fd = openat(dir_fd, SS_CRED_FILE, flags);
+  if (file_fd < 0) {
+    if (errno == ENOENT)
+      return NO;
+    return ERR;
+  }
+
+  if (ss_validate_credfile_fd(file_fd, out_meta) != OK) {
+    close(file_fd);
+    return ERR;
+  }
+
+  *out_fd = file_fd;
+  return YES;
 }
 
 /* Serializes one entry list into JSON payload.
@@ -716,100 +493,6 @@ error:
   return ERR;
 }
 
-/* Writes exactly len bytes to an open fd.
- * It borrows all inputs and performs no allocations.
- * Side effects: performs write syscalls.
- * Error semantics: returns OK on success, ERR on invalid input or write
- * failure.
- */
-static AdbxStatus ss_write_all_fd(int fd, const uint8_t *src, size_t len) {
-  if (fd < 0 || (!src && len != 0))
-    return ERR;
-
-  size_t off = 0;
-  while (off < len) {
-    ssize_t n = write(fd, src + off, len - off);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      return ERR;
-    }
-    if (n == 0)
-      return ERR;
-    off += (size_t)n;
-  }
-
-  return OK;
-}
-
-/* Persists bytes through temp file + rename with durability fsyncs.
- * It borrows all inputs and does not retain pointers.
- * Side effects: creates temp file, writes bytes, fsyncs file and directory,
- * then renames into destination path.
- * Error semantics: returns OK on success, ERR on any filesystem failure.
- */
-static AdbxStatus ss_write_atomic(const char *dir_path, const char *file_path,
-                                  const uint8_t *data, size_t len) {
-  if (!dir_path || !file_path || (!data && len != 0))
-    return ERR;
-
-  char *tpl = ss_join_path2(dir_path, SS_CRED_FILE ".tmp.XXXXXX");
-  if (!tpl)
-    return ERR;
-
-  int tfd = mkstemp(tpl);
-  if (tfd < 0) {
-    free(tpl);
-    return ERR;
-  }
-
-  if (fchmod(tfd, 0600) != 0) {
-    (void)close(tfd);
-    (void)unlink(tpl);
-    free(tpl);
-    return ERR;
-  }
-
-  if (ss_write_all_fd(tfd, data, len) != OK) {
-    (void)close(tfd);
-    (void)unlink(tpl);
-    free(tpl);
-    return ERR;
-  }
-
-  if (fsync(tfd) != 0) {
-    (void)close(tfd);
-    (void)unlink(tpl);
-    free(tpl);
-    return ERR;
-  }
-
-  if (close(tfd) != 0) {
-    (void)unlink(tpl);
-    free(tpl);
-    return ERR;
-  }
-
-  if (rename(tpl, file_path) != 0) {
-    (void)unlink(tpl);
-    free(tpl);
-    return ERR;
-  }
-  free(tpl);
-
-  int dfd = open(dir_path, O_RDONLY | O_DIRECTORY);
-  if (dfd < 0)
-    return ERR;
-  if (fsync(dfd) != 0) {
-    (void)close(dfd);
-    return ERR;
-  }
-  if (close(dfd) != 0)
-    return ERR;
-
-  return OK;
-}
-
 /* Parses JSON payload into one sorted SecretEntryList.
  * It borrows 'json' and allocates all output memory in out_list arena.
  * Side effects: allocates temporary decoded strings and output arena.
@@ -849,10 +532,15 @@ static AdbxStatus ss_parse_entries_json(const char *json, size_t json_len,
   if (jsget_array_objects_begin(&jg, "entries", &it) != YES)
     return ERR;
 
-  SecretEntryTmp *tmp = NULL;
-  size_t tmp_n = 0;
-  size_t tmp_cap = 0;
+  // first, we allocate all the entries, unordered, at the beginning of the
+  // arena
+  if (it.count < 0)
+    return ERR;
+  size_t n_entries = (size_t)it.count;
+  if (ss_list_init_with_n_entries(out_list, n_entries) != OK)
+    return ERR;
 
+  size_t fill_i = 0;
   for (;;) {
     JsonGetter entry = {0};
     AdbxTriStatus nrc = jsget_array_objects_next(&jg, &it, &entry);
@@ -877,54 +565,60 @@ static AdbxStatus ss_parse_entries_json(const char *json, size_t json_len,
       goto parse_error;
     }
 
-    if (ref[0] == '\0') {
+    if (fill_i >= out_list->n_entries || ref[0] == '\0') {
       free(ref);
       ss_secret_free(&secret);
       goto parse_error;
     }
 
-    if (ss_tmp_push_owned(&tmp, &tmp_n, &tmp_cap, ref, secret) != OK) {
+    // TODO: add a json_codec decode-into-arena helper to avoid this extra
+    // heap-allocation+copy path for decoded strings.
+
+    // transfer ownership of the strings to the arena and wire the new pointers
+    // to the corresponding entry
+    if (ss_list_set_entry_copy(out_list, fill_i, ref, secret) != OK) {
       free(ref);
       ss_secret_free(&secret);
       goto parse_error;
     }
+    fill_i++;
+    free(ref);
+    ss_secret_free(&secret);
   }
 
-  if (tmp_n > 1)
-    qsort(tmp, tmp_n, sizeof(*tmp), ss_entry_cmp);
-
-  // makes sure there are no duplicates secret references, else fail close
-  for (size_t i = 1; i < tmp_n; i++) {
-    if (strcmp(tmp[i - 1].ref, tmp[i].ref) == 0)
-      goto parse_error;
-  }
-
-  if (ss_list_init_from_tmp_sorted(tmp, tmp_n, out_list) != OK)
+  // defensive check, we should've filled exactly n_entries
+  if (fill_i != out_list->n_entries)
     goto parse_error;
 
-  ss_tmp_clean(tmp, tmp_n);
+  if (out_list->n_entries > 1)
+    qsort(out_list->entries, out_list->n_entries, sizeof(*out_list->entries),
+          ss_entry_cmp);
+
+  // makes sure there are no duplicates secret references, else fail close
+  for (size_t i = 1; i < out_list->n_entries; i++) {
+    if (strcmp(out_list->entries[i - 1].ref, out_list->entries[i].ref) == 0)
+      goto parse_error;
+  }
+
   return OK;
 
 parse_error:
-  ss_tmp_clean(tmp, tmp_n);
   ss_entries_clean(out_list);
   return ERR;
 }
 
-/* Loads and parses one credentials file into list.
- * It borrows file_path and writes an owned list to out_list.
- * Side effects: performs file I/O and parsing allocations.
+/* Loads credentials at the already opened 'file_fd' and stores them into list.
+ * It borrows file_fd and writes an owned list to out_list.
  * Error semantics: returns OK on success, ERR on I/O/parsing failures.
  */
-static AdbxStatus ss_load_list_from_file(const char *file_path,
-                                         SecretEntryList *out_list) {
-  if (!file_path || !out_list)
+static AdbxStatus ss_load_list_from_fd(int file_fd, SecretEntryList *out_list) {
+  if (file_fd < 0 || !out_list)
     return ERR;
 
   StrBuf sb;
   sb_init(&sb);
 
-  if (fileio_sb_read_limit(file_path, SS_FILE_MAX_BYTES, &sb) != OK) {
+  if (fileio_sb_read_limit_fd(file_fd, SS_FILE_MAX_BYTES, &sb) != OK) {
     sb_clean(&sb);
     return ERR;
   }
@@ -939,89 +633,87 @@ static AdbxStatus ss_load_list_from_file(const char *file_path,
   return rc;
 }
 
-/* Writes one entry list to credentials file with strict policy checks.
- * It borrows inputs and does not retain pointers.
- * Side effects: validates directory policy and writes file atomically.
- * Error semantics: returns OK on success, ERR on policy or I/O failures.
- */
-static AdbxStatus ss_store_list_to_file(FileSecretStore *store,
-                                        const SecretEntryList *list) {
-  if (!store || !list)
-    return ERR;
-
-  if (ss_validate_user_dir_0700(store->dir_path) != YES)
-    return ERR;
-
-  StrBuf sb;
-  sb_init(&sb);
-  if (ss_serialize_entries(list, &sb) != OK) {
-    sb_zero_clean(&sb);
-    return ERR;
-  }
-
-  AdbxStatus rc = ss_write_atomic(store->dir_path, store->file_path,
-                                  (const uint8_t *)sb.data, sb.len);
-  sb_zero_clean(&sb);
-  return rc;
-}
-
-/* Refreshes in-memory cache when file metadata changed.
- * It borrows 'store' and updates cache state in place.
- * Side effects: validates filesystem policy, may read+parse credential file,
- * and zero/replace old cached secrets.
- * Error semantics: returns OK on success, ERR on policy, I/O, or parse
- * failures.
+/* Refreshes secret entries if the file that contains them is changed from the
+ * latest cached version by 'store'. Error semantics: returns OK on success, ERR
+ * on invalid input, I/O or parse failures.
  */
 static AdbxStatus ss_refresh_if_changed(FileSecretStore *store) {
   if (!store)
     return ERR;
 
-  if (ss_validate_user_dir_0700(store->dir_path) != YES)
-    return ERR;
-
-  SsFileMeta meta_now = {0};
-  AdbxTriStatus frc = ss_stat_file_strict(store->file_path, &meta_now);
+  FileMeta new_meta = {0};
+  int file_fd = -1;
+  AdbxTriStatus frc = ss_open_credfile_read(store, &file_fd, &new_meta);
   if (frc == ERR)
     return ERR;
+  if (frc == NO) {
+    // the file is missing, so SecretFileStore will have all the attribute to 0
+    // to represent an empty state
+    if (store->cache_loaded == 1 &&
+        fileio_meta_equal(&store->cache_meta, &new_meta) == YES) {
+      return OK;
+    }
+
+    SecretEntryList old = store->cache;
+    memset(&store->cache, 0, sizeof(store->cache));
+    store->cache_meta = new_meta;
+    store->cache_loaded = 1;
+    ss_entries_clean(&old);
+    return OK;
+  }
 
   if (store->cache_loaded == 1 &&
-      ss_meta_equal(&store->cache_meta, &meta_now) == YES)
+      fileio_meta_equal(&store->cache_meta, &new_meta) == YES) {
+    close(file_fd);
     return OK;
+  }
 
   SecretEntryList next = {0};
-  if (frc == YES) {
-    if (ss_load_list_from_file(store->file_path, &next) != OK)
-      return ERR;
+  if (ss_load_list_from_fd(file_fd, &next) != OK) {
+    close(file_fd);
+    return ERR;
   }
 
   SecretEntryList old = store->cache;
   store->cache = next;
-  store->cache_meta = meta_now;
+  store->cache_meta = new_meta;
   store->cache_loaded = 1;
   ss_entries_clean(&old);
+  close(file_fd);
+
   return OK;
 }
 
-/* Persists new list and swaps it into store cache.
- * It borrows 'store' and consumes 'next' on success.
- * Side effects: writes credential file, stats metadata, and replaces in-memory
- * cache with zeroized cleanup of old cache.
- * Error semantics: returns OK on success, ERR on write/stat failures.
+/* Persists new list 'next' at SS_CRED_FILE inside 'store'->dir_fd
+ * and swaps it into 'store' cache. It borrows all the input. Side effects:
+ * writes credential file, stats metadata, and replaces in-memory cache with
+ * zeroized cleanup of old cache. Error semantics: returns OK on success, ERR on
+ * write/stat failures.
  */
 static AdbxStatus ss_persist_and_swap(FileSecretStore *store,
                                       SecretEntryList *next) {
   if (!store || !next)
     return ERR;
 
-  if (ss_store_list_to_file(store, next) != OK)
+  StrBuf sb;
+  sb_init(&sb);
+  if (ss_serialize_entries(next, &sb) != OK) {
+    sb_zero_clean(&sb);
     return ERR;
+  }
 
-  SsFileMeta meta_new = {0};
-  if (ss_stat_file_strict(store->file_path, &meta_new) != YES)
+  FileMeta meta_new = {0};
+  int dir_fd = ss_get_dir_fd(store);
+  AdbxTriStatus rc = write_atomic(dir_fd, SS_CRED_FILE,
+                                  (const uint8_t *)sb.data, sb.len, &meta_new);
+  sb_zero_clean(&sb);
+  // TODO: we treat lock blocked as ERR, maybe there's a better design
+  if (rc != YES)
     return ERR;
 
   SecretEntryList old = store->cache;
   store->cache = *next;
+  // clear memory
   next->entries = NULL;
   next->n_entries = 0;
   memset(&next->arena, 0, sizeof(next->arena));
@@ -1054,6 +746,8 @@ secret_store_file_get(SecretStore *base, const char *secret_ref, StrBuf *out) {
   SecretEntry key = {0};
   key.ref = secret_ref;
   SecretEntryList *list = &store->cache;
+  if (list->n_entries == 0 || !list->entries)
+    return NO;
   const SecretEntry *e = bsearch(&key, list->entries, list->n_entries,
                                  sizeof(*list->entries), ss_entry_cmp);
   if (!e)
@@ -1079,19 +773,18 @@ static AdbxStatus secret_store_file_set(SecretStore *base,
     return ERR;
 
   FileSecretStore *store = (FileSecretStore *)base;
-  if (ss_refresh_if_changed(store) != OK)
+  if (ss_refresh_if_changed(store) != OK) {
     return ERR;
+  }
 
   SecretEntryList next = {0};
-  AdbxStatus rc =
-      ss_list_build_with_upsert(&store->cache, secret_ref, secret, &next);
-  if (rc != OK)
+  if (ss_list_build_with_upsert(&store->cache, secret_ref, secret, &next) != OK)
     return ERR;
 
-  rc = ss_persist_and_swap(store, &next);
-  if (rc != OK)
+  AdbxStatus prc = ss_persist_and_swap(store, &next);
+  if (prc != OK)
     ss_entries_clean(&next);
-  return rc;
+  return prc;
 }
 
 /* Deletes one secret by ref and updates cache atomically.
@@ -1161,8 +854,9 @@ static void secret_store_file_destroy(SecretStore *base) {
 
   FileSecretStore *store = (FileSecretStore *)base;
   ss_entries_clean(&store->cache);
-  free(store->file_path);
-  free(store->dir_path);
+
+  if (store->dir_fd >= 0)
+    close(store->dir_fd);
   free(store);
 }
 
@@ -1175,20 +869,27 @@ static const SecretStoreVTable SECRET_STORE_FILE_VT = {
 };
 
 SecretStore *secret_store_file_backend_create(void) {
-  char *dir_path = NULL;
-  char *file_path = NULL;
-  if (ss_prepare_paths(&dir_path, &file_path) != OK) {
-    free(dir_path);
-    free(file_path);
-    return NULL;
-  }
-
-  FileSecretStore *store = (FileSecretStore *)xcalloc(1, sizeof(*store));
+  FileSecretStore *store = (FileSecretStore *)xmalloc(sizeof(*store));
   store->base.vt = &SECRET_STORE_FILE_VT;
-  store->dir_path = dir_path;
-  store->file_path = file_path;
+  store->dir_fd = -1;
   store->cache_loaded = 0;
   memset(&store->cache_meta, 0, sizeof(store->cache_meta));
   memset(&store->cache, 0, sizeof(store->cache));
+
+  // Fail close: backend creation succeeds only when storage directory is ready.
+  if (ss_get_dir_fd(store) < 0) {
+    secret_store_file_destroy((SecretStore *)store);
+    return NULL;
+  }
+
   return (SecretStore *)store;
+}
+
+AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store) {
+  if (!out_store)
+    return ERR;
+  *out_store = NULL;
+
+  *out_store = secret_store_file_backend_create();
+  return *out_store ? YES : ERR;
 }

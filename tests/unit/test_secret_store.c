@@ -272,12 +272,52 @@ static void test_file_backend_duplicate_ref_is_err(void) {
   free(tmp);
 }
 
+/* Verifies backend probe tri-state contract.
+ * File backend must return YES and allocate a store.
+ * Platform-specific backends return NO when unavailable in this build and ERR
+ * when compiled in but initialization fails.
+ */
+static void test_backend_probe_contract(void) {
+  char *tmp = make_tmp_dir();
+  char *old_xdg = getenv("XDG_CONFIG_HOME");
+  int had_xdg = (old_xdg != NULL);
+  old_xdg = old_xdg ? dup_or_null(old_xdg) : NULL;
+  ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
+
+  SecretStore *store = NULL;
+
+  ASSERT_TRUE(secret_store_file_backend_probe(&store) == YES);
+  ASSERT_TRUE(store != NULL);
+  secret_store_destroy(store);
+  store = NULL;
+
+#if defined(__APPLE__)
+  ASSERT_TRUE(secret_store_keychain_backend_probe(&store) == ERR);
+#else
+  ASSERT_TRUE(secret_store_keychain_backend_probe(&store) == NO);
+#endif
+  ASSERT_TRUE(store == NULL);
+
+#if defined(HAVE_LIBSECRET)
+  ASSERT_TRUE(secret_store_libsecret_backend_probe(&store) == ERR);
+#else
+  ASSERT_TRUE(secret_store_libsecret_backend_probe(&store) == NO);
+#endif
+  ASSERT_TRUE(store == NULL);
+
+  restore_env("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  free(old_xdg);
+  cleanup_tmp_tree(tmp);
+  free(tmp);
+}
+
 int main(void) {
   test_file_backend_roundtrip();
   test_file_backend_rejects_bad_mode();
   test_secret_store_factory_usable();
   test_file_backend_refreshes_on_disk_change();
   test_file_backend_duplicate_ref_is_err();
+  test_backend_probe_contract();
   fprintf(stderr, "OK: test_secret_store\n");
   return 0;
 }
