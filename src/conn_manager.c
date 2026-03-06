@@ -84,7 +84,12 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
     return ERR;
   }
   if (s_rc != YES) {
-    TLOG("ERROR - secret_store_get failed for %s", e->profile->connection_name);
+    // TODO: maybe print to stderr
+    const char *ss_err = secret_store_last_error(m->secrets);
+    (void)ss_err;
+    TLOG("ERROR - secret_store_get failed for %s: %s",
+         e->profile->connection_name,
+         (ss_err && ss_err[0] != '\0') ? ss_err : "no backend error detail");
     sb_zero_clean(&pw);
     return ERR;
   }

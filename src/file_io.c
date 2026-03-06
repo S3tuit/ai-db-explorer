@@ -32,14 +32,13 @@ static AdbxStatus fileio_validate_common(const char *path, size_t max_bytes) {
   return fileio_validate_max_bytes(max_bytes);
 }
 
-/* Reads from one open fd into StrBuf with optional strict EOF enforcement.
+/* Reads from one open fd into StrBuf and fails when content exceeds max_bytes.
  * Ownership: borrows 'fd'; writes into caller-owned 'out' and 'out_nread'.
  * Side effects: performs read(2) calls and mutates StrBuf 'out'.
  * Error semantics: returns OK on success, ERR on invalid input, I/O failure,
- * or strict-over-limit failure when 'require_eof' is YES.
+ * or when file size exceeds 'max_bytes'.
  */
 static AdbxStatus fileio_sb_read_fd_impl(int fd, size_t max_bytes, StrBuf *out,
-                                         AdbxTriStatus require_eof,
                                          ssize_t *out_nread) {
   if (fd < 0 || !out || !out_nread ||
       fileio_validate_max_bytes(max_bytes) != OK)
@@ -54,19 +53,17 @@ static AdbxStatus fileio_sb_read_fd_impl(int fd, size_t max_bytes, StrBuf *out,
 
   for (;;) {
     if (total == max_bytes) {
-      if (require_eof == YES) {
-        uint8_t probe = 0;
-        ssize_t pn = 0;
-        for (;;) {
-          pn = read(fd, &probe, 1);
-          if (pn < 0 && errno == EINTR)
-            continue;
-          break;
-        }
-        if (pn < 0 || pn > 0) {
-          rc = ERR;
-          break;
-        }
+      uint8_t probe = 0;
+      ssize_t pn = 0;
+      for (;;) {
+        pn = read(fd, &probe, 1);
+        if (pn < 0 && errno == EINTR)
+          continue;
+        break;
+      }
+      if (pn < 0 || pn > 0) {
+        rc = ERR;
+        break;
       }
       break;
     }
@@ -106,15 +103,14 @@ static AdbxStatus fileio_sb_read_fd_impl(int fd, size_t max_bytes, StrBuf *out,
   return OK;
 }
 
-/* Reads one file path into StrBuf with optional strict EOF enforcement.
+/* Reads one file path into StrBuf and fails when content exceeds max_bytes.
  * Ownership: borrows 'path'; writes into caller-owned 'out' and 'out_nread'.
  * Side effects: opens/reads/closes file and mutates StrBuf 'out'.
  * Error semantics: returns OK on success, ERR on invalid input, I/O failure,
- * or strict-over-limit failure when 'require_eof' is YES.
+ * or when file size exceeds 'max_bytes'.
  */
 static AdbxStatus fileio_sb_read_impl(const char *path, size_t max_bytes,
-                                      StrBuf *out, AdbxTriStatus require_eof,
-                                      ssize_t *out_nread) {
+                                      StrBuf *out, ssize_t *out_nread) {
   if (!out_nread || fileio_validate_common(path, max_bytes) != OK)
     return ERR;
 
@@ -122,8 +118,7 @@ static AdbxStatus fileio_sb_read_impl(const char *path, size_t max_bytes,
   if (fd < 0)
     return ERR;
 
-  AdbxStatus rc =
-      fileio_sb_read_fd_impl(fd, max_bytes, out, require_eof, out_nread);
+  AdbxStatus rc = fileio_sb_read_fd_impl(fd, max_bytes, out, out_nread);
   if (close(fd) != 0)
     rc = ERR;
   if (rc != OK) {
@@ -135,21 +130,26 @@ static AdbxStatus fileio_sb_read_impl(const char *path, size_t max_bytes,
   return OK;
 }
 
-/* Reads a file into caller-owned byte buffer with optional strict EOF check.
- * Ownership: borrows 'path'; writes into caller-owned 'out' and 'out_nread'.
- * Side effects: performs filesystem I/O.
- * Error semantics: returns OK on success, ERR on invalid input, I/O failure,
- * or strict-over-limit failure when 'require_eof' is YES.
- */
-static AdbxStatus fileio_raw_read_impl(const char *path, size_t max_bytes,
-                                       uint8_t *out, AdbxTriStatus require_eof,
-                                       size_t *out_nread) {
-  if (!out_nread || fileio_validate_common(path, max_bytes) != OK)
+AdbxStatus fileio_sb_read_limit(const char *path, size_t max_bytes,
+                                StrBuf *out) {
+  ssize_t nread = -1;
+  if (fileio_sb_read_impl(path, max_bytes, out, &nread) != OK)
     return ERR;
-  if (!out && max_bytes != 0)
-    return ERR;
+  return OK;
+}
 
-  *out_nread = 0;
+AdbxStatus fileio_sb_read_limit_fd(int fd, size_t max_bytes, StrBuf *out) {
+  ssize_t nread = -1;
+  if (fileio_sb_read_fd_impl(fd, max_bytes, out, &nread) != OK)
+    return ERR;
+  return OK;
+}
+
+AdbxStatus fileio_read_exact(const char *path, size_t n_bytes, uint8_t *out) {
+  if (fileio_validate_common(path, n_bytes) != OK)
+    return ERR;
+  if (!out && n_bytes != 0)
+    return ERR;
 
   int fd = open(path, O_RDONLY);
   if (fd < 0)
@@ -158,32 +158,12 @@ static AdbxStatus fileio_raw_read_impl(const char *path, size_t max_bytes,
   AdbxStatus rc = OK;
   size_t total = 0;
 
-  for (;;) {
-    if (total == max_bytes) {
-      if (require_eof == YES) {
-        uint8_t probe = 0;
-        ssize_t pn = 0;
-        for (;;) {
-          pn = read(fd, &probe, 1);
-          if (pn < 0 && errno == EINTR)
-            continue;
-          break;
-        }
-        if (pn < 0 || pn > 0) {
-          rc = ERR;
-          break;
-        }
-      }
+  while (total < n_bytes) {
+    ssize_t n = read(fd, out + total, n_bytes - total);
+    if (n == 0) {
+      rc = ERR;
       break;
     }
-
-    size_t chunk_cap = max_bytes - total;
-    if (chunk_cap > FILEIO_READ_CHUNK)
-      chunk_cap = FILEIO_READ_CHUNK;
-
-    ssize_t n = read(fd, out + total, chunk_cap);
-    if (n == 0)
-      break;
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -192,54 +172,29 @@ static AdbxStatus fileio_raw_read_impl(const char *path, size_t max_bytes,
     }
 
     size_t un = (size_t)n;
-    if (un > max_bytes - total || total > (size_t)SSIZE_MAX - un) {
+    if (un > n_bytes - total || total > (size_t)SSIZE_MAX - un) {
       rc = ERR;
       break;
     }
     total += un;
   }
 
+  if (rc == OK) {
+    uint8_t probe = 0;
+    ssize_t pn = 0;
+    for (;;) {
+      pn = read(fd, &probe, 1);
+      if (pn < 0 && errno == EINTR)
+        continue;
+      break;
+    }
+    if (pn < 0 || pn > 0)
+      rc = ERR;
+  }
+
   if (close(fd) != 0)
     rc = ERR;
-  if (rc != OK)
-    return ERR;
-
-  *out_nread = total;
-  return OK;
-}
-
-AdbxStatus fileio_sb_read_limit(const char *path, size_t max_bytes,
-                                StrBuf *out) {
-  ssize_t nread = -1;
-  if (fileio_sb_read_impl(path, max_bytes, out, YES, &nread) != OK)
-    return ERR;
-  return OK;
-}
-
-ssize_t fileio_sb_read_up_to(const char *path, size_t max_bytes, StrBuf *out) {
-  ssize_t nread = -1;
-  if (fileio_sb_read_impl(path, max_bytes, out, NO, &nread) != OK)
-    return -1;
-  return nread;
-}
-
-AdbxStatus fileio_sb_read_limit_fd(int fd, size_t max_bytes, StrBuf *out) {
-  ssize_t nread = -1;
-  if (fileio_sb_read_fd_impl(fd, max_bytes, out, YES, &nread) != OK)
-    return ERR;
-  return OK;
-}
-
-AdbxStatus fileio_read_limit(const char *path, size_t max_bytes, uint8_t *out,
-                             size_t *out_nread) {
-  return fileio_raw_read_impl(path, max_bytes, out, YES, out_nread);
-}
-
-ssize_t fileio_read_up_to(const char *path, size_t max_bytes, uint8_t *out) {
-  size_t nread = 0;
-  if (fileio_raw_read_impl(path, max_bytes, out, NO, &nread) != OK)
-    return -1;
-  return (ssize_t)nread;
+  return rc;
 }
 
 /* --------------------------------- write --------------------------------- */

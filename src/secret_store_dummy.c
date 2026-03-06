@@ -99,12 +99,34 @@ static AdbxStatus secret_store_dummy_wipe_all(SecretStore *store) {
  * Error semantics: no return value. */
 static void secret_store_dummy_destroy(SecretStore *store) { free(store); }
 
+/* Returns the last backend error for dummy store.
+ * Ownership: borrows 'store'; returned string is static.
+ * Side effects: none.
+ * Error semantics: always returns one descriptive static string.
+ */
+static const char *secret_store_dummy_last_error(SecretStore *store) {
+  (void)store;
+  return "dummy secret store does not persist secrets";
+}
+
+/* Returns the last backend error category for dummy store.
+ * Ownership: borrows 'store'.
+ * Side effects: none.
+ * Error semantics: returns SSERR_NONE because this backend is test-only.
+ */
+static SecretStoreErrCode secret_store_dummy_last_error_code(SecretStore *store) {
+  (void)store;
+  return SSERR_NONE;
+}
+
 static const SecretStoreVTable SECRET_STORE_DUMMY_VT = {
     .get = secret_store_dummy_get,
     .set = secret_store_dummy_set,
     .delete = secret_store_dummy_delete,
     .wipe_all = secret_store_dummy_wipe_all,
     .destroy = secret_store_dummy_destroy,
+    .last_error = secret_store_dummy_last_error,
+    .last_error_code = secret_store_dummy_last_error_code,
 };
 
 SecretStore *secret_store_dummy_backend_create(void) {

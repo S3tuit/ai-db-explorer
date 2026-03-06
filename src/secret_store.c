@@ -79,3 +79,16 @@ AdbxStatus secret_store_wipe_all(SecretStore *store) {
     return ERR;
   return store->vt->wipe_all(store);
 }
+
+const char *secret_store_last_error(SecretStore *store) {
+  if (!store || !store->vt || !store->vt->last_error)
+    return "";
+  const char *msg = store->vt->last_error(store);
+  return msg ? msg : "";
+}
+
+SecretStoreErrCode secret_store_last_error_code(SecretStore *store) {
+  if (!store || !store->vt || !store->vt->last_error_code)
+    return SSERR_NONE;
+  return store->vt->last_error_code(store);
+}

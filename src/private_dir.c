@@ -168,13 +168,7 @@ AdbxStatus privdir_generate_token(const PrivDir *pd) {
 AdbxStatus privdir_read_token(const PrivDir *pd, uint8_t *out) {
   if (!pd || !pd->token_path || !out)
     return ERR;
-
-  size_t nread = 0;
-  if (fileio_read_limit(pd->token_path, PRIVDIR_TOKEN_LEN, out, &nread) != OK)
-    return ERR;
-  if (nread != PRIVDIR_TOKEN_LEN)
-    return ERR;
-  return OK;
+  return fileio_read_exact(pd->token_path, PRIVDIR_TOKEN_LEN, out);
 }
 
 void privdir_cleanup(const PrivDir *pd) {

@@ -96,15 +96,21 @@ static AdbxStatus procid_read_stat_fields(pid_t pid, StatFields *stats) {
   if (n < 0 || (size_t)n >= sizeof(path))
     return ERR;
 
-  char line[PROCID_STAT_MAX + 1];
-  ssize_t nread = fileio_read_up_to(path, PROCID_STAT_MAX, (uint8_t *)line);
-  if (nread < 0)
+  StrBuf line;
+  sb_init(&line);
+  if (fileio_sb_read_limit(path, PROCID_STAT_MAX, &line) != OK) {
+    sb_clean(&line);
     return ERR;
-  line[nread] = '\0';
-  if (line[0] == '\0')
-    return ERR;
+  }
 
-  AdbxStatus rc = procid_parse_stat_line(line, stats);
+  char *line_cstr = sb_to_cstr(&line);
+  if (line_cstr[0] == '\0') {
+    sb_clean(&line);
+    return ERR;
+  }
+
+  AdbxStatus rc = procid_parse_stat_line(line_cstr, stats);
+  sb_clean(&line);
   return rc;
 }
 

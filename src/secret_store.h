@@ -10,6 +10,18 @@
 typedef struct SecretStore SecretStore;
 typedef struct SecretStoreVTable SecretStoreVTable;
 
+typedef enum {
+  SSERR_NONE = 0,
+  SSERR_INPUT,     // function received a bad input, this represent a likely
+                   // internal bug
+  SSERR_ENV,       // the env where the system is running has something missing
+  SSERR_DIR,       // there are problems in the directory where we store the
+                   // credentials file
+  SSERR_CRED_FILE, // errors with the credentials file itself
+  SSERR_PARSE,     // credenials file is malformed
+  SSERR_WRITE,     // I/O error
+} SecretStoreErrCode;
+
 struct SecretStoreVTable {
   // Writes a NUL-terminated secret into 'out'.
   // Returns YES when found, NO when missing, ERR on failure.
@@ -23,6 +35,12 @@ struct SecretStoreVTable {
   AdbxStatus (*wipe_all)(SecretStore *store);
   // Destroys the store and releases resources.
   void (*destroy)(SecretStore *store);
+  // Returns backend-specific last error text for diagnostics.
+  // Safe to return NULL since our wrapper secret_store_last_error handles it.
+  const char *(*last_error)(SecretStore *store);
+  // Returns backend-specific error category for diagnostics.
+  // Safe to return SSERR_NONE when there is no detail.
+  SecretStoreErrCode (*last_error_code)(SecretStore *store);
 };
 
 struct SecretStore {
@@ -50,6 +68,16 @@ AdbxStatus secret_store_set(SecretStore *store, const char *secret_ref,
 AdbxStatus secret_store_delete(SecretStore *store, const char *secret_ref);
 
 AdbxStatus secret_store_wipe_all(SecretStore *store);
+
+/* Returns backend-specific last error text.
+ * Error semantics: returns empty string when unavailable or no error detail.
+ */
+const char *secret_store_last_error(SecretStore *store);
+
+/* Returns backend-specific last error category.
+ * Error semantics: returns SSERR_NONE when unavailable or no error detail.
+ */
+SecretStoreErrCode secret_store_last_error_code(SecretStore *store);
 
 /* ---------------------------- SUPPORTED STORES --------------------------- */
 

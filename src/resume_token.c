@@ -228,21 +228,18 @@ AdbxTriStatus restok_load(ResumeTokenStore *store,
     return NO;
   }
 
-  // read exact token length
-  size_t nread = 0;
-  if (fileio_read_limit(store->token_path, ADBX_RESUME_TOKEN_LEN, out,
-                        &nread) != OK)
-    return ERR;
-  if (nread == ADBX_RESUME_TOKEN_LEN) {
-    return YES;
+  if (st.st_size != (off_t)ADBX_RESUME_TOKEN_LEN) {
+    // Corrupted token files are treated as stale and removed immediately.
+    fprintf(stderr, "Token file corrupted (size mismatch), treating as stale\n");
+    if (restok_delete_path(store->token_path) != OK) {
+      restok_disable(store, "failed to delete corrupted token file");
+    }
+    return NO;
   }
 
-  // Corrupted token files are treated as stale and removed immediately.
-  fprintf(stderr, "Token file corrupted, treating as stale\n");
-  if (restok_delete_path(store->token_path) != OK) {
-    restok_disable(store, "failed to delete corrupted token file");
-  }
-  return NO;
+  if (fileio_read_exact(store->token_path, ADBX_RESUME_TOKEN_LEN, out) != OK)
+    return ERR;
+  return YES;
 }
 
 AdbxStatus restok_store(ResumeTokenStore *store,

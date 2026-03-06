@@ -139,7 +139,7 @@ static void assert_dir_layout(const char *dir_path, const char *expected_name,
 /* Asserts file at 'path' has exactly 'len' bytes and every byte equals
  * 'expected'.
  * Ownership: borrows 'path'; no heap allocations.
- * Side effects: reads file content through fileio_read_limit.
+ * Side effects: reads file content through fileio_read_exact.
  * Error semantics: asserts on read failure or content mismatch.
  */
 static void assert_file_uniform_byte(const char *path, uint8_t expected,
@@ -147,9 +147,7 @@ static void assert_file_uniform_byte(const char *path, uint8_t expected,
   uint8_t out[256] = {0};
   ASSERT_TRUE(len <= sizeof(out));
 
-  size_t nread = 0;
-  ASSERT_TRUE(fileio_read_limit(path, sizeof(out), out, &nread) == OK);
-  ASSERT_TRUE(nread == len);
+  ASSERT_TRUE(fileio_read_exact(path, len, out) == OK);
   for (size_t i = 0; i < len; i++) {
     ASSERT_TRUE(out[i] == expected);
   }
@@ -237,56 +235,6 @@ static void test_read_resets_output(void) {
   free(p2);
 }
 
-/* Verifies fileio_sb_read_up_to rejects invalid input and leaves output empty.
- */
-static void test_sb_read_up_to_bad_input(void) {
-  StrBuf out;
-  sb_init(&out);
-  ASSERT_TRUE(fileio_sb_read_up_to(NULL, 16, &out) == -1);
-  ASSERT_TRUE(fileio_sb_read_up_to("/tmp/does_not_exist_file_io",
-                                   STRBUF_MAX_BYTES + 1, &out) == -1);
-  ASSERT_TRUE(fileio_sb_read_up_to("/tmp/does_not_exist_file_io", 16, NULL) ==
-              -1);
-  ASSERT_TRUE(out.len == 0);
-  sb_clean(&out);
-}
-
-/* Verifies fileio_sb_read_up_to reads full content when file is shorter than
- * cap.
- */
-static void test_sb_read_up_to_shorter_than_cap(void) {
-  const uint8_t payload[] = {'q', 'w', 'e', 'r'};
-  char *path = write_tmp_file(payload, sizeof(payload));
-
-  StrBuf out;
-  sb_init(&out);
-  ASSERT_TRUE(fileio_sb_read_up_to(path, 64, &out) == (ssize_t)sizeof(payload));
-  ASSERT_TRUE(out.len == sizeof(payload));
-  ASSERT_TRUE(memcmp(out.data, payload, sizeof(payload)) == 0);
-
-  sb_clean(&out);
-  unlink(path);
-  free(path);
-}
-
-/* Verifies fileio_sb_read_up_to truncates at max_bytes without returning
- * error.
- */
-static void test_sb_read_up_to_longer_than_cap(void) {
-  const uint8_t payload[] = {'a', 'b', 'c', 'd', 'e', 'f'};
-  char *path = write_tmp_file(payload, sizeof(payload));
-
-  StrBuf out;
-  sb_init(&out);
-  ASSERT_TRUE(fileio_sb_read_up_to(path, 3, &out) == 3);
-  ASSERT_TRUE(out.len == 3);
-  ASSERT_TRUE(memcmp(out.data, payload, 3) == 0);
-
-  sb_clean(&out);
-  unlink(path);
-  free(path);
-}
-
 /* Verifies fileio_sb_read_limit_fd reads full content and keeps fd open. */
 static void test_sb_read_limit_fd_ok(void) {
   const uint8_t payload[] = {'f', 'd', 'o', 'k'};
@@ -336,67 +284,53 @@ static void test_sb_read_limit_fd_bad_input(void) {
   sb_clean(&out);
 }
 
-/* Verifies fileio_read_limit reads all bytes and reports output size. */
-static void test_read_limit_raw_ok(void) {
+/* Verifies fileio_read_exact reads all bytes when file size matches exactly.
+ */
+static void test_read_exact_raw_ok(void) {
   const uint8_t payload[] = {'r', 'a', 'w', '1'};
   char *path = write_tmp_file(payload, sizeof(payload));
 
-  uint8_t out[16] = {0};
-  size_t nread = 999;
-  ASSERT_TRUE(fileio_read_limit(path, 16, out, &nread) == OK);
-  ASSERT_TRUE(nread == sizeof(payload));
+  uint8_t out[sizeof(payload)] = {0};
+  ASSERT_TRUE(fileio_read_exact(path, sizeof(payload), out) == OK);
   ASSERT_TRUE(memcmp(out, payload, sizeof(payload)) == 0);
 
   unlink(path);
   free(path);
 }
 
-/* Verifies fileio_read_limit rejects files larger than max_bytes. */
-static void test_read_limit_raw_over_limit_fails(void) {
+/* Verifies fileio_read_exact fails when the file is shorter than n_bytes. */
+static void test_read_exact_raw_short_file_fails(void) {
+  const uint8_t payload[] = {'a', 'b', 'c'};
+  char *path = write_tmp_file(payload, sizeof(payload));
+
+  uint8_t out[4] = {0};
+  ASSERT_TRUE(fileio_read_exact(path, sizeof(out), out) == ERR);
+
+  unlink(path);
+  free(path);
+}
+
+/* Verifies fileio_read_exact fails when the file is longer than n_bytes. */
+static void test_read_exact_raw_long_file_fails(void) {
   const uint8_t payload[] = {'a', 'b', 'c', 'd', 'e', 'f'};
   char *path = write_tmp_file(payload, sizeof(payload));
 
-  uint8_t out[8] = {0};
-  size_t nread = 777;
-  ASSERT_TRUE(fileio_read_limit(path, 5, out, &nread) == ERR);
-  ASSERT_TRUE(nread == 0);
+  uint8_t out[5] = {0};
+  ASSERT_TRUE(fileio_read_exact(path, sizeof(out), out) == ERR);
 
   unlink(path);
   free(path);
 }
 
-/* Verifies fileio_read_up_to (raw) rejects invalid input. */
-static void test_read_up_to_raw_bad_input(void) {
+/* Verifies fileio_read_exact rejects invalid input. */
+static void test_read_exact_raw_bad_input(void) {
   uint8_t out[8] = {0};
-  ASSERT_TRUE(fileio_read_up_to(NULL, 8, out) == -1);
-  ASSERT_TRUE(fileio_read_up_to("/tmp/does_not_exist_file_io", 8, out) == -1);
-  ASSERT_TRUE(fileio_read_up_to("/tmp/does_not_exist_file_io", 8, NULL) == -1);
-}
-
-/* Verifies fileio_read_up_to (raw) returns full content when under cap. */
-static void test_read_up_to_raw_shorter_than_cap(void) {
-  const uint8_t payload[] = {'x', 'y', 'z'};
-  char *path = write_tmp_file(payload, sizeof(payload));
-
-  uint8_t out[8] = {0};
-  ASSERT_TRUE(fileio_read_up_to(path, 8, out) == (ssize_t)sizeof(payload));
-  ASSERT_TRUE(memcmp(out, payload, sizeof(payload)) == 0);
-
-  unlink(path);
-  free(path);
-}
-
-/* Verifies fileio_read_up_to (raw) truncates to cap without error. */
-static void test_read_up_to_raw_longer_than_cap(void) {
-  const uint8_t payload[] = {'1', '2', '3', '4', '5'};
-  char *path = write_tmp_file(payload, sizeof(payload));
-
-  uint8_t out[3] = {0};
-  ASSERT_TRUE(fileio_read_up_to(path, 3, out) == 3);
-  ASSERT_TRUE(memcmp(out, payload, 3) == 0);
-
-  unlink(path);
-  free(path);
+  ASSERT_TRUE(fileio_read_exact(NULL, 8, out) == ERR);
+  ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 8, out) == ERR);
+  ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 8, NULL) ==
+              ERR);
+  ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 0, NULL) ==
+              ERR);
 }
 
 /* Verifies fileio_write_exact rejects invalid arguments. */
@@ -425,10 +359,8 @@ static void test_write_exact_ok(void) {
   ASSERT_TRUE((st.st_mode & 0777) == 0600);
   ASSERT_TRUE(st.st_size == (off_t)sizeof(payload));
 
-  uint8_t out[16] = {0};
-  size_t nread = 0;
-  ASSERT_TRUE(fileio_read_limit(path, sizeof(out), out, &nread) == OK);
-  ASSERT_TRUE(nread == sizeof(payload));
+  uint8_t out[sizeof(payload)] = {0};
+  ASSERT_TRUE(fileio_read_exact(path, sizeof(payload), out) == OK);
   ASSERT_TRUE(memcmp(out, payload, sizeof(payload)) == 0);
 
   unlink(path);
@@ -449,10 +381,8 @@ static void test_write_exact_truncates_existing(void) {
   ASSERT_TRUE(stat(path, &st) == 0);
   ASSERT_TRUE(st.st_size == (off_t)sizeof(new_payload));
 
-  uint8_t out[8] = {0};
-  size_t nread = 0;
-  ASSERT_TRUE(fileio_read_limit(path, sizeof(out), out, &nread) == OK);
-  ASSERT_TRUE(nread == sizeof(new_payload));
+  uint8_t out[sizeof(new_payload)] = {0};
+  ASSERT_TRUE(fileio_read_exact(path, sizeof(new_payload), out) == OK);
   ASSERT_TRUE(memcmp(out, new_payload, sizeof(new_payload)) == 0);
 
   unlink(path);
@@ -671,11 +601,9 @@ static void test_write_atomic_concurrent_writers(void) {
   char *path = path_join(dir, file_name);
   ASSERT_TRUE(path != NULL);
 
-  uint8_t out[PAYLOAD_LEN + 1];
-  size_t nread = 0;
-  ASSERT_TRUE(fileio_read_limit(path, sizeof(out), out, &nread) == OK);
-  ASSERT_TRUE(nread == PAYLOAD_LEN);
-  for (size_t i = 1; i < nread; i++) {
+  uint8_t out[PAYLOAD_LEN];
+  ASSERT_TRUE(fileio_read_exact(path, PAYLOAD_LEN, out) == OK);
+  for (size_t i = 1; i < PAYLOAD_LEN; i++) {
     ASSERT_TRUE(out[i] == out[0]);
   }
 
@@ -905,17 +833,13 @@ int main(void) {
   test_read_over_limit_fails();
   test_read_missing_file_fails();
   test_read_resets_output();
-  test_sb_read_up_to_bad_input();
-  test_sb_read_up_to_shorter_than_cap();
-  test_sb_read_up_to_longer_than_cap();
   test_sb_read_limit_fd_ok();
   test_sb_read_limit_fd_over_limit_fails();
   test_sb_read_limit_fd_bad_input();
-  test_read_limit_raw_ok();
-  test_read_limit_raw_over_limit_fails();
-  test_read_up_to_raw_bad_input();
-  test_read_up_to_raw_shorter_than_cap();
-  test_read_up_to_raw_longer_than_cap();
+  test_read_exact_raw_ok();
+  test_read_exact_raw_short_file_fails();
+  test_read_exact_raw_long_file_fails();
+  test_read_exact_raw_bad_input();
   test_write_exact_bad_input();
   test_write_exact_ok();
   test_write_exact_truncates_existing();
