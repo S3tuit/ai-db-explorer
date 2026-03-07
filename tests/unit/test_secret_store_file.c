@@ -128,6 +128,28 @@ static char *home_cred_path(const char *tmp) {
   return cred;
 }
 
+/* Returns the expected app directory for the current platform-default policy.
+ * It borrows 'tmp' and returns one owned path.
+ */
+static char *default_app_dir_path(const char *tmp) {
+#ifdef __linux__
+  return xdg_app_dir_path(tmp);
+#else
+  return home_app_dir_path(tmp);
+#endif
+}
+
+/* Returns the expected credentials path for the current platform-default
+ * policy. It borrows 'tmp' and returns one owned path.
+ */
+static char *default_cred_path(const char *tmp) {
+#ifdef __linux__
+  return xdg_cred_path(tmp);
+#else
+  return home_cred_path(tmp);
+#endif
+}
+
 /* Removes one file path if present (best effort).
  * It borrows 'path' and ignores ENOENT.
  * Side effects: filesystem mutation.
@@ -318,7 +340,8 @@ static void assert_parse_error(SecretStore *ss) {
   ASSERT_TRUE(msg[0] != '\0');
 }
 
-/* Initializes one isolated file-store context using XDG_CONFIG_HOME=<tmp>.
+/* Initializes one isolated file-store context rooted at 'ctx->tmp' according
+ * to the current platform default policy.
  * It writes owned resources in 'ctx'.
  * Side effects: environment changes and filesystem creation.
  */
@@ -328,8 +351,19 @@ static void ctx_open_xdg(FileStoreCtx *ctx) {
 
   env_guard_begin(&ctx->env);
   ctx->tmp = make_tmp_dir();
+
+#ifdef __linux__
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", ctx->tmp, 1) == 0);
-  ctx->cred_path = xdg_cred_path(ctx->tmp);
+#else
+  ASSERT_TRUE(unsetenv("XDG_CONFIG_HOME") == 0);
+  ASSERT_TRUE(setenv("HOME", ctx->tmp, 1) == 0);
+  char *home_base = path_join(ctx->tmp, "Library/Application Support");
+  ASSERT_TRUE(home_base != NULL);
+  ensure_dir_tree(home_base);
+  free(home_base);
+#endif
+
+  ctx->cred_path = default_cred_path(ctx->tmp);
   ASSERT_TRUE(ctx->cred_path != NULL);
 
   ctx->ss = secret_store_file_backend_create();
@@ -559,7 +593,8 @@ static void test_directory_at_credentials_path_fails(void) {
   ctx_close(&ctx);
 }
 
-/* Verifies XDG_CONFIG_HOME absolute path is used directly (no extra .config).
+/* Verifies Linux uses XDG_CONFIG_HOME directly, while macOS ignores it and
+ * uses the HOME fallback tree instead.
  */
 static void test_xdg_absolute_path_used_directly(void) {
   EnvGuard env;
@@ -567,13 +602,27 @@ static void test_xdg_absolute_path_used_directly(void) {
 
   char *tmp = make_tmp_dir();
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
+  ASSERT_TRUE(setenv("HOME", tmp, 1) == 0);
+
+#ifdef __APPLE__
+  char *home_base = path_join(tmp, "Library/Application Support");
+  ASSERT_TRUE(home_base != NULL);
+  ensure_dir_tree(home_base);
+  free(home_base);
+#endif
 
   SecretStore *ss = secret_store_file_backend_create();
   ASSERT_TRUE(ss != NULL);
 
+#ifdef __linux__
   char *app_xdg = xdg_app_dir_path(tmp);
   char *cred_xdg = xdg_cred_path(tmp);
   char *app_wrong = home_app_dir_path(tmp);
+#else
+  char *app_xdg = home_app_dir_path(tmp);
+  char *cred_xdg = home_cred_path(tmp);
+  char *app_wrong = xdg_app_dir_path(tmp);
+#endif
 
   struct stat st = {0};
   ASSERT_TRUE(lstat(app_xdg, &st) == 0);
@@ -709,7 +758,13 @@ static void test_set_lock_contention_reports_write_error(void) {
   ctx_open_xdg(&ctx);
   ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == OK);
 
-  char *lock_path = path_join(ctx.tmp, "adbxplorer/credentials.json.lock");
+  char *cred_path = default_cred_path(ctx.tmp);
+  ASSERT_TRUE(cred_path != NULL);
+  int n = snprintf(NULL, 0, "%s.lock", cred_path);
+  ASSERT_TRUE(n > 0);
+  char *lock_path = xmalloc((size_t)n + 1u);
+  ASSERT_TRUE(snprintf(lock_path, (size_t)n + 1u, "%s.lock", cred_path) == n);
+  free(cred_path);
   ASSERT_TRUE(lock_path != NULL);
   int lfd = open(lock_path, O_CREAT | O_WRONLY, 0600);
   ASSERT_TRUE(lfd >= 0);
@@ -747,7 +802,13 @@ static void test_stale_lock_file_does_not_block_set(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
-  char *lock_path = path_join(ctx.tmp, "adbxplorer/credentials.json.lock");
+  char *cred_path = default_cred_path(ctx.tmp);
+  ASSERT_TRUE(cred_path != NULL);
+  int n = snprintf(NULL, 0, "%s.lock", cred_path);
+  ASSERT_TRUE(n > 0);
+  char *lock_path = xmalloc((size_t)n + 1u);
+  ASSERT_TRUE(snprintf(lock_path, (size_t)n + 1u, "%s.lock", cred_path) == n);
+  free(cred_path);
   ASSERT_TRUE(lock_path != NULL);
 
   int lfd = open(lock_path, O_CREAT | O_WRONLY, 0600);
@@ -779,7 +840,7 @@ static void test_calls_report_env_error_when_env_missing(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
-  char *app_dir = xdg_app_dir_path(ctx.tmp);
+  char *app_dir = default_app_dir_path(ctx.tmp);
   ASSERT_TRUE(close_fd_for_path(app_dir) == YES);
   free(app_dir);
 
@@ -807,7 +868,7 @@ static void test_calls_report_dir_error_after_config_dir_deleted(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
-  char *app_dir = xdg_app_dir_path(ctx.tmp);
+  char *app_dir = default_app_dir_path(ctx.tmp);
   ASSERT_TRUE(close_fd_for_path(app_dir) == YES);
 
   unlink_if_exists(ctx.cred_path);

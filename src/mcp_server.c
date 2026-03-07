@@ -200,7 +200,9 @@ static AdbxStatus mcpser_connect_and_handshake_broker(McpServer *s) {
     s->flags &= ~MCPSER_F_BROKER_READY;
 
   uint8_t secret_token[SECRET_TOKEN_LEN] = {0};
-  if (privdir_read_token(s->privd, secret_token) != OK) {
+  if (!s->privd->token_path ||
+      fileio_read_exact(s->privd->token_path, SECRET_TOKEN_LEN, secret_token) !=
+          OK) {
     TLOG("ERROR - failed to read broker secret token before reconnect");
     return ERR;
   }

@@ -16,6 +16,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,13 +49,12 @@
 #define IDLE_TTL (20 * 60)         // 20 minutes
 
 struct Broker {
-  int listen_fd;   // file descriptor of the socket used to
-                   // accept incoming connection requets
-  ConnManager *cm; // owned
-  char *sock_path; // owned, socket path for the broker
+  int listen_fd;            // file descriptor of the socket used to
+                            // accept incoming connection requets
+  ConnManager *cm;          // owned
+  PrivDirBrokerRuntime *rt; // owned private-dir runtime for socket/token paths
 
   uint8_t secret_token[SECRET_TOKEN_LEN];
-  uint8_t has_secret_token; // 1 if secret_token is set, 0 if NULL was passed
 
   PackedArray *active_sessions; // polled for I/O, max MAX_CLIENTS
   PackedArray *idle_sessions;   // not polled, max MAX_IDLE_SESSIONS
@@ -114,6 +114,18 @@ static inline void safe_close_fd(int *fd) {
     (void)close(*fd);
     *fd = -1;
   }
+}
+
+/* Opens the current working directory so a later scoped fchdir can restore it.
+ * It does not allocate memory; returned fd is owned by caller.
+ * Returns owned cwd fd on success, -1 on invalid input or open failure.
+ */
+static int broker_open_cwd_fd(void) {
+  int flags = O_RDONLY | O_DIRECTORY;
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
+  return open(".", flags);
 }
 
 /* Compares the arrays 'a' and 'b' of 'len' size in constant-time (to avoid
@@ -413,69 +425,92 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
 
 /* --------------------------------- Broker ------------------------------- */
 
-/* Creates/binds/listens a Unix socket at 'path' for broker clients.
- * It borrows 'path' and does not allocate long-lived memory.
- * Side effects: unlinks old path, creates socket inode with mode 0600, and
- * opens a listening fd.
+/* Creates/binds/listens a Unix socket inside 'run_dir_fd' using one relative
+ * socket filename.
+ * It borrows 'run_dir_fd' and 'sock_name' and does not allocate long-lived
+ * memory.
  * Returns listening fd on success, -1 on failure.
  */
-static int make_listen_socket(const char *path) {
+static int make_listen_socket(int run_dir_fd, const char *sock_name) {
+  if (run_dir_fd < 0 || !sock_name)
+    return -1;
+
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0)
     return -1;
 
-  // Remove old socket file if it exists
-  unlink(path);
+  int cwd_fd = broker_open_cwd_fd();
+  if (cwd_fd < 0) {
+    safe_close_fd(&fd);
+    return -1;
+  }
 
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
+  struct sockaddr_un addr = {0};
   addr.sun_family = AF_UNIX;
 
-  // the path must fit inside .sun_path
-  if (strlen(path) >= sizeof(addr.sun_path)) {
+  if (strlen(sock_name) >= sizeof(addr.sun_path)) {
+    safe_close_fd(&cwd_fd);
     safe_close_fd(&fd);
     return -1;
   }
-  strcpy(addr.sun_path, path);
+  strcpy(addr.sun_path, sock_name);
 
-  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+  // set current working directory to run directory to mimic a non existent
+  // bindat() sys call
+  if (fchdir(run_dir_fd) != 0) {
+    safe_close_fd(&cwd_fd);
     safe_close_fd(&fd);
     return -1;
   }
-  if (chmod(path, 0600) != 0) {
+
+  if (unlink(sock_name) != 0 && errno != ENOENT)
+    goto err_restore;
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    goto err_restore;
+  if (chmod(sock_name, 0600) != 0)
+    goto err_restore;
+  if (listen(fd, 16) < 0)
+    goto err_restore;
+  if (fchdir(cwd_fd) != 0) {
+    (void)unlinkat(run_dir_fd, sock_name, 0);
+    safe_close_fd(&cwd_fd);
     safe_close_fd(&fd);
     return -1;
   }
-  if (listen(fd, 16) < 0) {
-    safe_close_fd(&fd);
-    return -1;
-  }
+
+  safe_close_fd(&cwd_fd);
   return fd;
+
+err_restore: {
+  int saved_errno = errno;
+  (void)unlink(sock_name);
+  (void)fchdir(cwd_fd);
+  errno = saved_errno;
+}
+  safe_close_fd(&cwd_fd);
+  safe_close_fd(&fd);
+  return -1;
 }
 
 /* Creates and initializes a Broker instance.
- * Takes ownership of 'cm'. Borrows and copies 'sock_path' and optional
- * 'secret_token'.
- * Side effects: allocates Broker/session arrays and creates the listen socket.
+ * Takes ownership of 'cm' and internally acquires a private-dir runtime rooted
+ * at 'pd'.
+ * Side effects: allocates Broker/session arrays, creates runtime directories,
+ * writes the shared secret token, and creates the listen socket.
  * Returns a valid Broker* on success, NULL on any initialization failure.
  */
-Broker *broker_create(const char *sock_path, ConnManager *cm,
-                      const uint8_t *secret_token) {
-  if (!cm || !sock_path)
+Broker *broker_create(const PrivDir *pd, ConnManager *cm) {
+  if (!cm || !pd)
     return NULL;
-#ifndef ADBX_TEST_MODE
-  if (!secret_token)
-    return NULL;
-#endif
 
   Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
   b->listen_fd = -1;
   b->cm = cm;
-
-  if (secret_token) {
-    memcpy(b->secret_token, secret_token, SECRET_TOKEN_LEN);
-    b->has_secret_token = 1;
+  b->rt = privdir_broker_runtime_open(pd, b->secret_token);
+  if (!b->rt) {
+    broker_destroy(b);
+    return NULL;
   }
 
   b->idle_ttl_secs = broker_ttl_from_env_or_default("ADBX_TEST_IDLE_TTL_SEC",
@@ -489,14 +524,7 @@ Broker *broker_create(const char *sock_path, ConnManager *cm,
   b->idle_sessions = parr_create(sizeof(BrokerMcpSession));
   parr_set_cleanup(b->idle_sessions, idle_sessions_cleanup, NULL);
 
-  b->sock_path = dup_or_null(sock_path);
-  if (!b->sock_path) {
-    broker_destroy(b);
-    return NULL;
-  }
-
-  // Listening socket
-  b->listen_fd = make_listen_socket(b->sock_path);
+  b->listen_fd = make_listen_socket(b->rt->run_fd, PRIVDIR_SOCK_FILENAME);
   if (b->listen_fd < 0) {
     broker_destroy(b);
     return NULL;
@@ -506,8 +534,10 @@ Broker *broker_create(const char *sock_path, ConnManager *cm,
 }
 
 /* Destroys a Broker and all owned resources.
- * Owns and frees: session arrays, listen fd, socket path copy, and ConnManager.
- * Side effects: closes file descriptors and unlinks broker socket path.
+ * Owns and frees: session arrays, listen fd, owned private-dir runtime, and
+ * ConnManager.
+ * Side effects: closes file descriptors and removes broker private-dir
+ * artifacts.
  * Error semantics: none (void destructor; safe on NULL).
  */
 void broker_destroy(Broker *b) {
@@ -525,10 +555,8 @@ void broker_destroy(Broker *b) {
     b->listen_fd = -1;
   }
 
-  if (b->sock_path)
-    (void)unlink(b->sock_path);
-  free(b->sock_path);
-  b->sock_path = NULL;
+  privdir_broker_runtime_clean(b->rt);
+  b->rt = NULL;
 
   connm_destroy(b->cm);
   free(b);

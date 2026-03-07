@@ -9,6 +9,7 @@
 #include "conn_manager.h"
 #include "db_backend.h"
 #include "handshake_codec.h"
+#include "private_dir.h"
 
 // TODO: we should be able to accept more than 1 McpServer with just one Broker.
 // We should make the code async, and use a real connection pool.
@@ -27,12 +28,9 @@ typedef struct Broker Broker;
  */
 AdbxStatus broker_run(Broker *b);
 
-/* Creates a Broker. The Broker takes ownership of 'cm'.
- * 'secret_token' is copied internally and used for handshake verification.
- * In test builds (ADBX_TEST_MODE), secret_token may be NULL to skip auth.
- * In production builds, NULL secret_token causes broker_create to fail. */
-Broker *broker_create(const char *sock_path, ConnManager *cm,
-                      const uint8_t *secret_token);
+/* Creates a Broker rooted at 'pd'. The Broker takes ownership of 'cm' and
+ * internally acquires an owned private-dir runtime plus shared secret token. */
+Broker *broker_create(const PrivDir *pd, ConnManager *cm);
 
 /* Frees 'b' and its owned entities. */
 void broker_destroy(Broker *b);

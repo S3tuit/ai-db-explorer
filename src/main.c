@@ -7,11 +7,13 @@
 #include "secret_store.h"
 #include "utils.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+// TODO: maybe rename -privdir to -rundir for user clarity
 static void print_usage(const char *prog) {
   fprintf(stderr,
           "Usage: %s [-client|-broker] [-privdir <path>] [-config <path>]\n",
@@ -52,9 +54,12 @@ int main(int argc, char **argv) {
   }
 
   if (run_client) {
-    PrivDir *pd = privdir_resolve(privdir_base);
+    char *privdir_err = NULL;
+    PrivDir *pd = privdir_resolve(privdir_base, &privdir_err);
     if (!pd) {
-      fprintf(stderr, "ERROR: failed to resolve private directory\n");
+      fprintf(stderr, "ERROR: failed to resolve private directory: %s\n",
+              privdir_err ? privdir_err : "unknown error");
+      free(privdir_err);
       return 1;
     }
 
@@ -66,7 +71,7 @@ int main(int argc, char **argv) {
     };
     if (mcpser_init(&s, &init) != OK) {
       fprintf(stderr, "ERROR: server init failed\n");
-      privdir_free(pd);
+      privdir_clean(pd);
       return 1;
     }
 
@@ -76,33 +81,20 @@ int main(int argc, char **argv) {
     if (rc != OK)
       fprintf(stderr, "ERROR: %s\n", mcpser_last_error(&s));
     mcpser_clean(&s);
-    privdir_free(pd);
+    privdir_clean(pd);
+    free(privdir_err);
     return (rc == OK) ? 0 : 1;
   }
 
-  PrivDir *pd = privdir_resolve(privdir_base);
+  char *privdir_err = NULL;
+  PrivDir *pd = privdir_resolve(privdir_base, &privdir_err);
   if (!pd) {
-    fprintf(stderr, "ERROR: failed to resolve private directory\n");
+    fprintf(stderr, "ERROR: failed to resolve private directory: %s\n",
+            privdir_err ? privdir_err : "unknown error");
+    free(privdir_err);
     return 1;
   }
-  if (privdir_create_layout(pd) != OK) {
-    fprintf(stderr, "ERROR: failed to create private directory layout\n");
-    privdir_free(pd);
-    return 1;
-  }
-  if (privdir_generate_token(pd) != OK) {
-    fprintf(stderr, "ERROR: failed to generate token\n");
-    privdir_cleanup(pd);
-    privdir_free(pd);
-    return 1;
-  }
-  uint8_t secret_token[SECRET_TOKEN_LEN] = {0};
-  if (privdir_read_token(pd, secret_token) != OK) {
-    fprintf(stderr, "ERROR: failed to read generated token\n");
-    privdir_cleanup(pd);
-    privdir_free(pd);
-    return 1;
-  }
+  free(privdir_err);
 
   char *config_path = NULL;
   char *config_path_err = NULL;
@@ -110,8 +102,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ERROR: config path setup failed: %s\n",
             config_path_err ? config_path_err : "unknown error");
     free(config_path_err);
-    privdir_cleanup(pd);
-    privdir_free(pd);
+    privdir_clean(pd);
     return 1;
   }
 
@@ -122,8 +113,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ERROR: catalog init failed: %s\n",
             cat_err ? cat_err : "unknown error");
     free(cat_err);
-    privdir_cleanup(pd);
-    privdir_free(pd);
+    privdir_clean(pd);
     return 1;
   }
 
@@ -132,8 +122,7 @@ int main(int argc, char **argv) {
   if (!secrets) {
     catalog_destroy(cat);
     fprintf(stderr, "ERROR: secret store init failed\n");
-    privdir_cleanup(pd);
-    privdir_free(pd);
+    privdir_clean(pd);
     return 1;
   }
 
@@ -143,17 +132,15 @@ int main(int argc, char **argv) {
     catalog_destroy(cat);
     secret_store_destroy(secrets);
     fprintf(stderr, "ERROR: conn manager init failed\n");
-    privdir_cleanup(pd);
-    privdir_free(pd);
+    privdir_clean(pd);
     return 1;
   }
 
-  Broker *b = broker_create(pd->sock_path, cm, secret_token);
+  Broker *b = broker_create(pd, cm);
   if (!b) {
     connm_destroy(cm);
-    fprintf(stderr, "ERROR: broker init failed\n");
-    privdir_cleanup(pd);
-    privdir_free(pd);
+    fprintf(stderr, "ERROR: broker init failed: %s\n", strerror(errno));
+    privdir_clean(pd);
     return 1;
   }
 
@@ -162,7 +149,6 @@ int main(int argc, char **argv) {
   if (rc != OK)
     fprintf(stderr, "ERROR: broker run failed\n");
   broker_destroy(b);
-  privdir_cleanup(pd);
-  privdir_free(pd);
+  privdir_clean(pd);
   return (rc == OK) ? 0 : 1;
 }

@@ -9,6 +9,8 @@
 #include "string_op.h"
 #include "utils.h"
 
+/* ---------------------------------- read --------------------------------- */
+
 /* Fast, one-shot read. Reads the full file from 'path' into 'out' and enforces
  * 'max_bytes'. Ownership: borrows 'path'; 'out' is caller-owned and reset by
  * this function. Returns OK on success, ERR on invalid input, I/O
@@ -28,30 +30,7 @@ AdbxStatus fileio_sb_read_limit_fd(int fd, size_t max_bytes, StrBuf *out);
 AdbxStatus fileio_read_exact(const char *path, size_t n_bytes, uint8_t *out);
 
 /* ----------------------------------- write ------------------------------- */
-
-// holds the metadata to understand whether a file is changed from the last
-// snapshot
-typedef struct {
-  int exists;
-  dev_t dev;
-  ino_t ino;
-  off_t size;
-  time_t mtime_sec;
-  long mtime_nsec;
-} FileMeta;
-
-/* Stores file identity metadata from one stat struct.
- * It borrows 'st' and writes to caller-owned 'out'.
- * Error semantics: returns OK on success, ERR on invalid input.
- */
-AdbxStatus fileio_meta_from_stat(const struct stat *st, FileMeta *out);
-
-/* Compares 2 file metadata snapshots.
- * It borrows both inputs and performs no allocations.
- * Error semantics: returns YES when equal, NO when different, ERR on invalid
- * input.
- */
-AdbxTriStatus fileio_meta_equal(const FileMeta *a, const FileMeta *b);
+typedef struct FileMeta FileMeta;
 
 /* Writes exactly 'size' bytes to 'path' from 'src' with strict 'mode' policy.
  * Ownership: borrows 'path' and 'src'; no allocations.
@@ -67,13 +46,47 @@ AdbxStatus fileio_write_exact(const char *path, const uint8_t *src, size_t size,
 AdbxStatus fileio_write_exact_fd(int fd, const uint8_t *src, size_t size);
 
 /* Executes an atomic write inside 'dir_fd' at 'file_name' with 'len' bytes from
- * 'data'. Returns YES on success, NO if there's another process trying to
- * concurrently writing 'file_name', ERR on any filesystem failure. If
- * 'out_meta' is not NULL, it get populated with the metadata of the file
- * written.
+ * 'data'. 'file_name' will have 0600 perms. Returns YES on success, NO if
+ * there's another process trying to concurrently writing 'file_name', ERR on
+ * any filesystem failure. If 'out_meta' is not NULL, it get populated with the
+ * metadata of the file written.
  */
 AdbxTriStatus write_atomic(int dir_fd, const char *file_name,
                            const uint8_t *data, size_t len, FileMeta *out_meta);
+
+/* --------------------------- file control -------------------------------- */
+
+/* Validates that the opened 'fd' is an user-owned directory with 'mode'
+ * permission. May chmod once to repair mode. Returns OK when valid, else ERR.
+ */
+AdbxStatus validate_uown_dir(const int dir_fd, mode_t mode);
+
+/* Validates that the opened 'fd' is an user-owned regular file with 'mode'
+ * permission. May chmod once to repair mode. Returns OK when valid, else ERR.
+ */
+AdbxStatus validate_uown_file(int fd, mode_t mode);
+
+// holds the metadata to understand whether a file is changed from the last
+// snapshot
+struct FileMeta {
+  int exists;
+  dev_t dev;
+  ino_t ino;
+  off_t size;
+  time_t mtime_sec;
+  long mtime_nsec;
+};
+
+/* Stores file identity metadata from one stat struct.
+ * It borrows 'st' and writes to caller-owned 'out'.
+ * Error semantics: returns OK on success, ERR on invalid input.
+ */
+AdbxStatus fileio_meta_from_stat(const struct stat *st, FileMeta *out);
+
+/* Compares 2 file metadata snapshots.
+ * Returns YES when equal, NO when different, ERR on invalid input.
+ */
+AdbxTriStatus fileio_meta_equal(const FileMeta *a, const FileMeta *b);
 
 /* Joins 'dir' and 'path' into a caller owned string representing a path.
  * Returns a heap-allocated string of a valid path or NULL. */

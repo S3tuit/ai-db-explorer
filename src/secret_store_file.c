@@ -1,6 +1,7 @@
 #include "secret_store.h"
 
 #include "arena.h"
+#include "config_dir.h"
 #include "file_io.h"
 #include "json_codec.h"
 #include "string_op.h"
@@ -21,7 +22,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SS_APPNAME "adbxplorer"
 #define SS_CRED_FILE "credentials.json"
 #define SS_FILE_VERSION "1"
 #define SS_FILE_MAX_BYTES (16u * 1024u * 1024u)
@@ -304,75 +304,25 @@ static AdbxStatus ss_list_build_without_index(const SecretEntryList *src,
   return OK;
 }
 
-/* Validates that the opened directory 'dir_fd' is user-owned 0700.
- * Side effects: reads filesystem metadata and may chmod once to repair mode.
- * Error semantics: returns OK when valid, else ERR.
- */
-static AdbxStatus ss_validate_config_dir(const int dir_fd) {
-  assert(dir_fd >= 0);
-  if (dir_fd < 0)
-    return ERR;
-
-  struct stat st;
-  if (fstat(dir_fd, &st) != 0)
-    return ERR;
-
-  if (st.st_uid != getuid())
-    return ERR;
-
-  // if the permissions are wrong, we try to adjust them once before failing
-  for (int retries = 0; retries <= 1; retries++) {
-    if ((st.st_mode & 0777) != 0700) {
-      if (retries == 0 && fchmod(dir_fd, 0700) == 0) {
-        // reload stat
-        if (fstat(dir_fd, &st) != 0) {
-          return ERR;
-        }
-        continue;
-      }
-      return ERR;
-    }
-    return OK;
-  }
-
-  return ERR;
-}
-
 /* Opens the app directory used for file-backed credentials and stores its fd
  * inside 'out_fd'. Side effects: opens a fd that caller must close and may
- * create SS_APPNAME dir. Error semantics: returns ERR on invalid environment or
- * input.
+ * create the final app directory. Error semantics: returns ERR on invalid
+ * environment, config-dir resolution failure, or input.
  */
 static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd) {
   if (!store || !out_fd)
     return ERR;
   *out_fd = -1;
 
-  // We use XDG_CONFIG_HOME directly when present; HOME is only a fallback.
+  char *cfg_err = NULL;
   char *base = NULL;
-  const char *xdg = getenv("XDG_CONFIG_HOME");
-  if (xdg && xdg[0] == '/') {
-    base = dup_or_null(xdg);
-  } else {
-    const char *home = getenv("HOME");
-    if (!home || home[0] != '/') {
-      ss_set_err(store, SSERR_ENV,
-                 "secret-store init failed: set absolute XDG_CONFIG_HOME or "
-                 "HOME env variables.");
-      return ERR;
-    }
-#ifdef __APPLE__
-    base = path_join(home, "Library/Application Support");
-#else
-    base = path_join(home, ".config");
-#endif
-  }
-  if (!base) {
-    ss_set_err(store, SSERR_ENV,
-               "secret-store init failed: unable to resolve config base path. "
-               "This is likely a bug, please, report.");
+  if (confdir_resolve_default_base_dir(&base, &cfg_err) != OK) {
+    ss_set_err(store, SSERR_ENV, "secret-store init failed: %s",
+               cfg_err ? cfg_err : "unable to resolve config base path");
+    free(cfg_err);
     return ERR;
   }
+  free(cfg_err);
 
   int flags = O_RDONLY | O_DIRECTORY;
 #ifdef O_NOFOLLOW
@@ -393,11 +343,11 @@ static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd) {
   free(base_for_err);
 
   // create the app directory if it doesn't exist
-  if (mkdirat(base_fd, SS_APPNAME, 0700) != 0 && errno != EEXIST) {
+  if (mkdirat(base_fd, CONFDIR_APP_DIRNAME, 0700) != 0 && errno != EEXIST) {
     saved_errno = errno;
     ss_set_err(store, SSERR_DIR,
                "secret-store init failed: cannot create app dir '%s': %s.",
-               SS_APPNAME, strerror(saved_errno));
+               CONFDIR_APP_DIRNAME, strerror(saved_errno));
     close(base_fd);
     return ERR;
   }
@@ -406,13 +356,13 @@ static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd) {
 #ifdef O_NOFOLLOW
   app_flags |= O_NOFOLLOW;
 #endif
-  int app_fd = openat(base_fd, SS_APPNAME, app_flags);
+  int app_fd = openat(base_fd, CONFDIR_APP_DIRNAME, app_flags);
   saved_errno = errno;
   close(base_fd);
   if (app_fd < 0) {
     ss_set_err(store, SSERR_DIR,
                "secret-store init failed: cannot open app dir '%s': %s.",
-               SS_APPNAME, strerror(saved_errno));
+               CONFDIR_APP_DIRNAME, strerror(saved_errno));
     return ERR;
   }
 
@@ -474,7 +424,7 @@ static inline int ss_get_dir_fd(FileSecretStore *store) {
     return -1;
   }
 
-  if (ss_validate_config_dir(dir_fd) != OK) {
+  if (validate_uown_dir(dir_fd, 0700) != OK) {
     char dir_path[PATH_MAX];
     ss_set_err(store, SSERR_DIR,
                "secret-store init failed: config dir must be owned by current "

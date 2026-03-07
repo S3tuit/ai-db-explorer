@@ -10,6 +10,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* ---------------------------------- read --------------------------------- */
+
 #define FILEIO_READ_CHUNK 4096u
 
 /* Validates shared max-bytes constraints for bounded reads.
@@ -197,7 +199,69 @@ AdbxStatus fileio_read_exact(const char *path, size_t n_bytes, uint8_t *out) {
   return rc;
 }
 
-/* --------------------------------- write --------------------------------- */
+/* -------------------------------- file control --------------------------- */
+
+#define VALIDATE_DIR_RETRIES 1
+
+/* Call this after fstat('st') to validate that 'fd' has 'mode' permissions.
+ * This may call fchmod to adjust permissions. Return OK if 'fd' has 'mode'
+ * permissions, else, ERR. */
+static inline AdbxStatus validate_mode_loop(int fd, struct stat *st,
+                                            mode_t mode) {
+  // we run the loop n+1 times (hence the <= ...) because the last time it runs
+  // we check wheter perms are finally ok
+  for (int retries = 0; retries <= VALIDATE_DIR_RETRIES; retries++) {
+    if ((st->st_mode & 0777) != mode) {
+      if (retries < VALIDATE_DIR_RETRIES && fchmod(fd, mode) == 0) {
+        // reload stat
+        if (fstat(fd, st) != 0) {
+          return ERR;
+        }
+        continue;
+      }
+      return ERR;
+    }
+    return OK;
+  }
+
+  return ERR;
+}
+
+AdbxStatus validate_uown_dir(const int fd, mode_t mode) {
+  if (fd < 0)
+    return ERR;
+
+  struct stat st;
+  if (fstat(fd, &st) != 0)
+    return ERR;
+
+  if (!S_ISDIR(st.st_mode))
+    return ERR;
+
+  if (st.st_uid != getuid())
+    return ERR;
+
+  // if the permissions are wrong, we try to adjust them once before failing
+  return validate_mode_loop(fd, &st, mode);
+}
+
+AdbxStatus validate_uown_file(int fd, mode_t mode) {
+  if (fd < 0)
+    return ERR;
+
+  struct stat st = {0};
+  if (fstat(fd, &st) != 0)
+    return ERR;
+
+  if (!S_ISREG(st.st_mode))
+    return ERR;
+
+  if (st.st_uid != getuid())
+    return ERR;
+
+  // if the permissions are wrong, we try to adjust them once before failing
+  return validate_mode_loop(fd, &st, mode);
+}
 
 /* Returns nanosecond component from one stat mtime field.
  */
@@ -245,6 +309,8 @@ AdbxTriStatus fileio_meta_equal(const FileMeta *a, const FileMeta *b) {
 
   return YES;
 }
+
+/* --------------------------------- write --------------------------------- */
 
 AdbxStatus fileio_write_exact(const char *path, const uint8_t *src, size_t size,
                               mode_t mode) {
@@ -455,6 +521,9 @@ AdbxTriStatus write_atomic(int dir_fd, const char *file_name,
   // tmp_name is a NUL-terminated filename generated from random hex chars.
   char tmp_name[TMP_FILE_HEX_LEN_BYTES + 1] = {0};
   int flags = O_CREAT | O_EXCL | O_WRONLY;
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
 #ifdef O_NOFOLLOW
   flags |= O_NOFOLLOW;
 #endif

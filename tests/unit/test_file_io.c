@@ -675,6 +675,96 @@ static void test_write_atomic_populates_out_meta(void) {
   free(dir);
 }
 
+/* Verifies validate_uown_dir accepts one correctly owned 0700 directory. */
+static void test_validate_uown_dir_ok(void) {
+  char *dir = make_tmp_dir();
+  int fd = open_dir_fd(dir);
+
+  ASSERT_TRUE(validate_uown_dir(fd, 0700) == OK);
+
+  close(fd);
+  ASSERT_TRUE(rmdir(dir) == 0);
+  free(dir);
+}
+
+/* Verifies validate_uown_dir repairs directory permissions once before
+ * succeeding.
+ */
+static void test_validate_uown_dir_repairs_mode(void) {
+  char *dir = make_tmp_dir();
+  ASSERT_TRUE(chmod(dir, 0755) == 0);
+  int fd = open_dir_fd(dir);
+
+  ASSERT_TRUE(validate_uown_dir(fd, 0700) == OK);
+
+  struct stat st = {0};
+  ASSERT_TRUE(stat(dir, &st) == 0);
+  ASSERT_TRUE(S_ISDIR(st.st_mode));
+  ASSERT_TRUE((st.st_mode & 0777) == 0700);
+
+  close(fd);
+  ASSERT_TRUE(rmdir(dir) == 0);
+  free(dir);
+}
+
+/* Verifies validate_uown_dir rejects non-directory fds. */
+static void test_validate_uown_dir_rejects_regular_file(void) {
+  char *path = make_tmp_path();
+  int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+  ASSERT_TRUE(fd >= 0);
+
+  ASSERT_TRUE(validate_uown_dir(fd, 0700) == ERR);
+
+  close(fd);
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
+/* Verifies validate_uown_file accepts one correctly owned 0600 file. */
+static void test_validate_uown_file_ok(void) {
+  char *path = make_tmp_path();
+  int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+  ASSERT_TRUE(fd >= 0);
+
+  ASSERT_TRUE(validate_uown_file(fd, 0600) == OK);
+
+  close(fd);
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
+/* Verifies validate_uown_file repairs file permissions once before
+ * succeeding.
+ */
+static void test_validate_uown_file_repairs_mode(void) {
+  char *path = make_tmp_path();
+  int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+  ASSERT_TRUE(fd >= 0);
+
+  ASSERT_TRUE(validate_uown_file(fd, 0600) == OK);
+
+  struct stat st = {0};
+  ASSERT_TRUE(stat(path, &st) == 0);
+  ASSERT_TRUE(S_ISREG(st.st_mode));
+  ASSERT_TRUE((st.st_mode & 0777) == 0600);
+
+  close(fd);
+  ASSERT_TRUE(unlink(path) == 0);
+  free(path);
+}
+
+/* Verifies validate_uown_file rejects directory fds. */
+static void test_validate_uown_file_rejects_directory(void) {
+  char *dir = make_tmp_dir();
+  int fd = open_dir_fd(dir);
+
+  ASSERT_TRUE(validate_uown_file(fd, 0600) == ERR);
+
+  close(fd);
+  ASSERT_TRUE(rmdir(dir) == 0);
+  free(dir);
+}
+
 /* Verifies core boundary separator behavior for path_join. */
 static void test_path_join_core_behavior(void) {
   char expected[32];
@@ -854,6 +944,12 @@ int main(void) {
   for (int i = 0; i < 10; i++) {
     test_write_atomic_concurrent_writers();
   }
+  test_validate_uown_dir_ok();
+  test_validate_uown_dir_repairs_mode();
+  test_validate_uown_dir_rejects_regular_file();
+  test_validate_uown_file_ok();
+  test_validate_uown_file_repairs_mode();
+  test_validate_uown_file_rejects_directory();
   test_path_join_core_behavior();
   test_path_join_empty_inputs();
   test_path_join_root_and_leading_separator_cases();

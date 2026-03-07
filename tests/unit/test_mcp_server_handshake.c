@@ -272,9 +272,23 @@ assert_persisted_token_eq(const uint8_t expected[RESUME_TOKEN_LEN]) {
   restok_clean(&store);
 }
 
+/* Opens one private-dir runtime so run/ and secret/ exist for client-side
+ * handshake tests.
+ * Ownership: borrows 'pd' and returns owned runtime to caller.
+ * Side effects: creates the broker private-dir layout and writes an initial
+ * token file.
+ * Error semantics: asserts on setup failures and returns non-NULL runtime.
+ */
+static PrivDirBrokerRuntime *setup_private_runtime(const PrivDir *pd) {
+  ASSERT_TRUE(pd != NULL);
+  PrivDirBrokerRuntime *rt = privdir_broker_runtime_open(pd, NULL);
+  ASSERT_TRUE(rt != NULL);
+  return rt;
+}
+
 /* Writes broker shared secret token file into resolved private directory.
  * Ownership: borrows 'pd' and token bytes.
- * Side effects: writes secret token file.
+ * Side effects: replaces the shared secret token file used by mcp_server tests.
  * Error semantics: asserts on setup failures.
  */
 static void setup_secret_token_file(const PrivDir *pd,
@@ -292,9 +306,9 @@ static void test_handshake_new_session_persists_token(void) {
   char *tmpdir = make_tmpdir();
   set_runtime_env(tmpdir);
 
-  PrivDir *pd = privdir_resolve(tmpdir);
+  PrivDir *pd = privdir_resolve(tmpdir, NULL);
   ASSERT_TRUE(pd != NULL);
-  ASSERT_TRUE(privdir_create_layout(pd) == OK);
+  PrivDirBrokerRuntime *rt = setup_private_runtime(pd);
 
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
   for (size_t i = 0; i < SECRET_TOKEN_LEN; i++) {
@@ -340,8 +354,9 @@ static void test_handshake_new_session_persists_token(void) {
 
   assert_persisted_token_eq(issued);
 
-  privdir_cleanup(pd);
-  privdir_free(pd);
+  privdir_broker_runtime_clean(rt);
+  ASSERT_TRUE(rmdir(pd->app_dir) == 0);
+  privdir_clean(pd);
   (void)rmdir(tmpdir);
   free(tmpdir);
 }
@@ -351,9 +366,9 @@ static void test_handshake_retry_after_unknown_resume(void) {
   char *tmpdir = make_tmpdir();
   set_runtime_env(tmpdir);
 
-  PrivDir *pd = privdir_resolve(tmpdir);
+  PrivDir *pd = privdir_resolve(tmpdir, NULL);
   ASSERT_TRUE(pd != NULL);
-  ASSERT_TRUE(privdir_create_layout(pd) == OK);
+  PrivDirBrokerRuntime *rt = setup_private_runtime(pd);
 
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
   for (size_t i = 0; i < SECRET_TOKEN_LEN; i++) {
@@ -413,8 +428,9 @@ static void test_handshake_retry_after_unknown_resume(void) {
 
   assert_persisted_token_eq(fresh);
 
-  privdir_cleanup(pd);
-  privdir_free(pd);
+  privdir_broker_runtime_clean(rt);
+  ASSERT_TRUE(rmdir(pd->app_dir) == 0);
+  privdir_clean(pd);
   (void)rmdir(tmpdir);
   free(tmpdir);
 }
