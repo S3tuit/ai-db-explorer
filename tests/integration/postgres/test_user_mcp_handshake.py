@@ -14,18 +14,27 @@ CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
 MCP_PROTOCOL_VERSION = "2025-11-25"
 
 
+def privdir_app_dir(privdir):
+    return os.path.join(privdir, "adbxplorer")
+
+
 def broker_sock_path(privdir):
-    return os.path.join(privdir, "run", "broker.sock")
+    return os.path.join(privdir_app_dir(privdir), "run", "broker.sock")
 
 
 def secret_token_path(privdir):
-    return os.path.join(privdir, "secret", "token")
+    return os.path.join(privdir_app_dir(privdir), "secret", "token")
 
 
 def make_temp_privdir(prefix="mcp-it"):
     build_dir = os.path.join(ROOT, "build")
     os.makedirs(build_dir, exist_ok=True)
     return tempfile.mkdtemp(prefix=f"{prefix}-", dir=build_dir)
+
+
+def ensure_privdir_base(privdir):
+    os.makedirs(privdir, mode=0o700, exist_ok=True)
+    os.chmod(privdir, 0o700)
 
 
 def make_runtime_dir(prefix="mcp-rt"):
@@ -37,7 +46,11 @@ def make_runtime_dir(prefix="mcp-rt"):
 def merge_env(extra_env):
     env = os.environ.copy()
     if extra_env:
-        env.update(extra_env)
+        for key, value in extra_env.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
     return env
 
 
@@ -77,6 +90,7 @@ def read_frame(proc):
 
 
 def start_broker(privdir=DEFAULT_PRIVDIR, env=None, config_path=None):
+    ensure_privdir_base(privdir)
     sock = broker_sock_path(privdir)
     if os.path.exists(sock):
         os.unlink(sock)

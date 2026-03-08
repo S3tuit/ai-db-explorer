@@ -80,11 +80,12 @@ typedef struct ConnCatalog {
   SafetyPolicy policy;
 } ConnCatalog;
 
-// Creates a catalog from a config file path.
+// Creates a catalog from an opened config-file fd.
+// Borrows 'fd' and rewinds it to the beginning before reading.
 // Catalog owns all memory referenced by returned ConnProfile pointers.
 // On failure: returns NULL and sets *err_out to an allocated message that the
 // caller must free(). On success, *err_out is set to NULL.
-ConnCatalog *catalog_load_from_file(const char *path, char **err_out);
+ConnCatalog *catalog_load_from_fd(int fd, char **err_out);
 
 // Free catalog and all owned memory.
 void catalog_destroy(ConnCatalog *cat);

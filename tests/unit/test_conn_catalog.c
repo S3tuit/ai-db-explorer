@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -220,8 +221,8 @@ static void test_policy_legacy_payload_key_fails(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat == NULL);
   ASSERT_TRUE(err != NULL);
-  ASSERT_TRUE(
-      strstr(err, "unknown key \"maxQueryKiloBytes\" in object") != NULL);
+  ASSERT_TRUE(strstr(err, "unknown key \"maxQueryKiloBytes\" in object") !=
+              NULL);
 
   free(err);
   unlink(path);

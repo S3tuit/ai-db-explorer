@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +62,22 @@ char *write_tmp_config(const char *json) {
   ASSERT_TRUE(close(fd) == 0);
 
   return strdup(tmpl);
+}
+
+ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
+  char *err_msg = NULL;
+  if (err_out)
+    *err_out = NULL;
+
+  ASSERT_TRUE(path != NULL);
+
+  int fd = open(path, O_RDONLY);
+  ASSERT_TRUE(fd >= 0);
+
+  ConnCatalog *cat = catalog_load_from_fd(fd, &err_msg);
+  close(fd);
+  *err_out = err_msg;
+  return cat;
 }
 
 ConnCatalog *load_test_catalog(void) {

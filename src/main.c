@@ -12,12 +12,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 // TODO: maybe rename -privdir to -rundir for user clarity
 static void print_usage(const char *prog) {
   fprintf(stderr,
           "Usage: %s [-client|-broker] [-privdir <path>] [-config <path>]\n",
           prog);
+}
+
+/* Prints one broker-init error tailored for the most common private-dir
+ * misconfiguration.
+ * It borrows 'pd' and reads process errno and filesystem existence state.
+ * Side effects: writes one diagnostic line to stderr.
+ * Error semantics: none.
+ */
+static void print_broker_init_error(const PrivDir *pd) {
+  if (!pd || !pd->base) {
+    fprintf(stderr, "ERROR: broker init failed: %s\n", strerror(errno));
+    return;
+  }
+
+  if (errno == ENOENT && access(pd->base, F_OK) != 0) {
+    fprintf(stderr,
+            "ERROR: broker init failed: private-dir base '%s' does not exist. "
+            "-privdir expects an existing parent directory; the broker will "
+            "create '%s/' under it.\n",
+            pd->base, PRIVDIR_APP_DIRNAME);
+    return;
+  }
+
+  fprintf(stderr, "ERROR: broker init failed: %s\n", strerror(errno));
 }
 
 int main(int argc, char **argv) {
@@ -96,9 +121,9 @@ int main(int argc, char **argv) {
   }
   free(privdir_err);
 
-  char *config_path = NULL;
+  ConfFile config = {.fd = -1, .path = NULL};
   char *config_path_err = NULL;
-  if (confdir_resolve(config_input, &config_path, &config_path_err) != OK) {
+  if (confdir_open(config_input, &config, &config_path_err) != OK) {
     fprintf(stderr, "ERROR: config path setup failed: %s\n",
             config_path_err ? config_path_err : "unknown error");
     free(config_path_err);
@@ -107,8 +132,8 @@ int main(int argc, char **argv) {
   }
 
   char *cat_err = NULL;
-  ConnCatalog *cat = catalog_load_from_file(config_path, &cat_err);
-  free(config_path);
+  ConnCatalog *cat = catalog_load_from_fd(config.fd, &cat_err);
+  conffile_clean(&config);
   if (!cat) {
     fprintf(stderr, "ERROR: catalog init failed: %s\n",
             cat_err ? cat_err : "unknown error");
@@ -139,7 +164,7 @@ int main(int argc, char **argv) {
   Broker *b = broker_create(pd, cm);
   if (!b) {
     connm_destroy(cm);
-    fprintf(stderr, "ERROR: broker init failed: %s\n", strerror(errno));
+    print_broker_init_error(pd);
     privdir_clean(pd);
     return 1;
   }

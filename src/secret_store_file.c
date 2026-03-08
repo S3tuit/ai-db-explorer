@@ -305,68 +305,34 @@ static AdbxStatus ss_list_build_without_index(const SecretEntryList *src,
 }
 
 /* Opens the app directory used for file-backed credentials and stores its fd
- * inside 'out_fd'. Side effects: opens a fd that caller must close and may
- * create the final app directory. Error semantics: returns ERR on invalid
- * environment, config-dir resolution failure, or input.
+ * inside 'out_fd'. It borrows 'store' and returns one owned fd to caller.
+ * Side effects: may create the default app directory through config_dir and
+ * updates backend error state on failure.
+ * Error semantics: returns OK on success, ERR on invalid environment,
+ * config-dir resolution failure, or input.
  */
 static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd) {
   if (!store || !out_fd)
     return ERR;
   *out_fd = -1;
 
+  ConfDir app = {.fd = -1, .path = NULL};
+  ConfDirErrCode cfg_code = CONFDIR_ERR_NONE;
   char *cfg_err = NULL;
-  char *base = NULL;
-  if (confdir_resolve_default_base_dir(&base, &cfg_err) != OK) {
-    ss_set_err(store, SSERR_ENV, "secret-store init failed: %s",
+  if (confdir_default_open(&app, &cfg_code, &cfg_err) != OK) {
+    SecretStoreErrCode code =
+        (cfg_code == CONFDIR_ERR_ENV) ? SSERR_ENV : SSERR_DIR;
+    ss_set_err(store, code, "secret-store init failed: %s",
                cfg_err ? cfg_err : "unable to resolve config base path");
     free(cfg_err);
+    confdir_clean(&app);
     return ERR;
   }
   free(cfg_err);
 
-  int flags = O_RDONLY | O_DIRECTORY;
-#ifdef O_NOFOLLOW
-  flags |= O_NOFOLLOW;
-#endif
-  int base_fd = open(base, flags);
-  int saved_errno = errno;
-  char *base_for_err = dup_or_null(base);
-  free(base);
-  if (base_fd < 0) {
-    ss_set_err(store, SSERR_DIR,
-               "secret-store init failed: cannot open config dir '%s': %s.",
-               base_for_err ? base_for_err : "<unknown>",
-               strerror(saved_errno));
-    free(base_for_err);
-    return ERR;
-  }
-  free(base_for_err);
-
-  // create the app directory if it doesn't exist
-  if (mkdirat(base_fd, CONFDIR_APP_DIRNAME, 0700) != 0 && errno != EEXIST) {
-    saved_errno = errno;
-    ss_set_err(store, SSERR_DIR,
-               "secret-store init failed: cannot create app dir '%s': %s.",
-               CONFDIR_APP_DIRNAME, strerror(saved_errno));
-    close(base_fd);
-    return ERR;
-  }
-
-  int app_flags = O_RDONLY | O_DIRECTORY;
-#ifdef O_NOFOLLOW
-  app_flags |= O_NOFOLLOW;
-#endif
-  int app_fd = openat(base_fd, CONFDIR_APP_DIRNAME, app_flags);
-  saved_errno = errno;
-  close(base_fd);
-  if (app_fd < 0) {
-    ss_set_err(store, SSERR_DIR,
-               "secret-store init failed: cannot open app dir '%s': %s.",
-               CONFDIR_APP_DIRNAME, strerror(saved_errno));
-    return ERR;
-  }
-
-  *out_fd = app_fd;
+  *out_fd = app.fd;
+  app.fd = -1;
+  confdir_clean(&app);
   return OK;
 }
 

@@ -28,8 +28,9 @@ typedef struct Broker Broker;
  */
 AdbxStatus broker_run(Broker *b);
 
-/* Creates a Broker rooted at 'pd'. The Broker takes ownership of 'cm' and
- * internally acquires an owned private-dir runtime plus shared secret token. */
+/* Creates a Broker rooted at 'pd'. On success the Broker takes ownership of
+ * 'cm' and internally acquires an owned private-dir runtime plus shared secret
+ * token. On failure ownership of 'cm' remains with caller. */
 Broker *broker_create(const PrivDir *pd, ConnManager *cm);
 
 /* Frees 'b' and its owned entities. */

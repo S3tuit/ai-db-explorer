@@ -12,6 +12,7 @@ from test_user_mcp_handshake import (
     do_user_handshake,
     make_runtime_dir,
     make_temp_privdir,
+    privdir_app_dir,
     secret_token_path,
     start_broker,
     start_server,
@@ -80,10 +81,13 @@ def _prepare_privdir_for_server_start(privdir, token):
     if len(token) != SECRET_TOKEN_LEN:
         raise ValueError("secret token must be exactly 32 bytes")
 
-    run_dir = os.path.join(privdir, "run")
-    sec_dir = os.path.join(privdir, "secret")
+    app_dir = privdir_app_dir(privdir)
+    run_dir = os.path.join(app_dir, "run")
+    sec_dir = os.path.join(app_dir, "secret")
+    os.makedirs(app_dir, mode=0o700, exist_ok=True)
     os.makedirs(run_dir, mode=0o700, exist_ok=True)
     os.makedirs(sec_dir, mode=0o700, exist_ok=True)
+    os.chmod(app_dir, 0o700)
     os.chmod(run_dir, 0o700)
     os.chmod(sec_dir, 0o700)
 
@@ -194,7 +198,7 @@ def _send_len_prefixed(sock, declared_len, payload):
 
 
 def _connect_raw_broker_client(privdir):
-    sock_path = os.path.join(privdir, "run", "broker.sock")
+    sock_path = os.path.join(privdir_app_dir(privdir), "run", "broker.sock")
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(sock_path)
     return client

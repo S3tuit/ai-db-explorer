@@ -1,7 +1,6 @@
 #include "config_dir.h"
 
 #include "file_io.h"
-#include "string_op.h"
 #include "utils.h"
 
 #include <errno.h>
@@ -59,19 +58,15 @@ static void cfg_set_err(char **out_err, const char *fmt, ...) {
   *out_err = msg;
 }
 
-/* Duplicates one [start, end) character range into a NUL-terminated string.
- * It borrows input pointers and returns heap memory owned by caller.
- * Side effects: allocates memory.
- * Error semantics: returns NULL on invalid input.
+/* Stores one config-dir error code when the caller asked for it.
+ * It borrows 'out_code' and performs no allocations.
+ * Side effects: writes one enum value.
+ * Error semantics: none.
  */
-static char *dup_range(const char *start, const char *end) {
-  if (!start || !end || end < start)
-    return NULL;
-  size_t len = (size_t)(end - start);
-  char *out = (char *)xmalloc(len + 1);
-  memcpy(out, start, len);
-  out[len] = '\0';
-  return out;
+static inline void cfg_set_code(ConfDirErrCode *out_code, ConfDirErrCode code) {
+  if (!out_code)
+    return;
+  *out_code = code;
 }
 
 /* Returns YES when 'path' is an absolute path.
@@ -84,63 +79,86 @@ static AdbxTriStatus is_abs_path(const char *path) {
   return YES;
 }
 
-/* Returns open(2) flags for directory descriptors that must not follow a final
- * symlink.
+/* Releases one fd/path pair shared by ConfDir and ConfFile cleanup.
+ * It consumes '*fd' and '*path'.
+ * Side effects: closes one fd and frees one heap string when present.
+ * Error semantics: none.
+ */
+static void cfg_handle_clean(int *fd, char **path) {
+  if (fd && *fd >= 0) {
+    (void)close(*fd);
+    *fd = -1;
+  }
+  if (path) {
+    free(*path);
+    *path = NULL;
+  }
+}
+
+/* Returns open(2) flags for directories where final symlinks are allowed.
  * Side effects: none.
  * Error semantics: returns a valid flag mask for local open/openat calls.
  */
-static int cfg_dir_open_flags(void) {
+static int cfg_dir_open_flags_follow(void) {
   int flags = O_RDONLY | O_DIRECTORY;
 #ifdef O_CLOEXEC
   flags |= O_CLOEXEC;
 #endif
+  return flags;
+}
+
+/* Returns open(2) flags for app-owned directories where final symlinks are not
+ * allowed.
+ * Side effects: none.
+ * Error semantics: returns a valid flag mask for local open/openat calls.
+ */
+static int cfg_dir_open_flags_nofollow(void) {
+  int flags = cfg_dir_open_flags_follow();
 #ifdef O_NOFOLLOW
   flags |= O_NOFOLLOW;
 #endif
   return flags;
 }
 
-/* Returns open(2) flags for regular files that must not follow a final symlink.
+/* Returns open(2) flags for regular files where final symlinks are allowed.
  * Side effects: none.
  * Error semantics: returns a valid flag mask for local open/openat calls.
  */
-static int cfg_file_open_flags(void) {
+static int cfg_file_open_flags_follow(void) {
   int flags = O_RDONLY;
 #ifdef O_CLOEXEC
   flags |= O_CLOEXEC;
 #endif
+  return flags;
+}
+
+/* Returns open(2) flags for app-owned regular files where final symlinks are
+ * not allowed.
+ * Side effects: none.
+ * Error semantics: returns a valid flag mask for local open/openat calls.
+ */
+static int cfg_file_open_flags_nofollow(void) {
+  int flags = cfg_file_open_flags_follow();
 #ifdef O_NOFOLLOW
   flags |= O_NOFOLLOW;
 #endif
   return flags;
 }
 
-/* Validates that one absolute file path already exists and resolves to a
- * regular file without a final symlink.
- * It borrows 'path' and does not allocate resources that outlive the call.
- * Returns OK on success, ERR on invalid input, missing files,
- * or non-regular targets.
+/* Validates that one opened fd refers to a regular file.
+ * It borrows 'fd' and does not allocate.
+ * Side effects: reads filesystem metadata.
+ * Error semantics: returns OK on success, ERR on invalid input or non-regular
+ * fd.
  */
-static AdbxStatus cfg_validate_existing_reg_file(const char *path) {
-  if (is_abs_path(path) != YES)
+static AdbxStatus cfg_validate_regular_file_fd(int fd) {
+  if (fd < 0)
     return ERR;
-
-  int file_fd = open(path, cfg_file_open_flags());
-  if (file_fd < 0) {
-    return ERR;
-  }
 
   struct stat st = {0};
-  if (fstat(file_fd, &st) != 0) {
-    close(file_fd);
+  if (fstat(fd, &st) != 0)
     return ERR;
-  }
-  close(file_fd);
-
-  if (S_ISREG(st.st_mode)) {
-    return OK;
-  }
-  return ERR;
+  return S_ISREG(st.st_mode) ? OK : ERR;
 }
 
 /* Builds one config-file path inside an application config directory.
@@ -154,82 +172,27 @@ static char *confdir_build_config_path(const char *app_dir) {
   return path_join(app_dir, CFG_FILENAME);
 }
 
-AdbxStatus confdir_get_default_base_dir(int *out_fd, char **out_path,
-                                        char **out_err) {
-  if (!out_fd)
+/* Opens one explicit user-managed config file and validates its final target.
+ * It borrows 'path' and writes one caller-owned fd into '*out_fd'.
+ * Side effects: opens one file descriptor.
+ * Error semantics: returns OK on success, ERR on invalid input, open failure,
+ * or non-regular targets.
+ */
+static AdbxStatus cfg_open_explicit_file(const char *path, int *out_fd) {
+  if (!path || !out_fd)
     return ERR;
   *out_fd = -1;
-  if (out_err)
-    *out_err = NULL;
-  if (out_path)
-    *out_path = NULL;
 
-  char *base = NULL;
-  int attempt_creat = 0;
+  int fd = open(path, cfg_file_open_flags_follow());
+  if (fd < 0)
+    return ERR;
 
-#ifdef __linux__
-  const char *xdg = getenv("XDG_CONFIG_HOME");
-  if (xdg) {
-    if (is_abs_path(xdg) != YES || xdg[0] == '\0') {
-      cfg_set_err(out_err,
-                  "invalid XDG_CONFIG_HOME: expected an absolute path.");
-      return ERR;
-    }
-    base = strdup(xdg); // allocate so every path can lead to free()
-  }
-#endif
-
-  if (!base) {
-    const char *home = getenv("HOME");
-    if (is_abs_path(home) != YES || home[0] == '\0') {
-      cfg_set_err(out_err,
-                  "failed to resolve default config base dir: set absolute "
-                  "HOME%s.",
-#ifdef __linux__
-                  " or XDG_CONFIG_HOME"
-#else
-                  ""
-#endif
-      );
-      return ERR;
-    }
-
-#ifdef __APPLE__
-    base = path_join(home, "Library/Application Support");
-#else
-    base = path_join(home, ".config");
-    attempt_creat = 1;
-#endif
-    if (!base) {
-      cfg_set_err(out_err,
-                  "failed to allocate the default config base-dir path.");
-      return ERR;
-    }
-  }
-
-  if (attempt_creat) {
-    if (mkdir(base, 0700) != 0 && errno != EEXIST) {
-      cfg_set_err(
-          out_err,
-          "unable to create config dir at: %s. Please, create it and retry.",
-          base);
-      free(base);
-      return ERR;
-    }
-  }
-
-  int dir_fd = open(base, cfg_dir_open_flags());
-  if (dir_fd < 0) {
-    free(base);
+  if (cfg_validate_regular_file_fd(fd) != OK) {
+    (void)close(fd);
     return ERR;
   }
 
-  if (out_path) {
-    *out_path = base;
-  } else {
-    free(base);
-  }
-  *out_fd = dir_fd;
+  *out_fd = fd;
   return OK;
 }
 
@@ -248,7 +211,8 @@ static AdbxStatus cfg_open_or_create_app_dir_at(int base_fd, int *out_fd) {
   if (mkdirat(base_fd, CONFDIR_APP_DIRNAME, 0700) != 0 && errno != EEXIST)
     return ERR;
 
-  int app_fd = openat(base_fd, CONFDIR_APP_DIRNAME, cfg_dir_open_flags());
+  int app_fd =
+      openat(base_fd, CONFDIR_APP_DIRNAME, cfg_dir_open_flags_nofollow());
   if (app_fd < 0)
     return ERR;
 
@@ -264,6 +228,8 @@ static AdbxStatus cfg_open_or_create_app_dir_at(int base_fd, int *out_fd) {
 /* Creates one new default config.json under 'dir_fd'.
  * It borrows 'dir_fd' and writes built-in JSON into a newly created regular
  * file.
+ * Side effects: creates, writes, chmods, and closes one file; removes partial
+ * output on failure.
  * Error semantics: returns YES on success, NO if the 'name' was already
  * present, ERR on invalid input or I/O failure.
  */
@@ -280,25 +246,66 @@ static AdbxTriStatus cfg_create_default_file_at(int dir_fd, const char *name) {
 #endif
 
   int fd = openat(dir_fd, name, flags, 0600);
-  if (fd < 0) {
-    if (errno != EEXIST) {
-      return ERR;
-    }
-    return NO;
-  }
+  if (fd < 0)
+    return (errno == EEXIST) ? NO : ERR;
 
-  const uint8_t *src = (const uint8_t *)CFG_DEFAULT_JSON;
-  size_t len = strlen(CFG_DEFAULT_JSON);
-  if (fileio_write_exact_fd(fd, src, len) != OK) {
+  if (fileio_write_exact_fd(fd, (const uint8_t *)CFG_DEFAULT_JSON,
+                            strlen(CFG_DEFAULT_JSON)) != OK) {
+    int saved_errno = errno;
+    (void)close(fd);
+    (void)unlinkat(dir_fd, name, 0);
+    errno = saved_errno;
     return ERR;
   }
+
+  if (fchmod(fd, 0600) != 0) {
+    int saved_errno = errno;
+    (void)close(fd);
+    (void)unlinkat(dir_fd, name, 0);
+    errno = saved_errno;
+    return ERR;
+  }
+
+  if (close(fd) != 0) {
+    int saved_errno = errno;
+    (void)unlinkat(dir_fd, name, 0);
+    errno = saved_errno;
+    return ERR;
+  }
+
   return YES;
+}
+
+/* Opens one app-owned config file and validates its ownership/mode policy.
+ * It borrows 'app_fd' and 'name'; on success it returns an owned fd in
+ * '*out_fd' that caller must close.
+ * Side effects: opens one file descriptor and may chmod the file to 0600.
+ * Error semantics: returns OK on success, ERR on invalid input, open failure,
+ * or file-policy mismatch.
+ */
+static AdbxStatus
+cfg_open_validated_default_file_at(int app_fd, const char *name, int *out_fd) {
+  if (app_fd < 0 || !name || !out_fd)
+    return ERR;
+  *out_fd = -1;
+
+  int fd = openat(app_fd, name, cfg_file_open_flags_nofollow());
+  if (fd < 0)
+    return ERR;
+
+  if (validate_uown_file(fd, 0600) != OK) {
+    (void)close(fd);
+    return ERR;
+  }
+
+  *out_fd = fd;
+  return OK;
 }
 
 /* Ensures the default config.json exists under one owned app dir.
  * It borrows 'app_fd' and 'name'.
- * Side effects: may create one new file or chmod an existing app-owned file to
- * 0600.
+ * Side effects: may create one new file; existing files are validated later by
+ * the open helper.
  * Error semantics: returns OK on success, ERR on invalid input, open failure,
  * or file-policy mismatch.
  */
@@ -306,11 +313,10 @@ static AdbxStatus cfg_ensure_default_file_at(int app_fd, const char *name) {
   if (app_fd < 0 || !name)
     return ERR;
 
-  int fd = openat(app_fd, name, cfg_file_open_flags());
+  int fd = openat(app_fd, name, cfg_file_open_flags_nofollow());
   if (fd >= 0) {
-    AdbxStatus rc = validate_uown_file(fd, 0600);
     (void)close(fd);
-    return rc;
+    return OK;
   }
   if (errno != ENOENT)
     return ERR;
@@ -318,22 +324,145 @@ static AdbxStatus cfg_ensure_default_file_at(int app_fd, const char *name) {
   AdbxTriStatus rc = cfg_create_default_file_at(app_fd, name);
   if (rc == YES)
     return OK;
-  if (rc == ERR)
-    return ERR;
-
-  fd = openat(app_fd, name, cfg_file_open_flags());
-  if (fd < 0)
-    return ERR;
-  AdbxStatus rv = validate_uown_file(fd, 0600);
-  (void)close(fd);
-  return rv;
+  if (rc == NO)
+    return OK;
+  return ERR;
 }
 
-AdbxStatus confdir_resolve(const char *input_path, char **out_path,
-                           char **out_err) {
-  if (!out_path)
+void confdir_clean(ConfDir *cd) {
+  if (!cd)
+    return;
+  cfg_handle_clean(&cd->fd, &cd->path);
+}
+
+void conffile_clean(ConfFile *cf) {
+  if (!cf)
+    return;
+  cfg_handle_clean(&cf->fd, &cf->path);
+}
+
+AdbxStatus confdir_default_open(ConfDir *out, ConfDirErrCode *out_code,
+                                char **out_err) {
+  if (!out)
     return ERR;
-  *out_path = NULL;
+  out->fd = -1;
+  out->path = NULL;
+  if (out_code)
+    *out_code = CONFDIR_ERR_NONE;
+  if (out_err)
+    *out_err = NULL;
+
+  char *base = NULL;
+  char *app_path = NULL;
+  int attempt_create = 0;
+  int base_fd = -1;
+  int app_fd = -1;
+
+#ifdef __linux__
+  const char *xdg = getenv("XDG_CONFIG_HOME");
+  if (xdg) {
+    if (is_abs_path(xdg) != YES || xdg[0] == '\0') {
+      cfg_set_code(out_code, CONFDIR_ERR_ENV);
+      cfg_set_err(out_err,
+                  "invalid XDG_CONFIG_HOME: expected an absolute path.");
+      return ERR;
+    }
+    base = strdup(xdg);
+    if (!base) {
+      cfg_set_code(out_code, CONFDIR_ERR_DIR);
+      cfg_set_err(out_err,
+                  "failed to allocate the default config base-dir path.");
+      return ERR;
+    }
+  }
+#endif
+
+  if (!base) {
+    const char *home = getenv("HOME");
+    if (is_abs_path(home) != YES || home[0] == '\0') {
+      cfg_set_code(out_code, CONFDIR_ERR_ENV);
+      cfg_set_err(out_err,
+                  "failed to resolve default config base dir: set absolute "
+                  "HOME%s.",
+#ifdef __linux__
+                  " or XDG_CONFIG_HOME"
+#else
+                  ""
+#endif
+      );
+      return ERR;
+    }
+
+#ifdef __APPLE__
+    base = path_join(home, "Library/Application Support");
+#else
+    base = path_join(home, ".config");
+    attempt_create = 1;
+#endif
+    if (!base) {
+      cfg_set_code(out_code, CONFDIR_ERR_DIR);
+      cfg_set_err(out_err,
+                  "failed to allocate the default config base-dir path.");
+      return ERR;
+    }
+  }
+
+  if (attempt_create && mkdir(base, 0700) != 0 && errno != EEXIST) {
+    cfg_set_code(out_code, CONFDIR_ERR_DIR);
+    cfg_set_err(out_err,
+                "unable to create config dir at: %s. Please, create it and "
+                "retry.",
+                base);
+    free(base);
+    return ERR;
+  }
+
+  base_fd = open(base, cfg_dir_open_flags_follow());
+  if (base_fd < 0) {
+    cfg_set_code(out_code, CONFDIR_ERR_DIR);
+    cfg_set_err(out_err, "failed to open default config base directory: %s",
+                base);
+    free(base);
+    return ERR;
+  }
+
+  if (cfg_open_or_create_app_dir_at(base_fd, &app_fd) != OK) {
+    cfg_set_code(out_code, CONFDIR_ERR_DIR);
+    cfg_set_err(out_err, "failed to prepare app config directory under: %s",
+                base);
+    goto err;
+  }
+
+  app_path = path_join(base, CONFDIR_APP_DIRNAME);
+  if (!app_path) {
+    cfg_set_code(out_code, CONFDIR_ERR_DIR);
+    cfg_set_err(out_err, "failed to resolve default app directory.");
+    goto err;
+  }
+
+  out->fd = app_fd;
+  out->path = app_path;
+  app_fd = -1;
+  app_path = NULL;
+  free(base);
+  (void)close(base_fd);
+  return OK;
+
+err:
+  if (app_fd >= 0)
+    (void)close(app_fd);
+  if (base_fd >= 0)
+    (void)close(base_fd);
+  free(app_path);
+  free(base);
+  return ERR;
+}
+
+AdbxStatus confdir_open(const char *input_path, ConfFile *out, char **out_err) {
+  if (!out)
+    return ERR;
+  out->fd = -1;
+  out->path = NULL;
   if (out_err)
     *out_err = NULL;
 
@@ -344,76 +473,58 @@ AdbxStatus confdir_resolve(const char *input_path, char **out_path,
                   "be absolute, starting with '/'.");
       return ERR;
     }
-    if (cfg_validate_existing_reg_file(input_path) != OK) {
+
+    if (cfg_open_explicit_file(input_path, &out->fd) != OK) {
       cfg_set_err(out_err,
                   "configuration file does not exist or is invalid: %s",
                   input_path);
       return ERR;
     }
 
-    char *path = strdup(input_path);
-    if (!path) {
+    out->path = strdup(input_path);
+    if (!out->path) {
       cfg_set_err(out_err, "failed to copy input config path. Please retry.");
+      conffile_clean(out);
       return ERR;
     }
-    *out_path = path;
     return OK;
   }
 
-  // base dir resolution based on env
+  ConfDir app = {.fd = -1, .path = NULL};
+  int file_fd = -1;
 
-  char *base_dir = NULL; // used just for logging
-  char *app_dir = NULL;
-  char *path = NULL;
-  int base_fd = -1;
-  int app_fd = -1;
-
-  if (confdir_get_default_base_dir(&base_fd, &base_dir, out_err) != OK) {
-    cfg_set_err(out_err, "failed to open default config base directory: %s",
-                base_dir);
+  if (confdir_default_open(&app, NULL, out_err) != OK)
     goto err;
-  }
 
-  if (cfg_open_or_create_app_dir_at(base_fd, &app_fd) != OK) {
-    cfg_set_err(out_err, "failed to prepare app config directory under: %s",
-                base_dir);
-    goto err;
-  }
-
-  app_dir = path_join(base_dir, CONFDIR_APP_DIRNAME);
-  if (!app_dir) {
-    cfg_set_err(out_err,
-                "failed to resolve default app directory. Please, retry.");
-    goto err;
-  }
-
-  path = confdir_build_config_path(app_dir);
-  if (!path) {
+  out->path = confdir_build_config_path(app.path);
+  if (!out->path) {
     cfg_set_err(out_err,
                 "failed to resolve default config path. Please, retry.");
     goto err;
   }
 
-  if (cfg_ensure_default_file_at(app_fd, CFG_FILENAME) != OK) {
+  if (cfg_ensure_default_file_at(app.fd, CFG_FILENAME) != OK) {
     cfg_set_err(out_err, "failed to ensure default config file exists: %s",
-                path);
+                out->path);
     goto err;
   }
 
-  (void)close(app_fd);
-  (void)close(base_fd);
-  free(base_dir);
-  free(app_dir);
-  *out_path = path;
+  if (cfg_open_validated_default_file_at(app.fd, CFG_FILENAME, &file_fd) !=
+      OK) {
+    cfg_set_err(out_err, "failed to open validated config file: %s", out->path);
+    goto err;
+  }
+
+  out->fd = file_fd;
+  file_fd = -1;
+
+  confdir_clean(&app);
   return OK;
 
 err:
-  if (app_fd >= 0)
-    (void)close(app_fd);
-  if (base_fd >= 0)
-    (void)close(base_fd);
-  free(base_dir);
-  free(app_dir);
-  free(path);
+  if (file_fd >= 0)
+    (void)close(file_fd);
+  confdir_clean(&app);
+  conffile_clean(out);
   return ERR;
 }

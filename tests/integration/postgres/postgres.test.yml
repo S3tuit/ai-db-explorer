@@ -48,5 +48,5 @@ services:
       [
         "sh",
         "-lc",
-        "set -e; cfg=\"$$XDG_CONFIG_HOME/adbxplorer/config.json\"; mkdir -p \"$$XDG_CONFIG_HOME/adbxplorer\"; cp tests/integration/postgres/config.json \"$$cfg\"; make clean && make PIE_LDFLAGS=-no-pie -j4 test-postgres",
+        "set -e; cfg=\"$$XDG_CONFIG_HOME/adbxplorer/config.json\"; mkdir -p \"$$XDG_CONFIG_HOME/adbxplorer\"; cp tests/integration/postgres/config.json \"$$cfg\"; make clean && make PIE_LDFLAGS=-no-pie -j6 test-postgres",
       ]

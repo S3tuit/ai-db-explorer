@@ -76,7 +76,7 @@ def test_home_fallback_creates_default_config_without_xdg():
             privdir,
             env={
                 "HOME": home_dir,
-                "XDG_CONFIG_HOME": "",
+                "XDG_CONFIG_HOME": None,
             },
         )
 

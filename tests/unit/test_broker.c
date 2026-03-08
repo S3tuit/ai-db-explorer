@@ -585,6 +585,33 @@ static void test_create_and_destroy(void) {
   free(tmpdir);
 }
 
+/* Verifies broker_create does not consume 'cm' when init fails before the
+ * broker takes full ownership.
+ * It borrows no heap input; all temporary filesystem artifacts are cleaned in
+ * the test.
+ */
+static void test_create_failure_does_not_consume_cm(void) {
+  char *tmpdir = NULL;
+  PrivDir *pd = make_test_privdir(&tmpdir);
+  ASSERT_TRUE(pd != NULL);
+  ConnManager *cm = make_empty_cm();
+
+  char *app_blocker = path_join(tmpdir, PRIVDIR_APP_DIRNAME);
+  ASSERT_TRUE(app_blocker != NULL);
+  ASSERT_TRUE(fileio_write_exact(app_blocker, (const uint8_t *)"", 0, 0600) ==
+              OK);
+
+  ASSERT_TRUE(broker_create(pd, cm) == NULL);
+
+  /* If broker_create freed 'cm' on failure, ASan will flag this destroy. */
+  connm_destroy(cm);
+  privdir_clean(pd);
+  ASSERT_TRUE(unlink(app_blocker) == 0);
+  cleanup_tmpdir_root(tmpdir);
+  free(app_blocker);
+  free(tmpdir);
+}
+
 static void test_destroy_null(void) {
   /* Must not crash. */
   broker_destroy(NULL);
@@ -1081,6 +1108,7 @@ static void test_post_hs_oversized_request_drops_session(void) {
 int main(void) {
   test_create_null_args();
   test_create_and_destroy();
+  test_create_failure_does_not_consume_cm();
   test_destroy_null();
   test_client_connect();
   test_disconnect_moves_to_idle();

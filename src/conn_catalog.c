@@ -6,11 +6,13 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define CONFIG_MAX_BYTES (8u * 1024u * 1024u)
 #define CONFIG_MAX_CONNECTIONS 50u
@@ -210,7 +212,8 @@ static AdbxStatus split_func_path(char *input, char **out_schema,
  * Error semantics: returns OK on success, ERR on malformed entries, allocation
  * failures, or invalid input.
  */
-static AdbxStatus parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out,
+static AdbxStatus parse_sensitive_columns(const JsonGetter *jg,
+                                          ConnProfile *out,
                                           const char *path_prefix,
                                           char **err_out) {
   if (!jg || !out || !path_prefix)
@@ -346,9 +349,9 @@ static AdbxStatus parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out
 
     ColumnRule *r = &rules[rix++];
     r->table = (const char *)arena_add_nul(&out->col_policy.arena, tmp[i].table,
-                                          (uint32_t)strlen(tmp[i].table));
+                                           (uint32_t)strlen(tmp[i].table));
     r->col = (const char *)arena_add_nul(&out->col_policy.arena, tmp[i].col,
-                                        (uint32_t)strlen(tmp[i].col));
+                                         (uint32_t)strlen(tmp[i].col));
     r->is_global = is_global;
     r->n_schemas = (uint32_t)n_schema;
     r->schemas = NULL;
@@ -372,7 +375,7 @@ static AdbxStatus parse_sensitive_columns(const JsonGetter *jg, ConnProfile *out
           continue;
         schemas[k++] =
             (const char *)arena_add_nul(&out->col_policy.arena, tmp[t].schema,
-                                       (uint32_t)strlen(tmp[t].schema));
+                                        (uint32_t)strlen(tmp[t].schema));
         last_schema = tmp[t].schema;
       }
       r->schemas = schemas;
@@ -526,7 +529,7 @@ static AdbxStatus parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
 
     SafeFunctionRule *r = &out->safe_funcs.rules[ri++];
     r->name = (const char *)arena_add_nul(&out->safe_funcs.arena, name,
-                                         (uint32_t)strlen(name));
+                                          (uint32_t)strlen(name));
     if (!r->name)
       goto error;
     r->is_global = is_global;
@@ -547,7 +550,7 @@ static AdbxStatus parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
           continue;
         r->schemas[k++] =
             (const char *)arena_add_nul(&out->safe_funcs.arena, tmp[t].schema,
-                                       (uint32_t)strlen(tmp[t].schema));
+                                        (uint32_t)strlen(tmp[t].schema));
         if (!r->schemas[k - 1])
           goto error;
         prev = tmp[t].schema;
@@ -948,29 +951,23 @@ static AdbxTriStatus parse_version(const JsonGetter *jg) {
   return ok;
 }
 
-ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
+/* Parses one full config document already loaded in memory.
+ * It borrows 'data' and allocates one catalog owned by caller.
+ * Side effects: heap and arena allocations while building the catalog.
+ * Error semantics: returns a populated catalog on success, NULL on parse or
+ * allocation failure and sets '*err_out' when provided.
+ */
+static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
+                                               char **err_out) {
   char *err_msg = NULL;
-  StrBuf sb;
-  sb_init(&sb);
   ConnCatalog *cat = NULL;
 
   if (err_out)
     *err_out = NULL;
 
-  if (!path) {
-    set_parse_err(&err_msg, "$: config path is NULL.");
-    goto error;
-  }
-
-  if (fileio_sb_read_limit(path, CONFIG_MAX_BYTES, &sb) != OK) {
-    set_parse_err(&err_msg,
-                  "$: failed to read config file (check path and size limit).");
-    goto error;
-  }
-
   JsonGetter jg;
   JsonTokBuf tok_buf = {0};
-  if (jsget_init(&jg, sb.data, sb.len, &tok_buf) != OK) {
+  if (jsget_init(&jg, data, len, &tok_buf) != OK) {
     set_parse_err(&err_msg, "$: invalid JSON.");
     goto error;
   }
@@ -1014,11 +1011,9 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
     goto error;
   }
 
-  sb_clean(&sb);
   return cat;
 
 error:
-  sb_clean(&sb);
   catalog_destroy(cat);
   if (!err_msg)
     set_parse_err(&err_msg, "$: invalid configuration.");
@@ -1028,6 +1023,51 @@ error:
     free(err_msg);
   }
   return NULL;
+}
+
+ConnCatalog *catalog_load_from_fd(int fd, char **err_out) {
+  if (err_out)
+    *err_out = NULL;
+
+  if (fd < 0) {
+    char *err_msg = NULL;
+    set_parse_err(&err_msg, "$: config fd is invalid.");
+    if (err_out) {
+      *err_out = err_msg;
+    } else {
+      free(err_msg);
+    }
+    return NULL;
+  }
+
+  if (lseek(fd, 0, SEEK_SET) < 0) {
+    char *err_msg = NULL;
+    set_parse_err(&err_msg, "$: failed to rewind config file.");
+    if (err_out) {
+      *err_out = err_msg;
+    } else {
+      free(err_msg);
+    }
+    return NULL;
+  }
+
+  StrBuf sb;
+  sb_init(&sb);
+  if (fileio_sb_read_limit_fd(fd, CONFIG_MAX_BYTES, &sb) != OK) {
+    char *err_msg = NULL;
+    set_parse_err(&err_msg,
+                  "$: failed to read config file (check path and size limit).");
+    if (err_out) {
+      *err_out = err_msg;
+    } else {
+      free(err_msg);
+    }
+    return NULL;
+  }
+
+  ConnCatalog *cat = catalog_parse_config_bytes(sb.data, sb.len, err_out);
+  sb_clean(&sb);
+  return cat;
 }
 
 void catalog_destroy(ConnCatalog *cat) {
@@ -1079,9 +1119,8 @@ static int saferule_cmp(const void *a, const void *b) {
   return strcmp(ra->name, rb->name);
 }
 
-AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp,
-                                     const char *schema, const char *table,
-                                     const char *column) {
+AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
+                                     const char *table, const char *column) {
   if (!cp || !table || !column)
     return ERR;
 

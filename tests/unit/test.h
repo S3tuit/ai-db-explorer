@@ -49,6 +49,9 @@ char *read_all(FILE *f);
 
 /* --------------------------------- HELPERS ------------------------------- */
 
+/* Loads the ConnCatalog from an input 'path'. */
+ConnCatalog *catalog_load_from_file(const char *path, char **err_out);
+
 /* Writes JSON content to a temp file and returns its path.
  * Caller owns the returned path string and must unlink it. */
 char *write_tmp_config(const char *json);

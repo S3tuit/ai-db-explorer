@@ -493,8 +493,8 @@ err_restore: {
 }
 
 /* Creates and initializes a Broker instance.
- * Takes ownership of 'cm' and internally acquires a private-dir runtime rooted
- * at 'pd'.
+ * Takes ownership of 'cm' only on success and internally acquires a private-dir
+ * runtime rooted at 'pd'.
  * Side effects: allocates Broker/session arrays, creates runtime directories,
  * writes the shared secret token, and creates the listen socket.
  * Returns a valid Broker* on success, NULL on any initialization failure.
@@ -506,7 +506,7 @@ Broker *broker_create(const PrivDir *pd, ConnManager *cm) {
   Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
   b->listen_fd = -1;
-  b->cm = cm;
+  b->cm = NULL;
   b->rt = privdir_broker_runtime_open(pd, b->secret_token);
   if (!b->rt) {
     broker_destroy(b);
@@ -530,6 +530,7 @@ Broker *broker_create(const PrivDir *pd, ConnManager *cm) {
     return NULL;
   }
 
+  b->cm = cm;
   return b;
 }
 
