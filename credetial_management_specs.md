@@ -8,33 +8,6 @@ The rest of the application is **unaware** of which secret backend is in use. Th
 
 ---
 
-## Secret Store Abstraction
-
-### Interface
-
-```c
-typedef struct SecretStore SecretStore;
-typedef struct SecretStoreVTable SecretStoreVTable;
-
-struct SecretStoreVTable {
-    /// Writes a NUL-terminated secret into `out`. If 'ref' not present inside 'store', returns NO.
-    AdbxTriStatus (*get)(SecretStore *store, const char *ref, StrBuf *out);
-
-    /// Stores a NUL-terminated secret. Returns OK or ERR.
-    AdbxStatus (*set)(SecretStore *store, const char *ref, const char *secret);
-
-    /// Deletes a stored secret. Returns OK or ERR.
-    AdbxStatus (*delete)(SecretStore *store, const char *ref);
-
-    /// Destroys the store and releases resources.
-    void (*destroy)(SecretStore *store);
-};
-
-struct SecretStore {
-    const SecretStoreVTable *vt;
-};
-```
-
 ### Key Format
 
 Callers pass a plain `ref` string (the `connection_name` from `ConnProfile`). Each backend implementation **internally** prefixes it with `adbxplorer:` to namespace keys in the underlying store. Callers never construct or know about this prefix.
@@ -68,44 +41,17 @@ Backends are compile-time gated and runtime probed:
 
 Uses the macOS Keychain Services C API. Reimplement the logic from [hrantzsch/keychain](https://github.com/hrantzsch/keychain/tree/master/src) in C.
 
-Concrete struct:
-
-```c
-typedef struct {
-    SecretStore base; // must be first member, for casting
-} KeychainSecretStore;
-```
-
 Key mapping: the `adbxplorer:<ref>` string maps to the Keychain item's **account** attribute. Use a fixed **service** name such as `"adbxplorer"`.
 
 ### LibsecretSecretStore (Linux)
 
 Uses `libsecret` to communicate with any Secret Service D-Bus provider (gnome-keyring, kwallet, etc.). Reimplement the logic from [hrantzsch/keychain](https://github.com/hrantzsch/keychain/tree/master/src) in C.
 
-Concrete struct:
-
-```c
-typedef struct {
-    SecretStore base;
-} LibsecretSecretStore;
-```
-
 Key mapping: store secrets with attributes `{ "application": "adbxplorer", "ref": "<ref>" }`. Use an appropriate `SecretSchema`.
-
-Detection: during `secret_store_create`, attempt to connect to the Secret Service D-Bus. If the service is unavailable or the call fails, fall through to the file fallback.
 
 ### FileSecretStore (Fallback)
 
 Used when no OS keystore is available (typically headless Linux servers).
-
-Concrete struct:
-
-```c
-typedef struct {
-    SecretStore base;
-    char *file_path; // e.g., ~/.adbxplorer/credentials
-} FileSecretStore;
-```
 
 Storage details:
 
@@ -166,7 +112,7 @@ A connection's identity is defined as the tuple: **(host, port, database, userna
 
 ### Diff Logic (used by `--update`)
 
-Load the current config via `catalog_load_from_file`. Load `state.json`. Compare:
+Load the current config via `catalog_load_from_fd`. Load `state.json`. Compare:
 
 | Condition | Action |
 |---|---|

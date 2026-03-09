@@ -1,5 +1,6 @@
 {
   "version":"1.0",
+  "credentialNamespace":"Project51DevEnv",
 
   "safetyPolicy":{
     "readOnly":"yes",

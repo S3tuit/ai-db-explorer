@@ -1,6 +1,6 @@
 #include "conn_manager.h"
+#include "db_backend.h"
 #include "log.h"
-#include "postgres_backend.h"
 #include "utils.h"
 
 #include <stdio.h>
@@ -43,18 +43,6 @@ static ConnEntry *find_entry(ConnManager *m, const char *connection_name) {
   return NULL;
 }
 
-/* Returns the right DbBackend based on 'kind'. */
-// TODO: probably choosing which *_backend_create() to call is a responsibility
-// of db_backend.h/.c not conn_manager
-static DbBackend *db_backend_create(DbKind kind) {
-  switch (kind) {
-  case DB_KIND_POSTGRES:
-    return postgres_backend_create();
-  default:
-    return NULL;
-  }
-}
-
 /* Makes sure 'e' refers to a connected DbBackend. Creates the backend if null.
  * Connect the backend if not already connected. Returns OK/ERR. */
 static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
@@ -76,8 +64,8 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
   // Fetch password if needed
   StrBuf pw;
   sb_init(&pw);
-  AdbxTriStatus s_rc =
-      secret_store_get(m->secrets, e->profile->connection_name, &pw);
+  AdbxTriStatus s_rc = secret_store_get(m->secrets, &e->profile->secret_ref,
+                                        &pw);
   if (s_rc == NO) {
     TLOG("ERROR - missing secret for %s", e->profile->connection_name);
     sb_zero_clean(&pw);

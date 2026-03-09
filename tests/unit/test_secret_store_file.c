@@ -1,5 +1,5 @@
-#include <errno.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -13,6 +13,11 @@
 #include "secret_store.h"
 #include "string_op.h"
 #include "test.h"
+
+#define TEST_NAMESPACE "TestNamespace"
+#define TEST_REF(name)                                                         \
+  (&(SecretRefInfo){.cred_namespace = TEST_NAMESPACE,                          \
+                    .connection_name = (name)})
 
 typedef struct {
   char *xdg_old;
@@ -394,7 +399,7 @@ static void test_missing_file_set_creates_nonempty(void) {
   struct stat st = {0};
   ASSERT_TRUE(lstat(ctx.cred_path, &st) != 0);
 
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == OK);
   assert_nonempty_regular_file(ctx.cred_path);
 
   // deletes the secret store while keeping the context
@@ -405,8 +410,40 @@ static void test_missing_file_set_creates_nonempty(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-1");
+  sb_zero_clean(&out);
+
+  ctx_close(&ctx);
+}
+
+/* Verifies set overwrite the secret if called with a ref that's already
+ * present. */
+static void test_set_overwrite_current_secret(void) {
+  FileStoreCtx ctx;
+  ctx_open_xdg(&ctx);
+
+  struct stat st = {0};
+  ASSERT_TRUE(lstat(ctx.cred_path, &st) != 0);
+
+  StrBuf out;
+
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == OK);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
+  ASSERT_STREQ(out.data, "pw-1");
+  sb_zero_clean(&out);
+
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "second") == OK);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
+  ASSERT_STREQ(out.data, "second");
+  sb_zero_clean(&out);
+
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-3") == OK);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
+  ASSERT_STREQ(out.data, "pw-3");
   sb_zero_clean(&out);
 
   ctx_close(&ctx);
@@ -419,7 +456,7 @@ static void test_missing_file_get_returns_no(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == NO);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == NO);
   sb_zero_clean(&out);
 
   ctx_close(&ctx);
@@ -430,7 +467,7 @@ static void test_missing_file_delete_returns_ok(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
-  ASSERT_TRUE(secret_store_delete(ctx.ss, "MyPostgres") == OK);
+  ASSERT_TRUE(secret_store_delete(ctx.ss, TEST_REF("MyPostgres")) == OK);
   ctx_close(&ctx);
 }
 
@@ -452,9 +489,9 @@ static void test_missing_file_wipe_all_creates_and_set_get_works(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == NO);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-after-wipe") == OK);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == NO);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-after-wipe") == OK);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-after-wipe");
   sb_zero_clean(&out);
 
@@ -470,9 +507,9 @@ static void test_zero_size_credentials_file_fails_closed(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   assert_parse_error(ctx.ss);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == ERR);
   assert_parse_error(ctx.ss);
   sb_zero_clean(&out);
 
@@ -486,18 +523,18 @@ static void test_truncate_after_valid_load_fails_closed(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == OK);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-1");
 
   ASSERT_TRUE(fileio_write_exact(ctx.cred_path, NULL, 0, 0600) == OK);
 
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   assert_parse_error(ctx.ss);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "AnotherPostgres", "pw-2") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("AnotherPostgres"), "pw-2") == ERR);
   assert_parse_error(ctx.ss);
   sb_zero_clean(&out);
 
@@ -516,7 +553,7 @@ static void run_schema_violation_case(const char *json, const char *name) {
 
   StrBuf out;
   sb_init(&out);
-  AdbxTriStatus rc = secret_store_get(ctx.ss, "MyPostgres", &out);
+  AdbxTriStatus rc = secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out);
   if (rc != ERR) {
     fprintf(stderr, "schema case '%s' expected ERR, got %d\n", name, (int)rc);
     exit(1);
@@ -537,16 +574,30 @@ static void test_json_schema_violations_are_parse(void) {
   run_schema_violation_case("{\"version\":\"2\",\"entries\":[]}",
                             "wrong-version");
   run_schema_violation_case(
-      "{\"version\":\"1\",\"entries\":[{\"secret\":\"x\"}]}", "missing-ref");
-  run_schema_violation_case("{\"version\":\"1\",\"entries\":[{\"ref\":\"x\"}]}",
+      "{\"version\":\"1\",\"entries\":[{\"connectionName\":\"x\","
+      "\"secret\":\"pw\"}]}",
+      "missing-namespace");
+  run_schema_violation_case(
+      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "\"TestNamespace\",\"secret\":\"pw\"}]}",
+      "missing-connection-name");
+  run_schema_violation_case(
+      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "\"TestNamespace\",\"connectionName\":\"x\"}]}",
                             "missing-secret");
   run_schema_violation_case(
-      "{\"version\":\"1\",\"entries\":[{\"ref\":\"\",\"secret\":\"x\"}]}",
-      "empty-ref");
+      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":\"\","
+      "\"connectionName\":\"x\",\"secret\":\"x\"}]}",
+      "empty-namespace");
+  run_schema_violation_case(
+      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "\"TestNamespace\",\"connectionName\":\"\",\"secret\":\"x\"}]}",
+      "empty-connection-name");
   run_schema_violation_case("{\"version\":\"1\",\"entries\":[],\"extra\":1}",
                             "unknown-top-key");
-  run_schema_violation_case("{\"version\":\"1\",\"entries\":[{\"ref\":\"x\","
-                            "\"secret\":\"y\",\"k\":1}]}",
+  run_schema_violation_case(
+      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "\"TestNamespace\",\"connectionName\":\"x\",\"secret\":\"y\",\"k\":1}]}",
                             "unknown-entry-key");
 }
 
@@ -558,15 +609,16 @@ static void test_symlink_credentials_path_fails(void) {
 
   char *target = path_join(ctx.tmp, "symlink_target.json");
   write_text_0600(target,
-                  "{\"version\":\"1\",\"entries\":[{\"ref\":\"MyPostgres\","
+                  "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+                  "\"TestNamespace\",\"connectionName\":\"MyPostgres\","
                   "\"secret\":\"pw-target\"}]}");
   ASSERT_TRUE(symlink(target, ctx.cred_path) == 0);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-new") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-new") == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
   sb_zero_clean(&out);
 
@@ -584,9 +636,9 @@ static void test_directory_at_credentials_path_fails(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-new") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-new") == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
   sb_zero_clean(&out);
 
@@ -629,7 +681,7 @@ static void test_xdg_absolute_path_used_directly(void) {
   ASSERT_TRUE(S_ISDIR(st.st_mode));
   ASSERT_TRUE(lstat(app_wrong, &st) != 0);
 
-  ASSERT_TRUE(secret_store_set(ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-1") == OK);
   assert_nonempty_regular_file(cred_xdg);
 
   secret_store_destroy(ss);
@@ -660,7 +712,7 @@ static void test_home_fallback_path_used(void) {
 
   SecretStore *ss = secret_store_file_backend_create();
   ASSERT_TRUE(ss != NULL);
-  ASSERT_TRUE(secret_store_set(ss, "MyPostgres", "pw-home") == OK);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-home") == OK);
 
   char *cred_home = home_cred_path(tmp);
   char *cred_xdg = xdg_cred_path(tmp);
@@ -700,18 +752,18 @@ static void test_external_file_deletion_invalidation(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == OK);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-1");
 
   ASSERT_TRUE(unlink(ctx.cred_path) == 0);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == NO);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == NO);
 
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-2") == OK);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-2") == OK);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-2");
   sb_zero_clean(&out);
 
@@ -725,24 +777,25 @@ static void test_external_malformed_rewrite_fails_closed(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == OK);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-1");
 
   write_text_0600(ctx.cred_path, "{\"version\":");
 
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   assert_parse_error(ctx.ss);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "AnotherPostgres", "pw-2") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("AnotherPostgres"), "pw-2") == ERR);
   assert_parse_error(ctx.ss);
 
   write_text_0600(ctx.cred_path,
-                  "{\"version\":\"1\",\"entries\":[{\"ref\":\"MyPostgres\","
+                  "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+                  "\"TestNamespace\",\"connectionName\":\"MyPostgres\","
                   "\"secret\":\"pw-new\"}]}");
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-new");
   sb_zero_clean(&out);
 
@@ -756,7 +809,7 @@ static void test_external_malformed_rewrite_fails_closed(void) {
 static void test_set_lock_contention_reports_write_error(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == OK);
 
   char *cred_path = default_cred_path(ctx.tmp);
   ASSERT_TRUE(cred_path != NULL);
@@ -769,16 +822,14 @@ static void test_set_lock_contention_reports_write_error(void) {
   int lfd = open(lock_path, O_CREAT | O_WRONLY, 0600);
   ASSERT_TRUE(lfd >= 0);
 
-  struct flock fl = {.l_type = F_WRLCK,
-                     .l_whence = SEEK_SET,
-                     .l_start = 0,
-                     .l_len = 0};
+  struct flock fl = {
+      .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
   ASSERT_TRUE(fcntl(lfd, F_SETLK, &fl) == 0);
 
   pid_t pid = fork();
   ASSERT_TRUE(pid >= 0);
   if (pid == 0) {
-    AdbxStatus rc = secret_store_set(ctx.ss, "MyPostgres", "pw-2");
+    AdbxStatus rc = secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-2");
     if (rc == ERR && secret_store_last_error_code(ctx.ss) == SSERR_WRITE)
       _exit(CHILD_OK);
     _exit(CHILD_ERR);
@@ -819,11 +870,11 @@ static void test_stale_lock_file_does_not_block_set(void) {
   ASSERT_TRUE(lstat(lock_path, &st) == 0);
   ASSERT_TRUE(S_ISREG(st.st_mode));
 
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-stale") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-stale") == OK);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-stale");
   sb_zero_clean(&out);
 
@@ -849,11 +900,11 @@ static void test_calls_report_env_error_when_env_missing(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
-  ASSERT_TRUE(secret_store_delete(ctx.ss, "MyPostgres") == ERR);
+  ASSERT_TRUE(secret_store_delete(ctx.ss, TEST_REF("MyPostgres")) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
   ASSERT_TRUE(secret_store_wipe_all(ctx.ss) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
@@ -878,11 +929,11 @@ static void test_calls_report_dir_error_after_config_dir_deleted(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ctx.ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
-  ASSERT_TRUE(secret_store_set(ctx.ss, "MyPostgres", "pw-1") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-1") == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
-  ASSERT_TRUE(secret_store_delete(ctx.ss, "MyPostgres") == ERR);
+  ASSERT_TRUE(secret_store_delete(ctx.ss, TEST_REF("MyPostgres")) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
   ASSERT_TRUE(secret_store_wipe_all(ctx.ss) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
@@ -893,6 +944,7 @@ static void test_calls_report_dir_error_after_config_dir_deleted(void) {
 
 int main(void) {
   test_missing_file_set_creates_nonempty();
+  test_set_overwrite_current_secret();
   test_missing_file_get_returns_no();
   test_missing_file_delete_returns_ok();
   test_missing_file_wipe_all_creates_and_set_get_works();

@@ -83,6 +83,7 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
 ConnCatalog *load_test_catalog(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
+                     "  \"credentialNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"columnPolicy\": {"
                      "      \"mode\": \"pseudonymize\","
@@ -127,6 +128,8 @@ ConnProfile make_profile(const char *connection_name,
                          SafetyColumnStrategy mode) {
   ConnProfile cp = {0};
   cp.connection_name = connection_name;
+  cp.secret_ref.cred_namespace = "TestNamespace";
+  cp.secret_ref.connection_name = connection_name;
   cp.safe_policy.column_strategy = mode;
   return cp;
 }

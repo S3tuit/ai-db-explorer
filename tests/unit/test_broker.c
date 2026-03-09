@@ -25,7 +25,7 @@
 
 /* --------------------------------- Fakes --------------------------------- */
 
-static AdbxTriStatus fake_ss_get(SecretStore *store, const char *ref,
+static AdbxTriStatus fake_ss_get(SecretStore *store, const SecretRefInfo *ref,
                                  StrBuf *out) {
   (void)store;
   (void)ref;
@@ -33,7 +33,7 @@ static AdbxTriStatus fake_ss_get(SecretStore *store, const char *ref,
   return YES;
 }
 
-static AdbxStatus fake_ss_set(SecretStore *store, const char *ref,
+static AdbxStatus fake_ss_set(SecretStore *store, const SecretRefInfo *ref,
                               const char *secret) {
   (void)store;
   (void)ref;
@@ -41,9 +41,22 @@ static AdbxStatus fake_ss_set(SecretStore *store, const char *ref,
   return OK;
 }
 
-static AdbxStatus fake_ss_delete(SecretStore *store, const char *ref) {
+static AdbxStatus fake_ss_delete(SecretStore *store, const SecretRefInfo *ref) {
   (void)store;
   (void)ref;
+  return OK;
+}
+
+static AdbxStatus fake_ss_list_refs(SecretStore *store, SecretRefList *out) {
+  (void)store;
+  (void)out;
+  return OK;
+}
+
+static AdbxStatus fake_ss_wipe_namespace(SecretStore *store,
+                                         const char *cred_namespace) {
+  (void)store;
+  (void)cred_namespace;
   return OK;
 }
 
@@ -58,6 +71,8 @@ static const SecretStoreVTable FAKE_SS_VT = {
     .get = fake_ss_get,
     .set = fake_ss_set,
     .delete = fake_ss_delete,
+    .list_refs = fake_ss_list_refs,
+    .wipe_namespace = fake_ss_wipe_namespace,
     .wipe_all = fake_ss_wipe_all,
     .destroy = fake_ss_destroy,
 };

@@ -1,5 +1,7 @@
 #include "secret_store.h"
 
+#include <stdlib.h>
+
 /* Tries one backend probe and enforces fail-closed semantics.
  * It borrows probe/out_store and performs no allocations.
  * Side effects: may initialize one backend through the probe callback.
@@ -54,30 +56,61 @@ void secret_store_destroy(SecretStore *store) {
   store->vt->destroy(store);
 }
 
-AdbxTriStatus secret_store_get(SecretStore *store, const char *secret_ref,
+AdbxTriStatus secret_store_get(SecretStore *store, const SecretRefInfo *ref,
                                StrBuf *out) {
   if (!store || !store->vt || !store->vt->get)
     return ERR;
-  return store->vt->get(store, secret_ref, out);
+  return store->vt->get(store, ref, out);
 }
 
-AdbxStatus secret_store_set(SecretStore *store, const char *secret_ref,
+AdbxStatus secret_store_set(SecretStore *store, const SecretRefInfo *ref,
                             const char *secret) {
   if (!store || !store->vt || !store->vt->set)
     return ERR;
-  return store->vt->set(store, secret_ref, secret);
+  return store->vt->set(store, ref, secret);
 }
 
-AdbxStatus secret_store_delete(SecretStore *store, const char *secret_ref) {
+AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref) {
   if (!store || !store->vt || !store->vt->delete)
     return ERR;
-  return store->vt->delete(store, secret_ref);
+  return store->vt->delete(store, ref);
+}
+
+AdbxStatus secret_store_list_refs(SecretStore *store, SecretRefList *out) {
+  if (!store || !store->vt || !store->vt->list_refs)
+    return ERR;
+  return store->vt->list_refs(store, out);
+}
+
+AdbxStatus secret_store_wipe_namespace(SecretStore *store,
+                                       const char *cred_namespace) {
+  if (!store || !store->vt || !store->vt->wipe_namespace)
+    return ERR;
+  return store->vt->wipe_namespace(store, cred_namespace);
 }
 
 AdbxStatus secret_store_wipe_all(SecretStore *store) {
   if (!store || !store->vt || !store->vt->wipe_all)
     return ERR;
   return store->vt->wipe_all(store);
+}
+
+void secret_ref_list_clean(SecretRefList *list) {
+  if (!list)
+    return;
+
+  if (list->items) {
+    for (size_t i = 0; i < list->n_items; i++) {
+      free((char *)list->items[i].cred_namespace);
+      free((char *)list->items[i].connection_name);
+      list->items[i].cred_namespace = NULL;
+      list->items[i].connection_name = NULL;
+    }
+    free(list->items);
+  }
+
+  list->items = NULL;
+  list->n_items = 0;
 }
 
 const char *secret_store_last_error(SecretStore *store) {

@@ -97,7 +97,7 @@ typedef struct {
   SecretStore base;
 } FakeSecretStore;
 
-static AdbxTriStatus fake_ss_get(SecretStore *store, const char *ref,
+static AdbxTriStatus fake_ss_get(SecretStore *store, const SecretRefInfo *ref,
                                  StrBuf *out) {
   (void)store;
   (void)ref;
@@ -107,7 +107,7 @@ static AdbxTriStatus fake_ss_get(SecretStore *store, const char *ref,
   return YES;
 }
 
-static AdbxStatus fake_ss_set(SecretStore *store, const char *ref,
+static AdbxStatus fake_ss_set(SecretStore *store, const SecretRefInfo *ref,
                               const char *secret) {
   (void)store;
   (void)ref;
@@ -115,9 +115,22 @@ static AdbxStatus fake_ss_set(SecretStore *store, const char *ref,
   return OK;
 }
 
-static AdbxStatus fake_ss_delete(SecretStore *store, const char *ref) {
+static AdbxStatus fake_ss_delete(SecretStore *store, const SecretRefInfo *ref) {
   (void)store;
   (void)ref;
+  return OK;
+}
+
+static AdbxStatus fake_ss_list_refs(SecretStore *store, SecretRefList *out) {
+  (void)store;
+  (void)out;
+  return OK;
+}
+
+static AdbxStatus fake_ss_wipe_namespace(SecretStore *store,
+                                         const char *cred_namespace) {
+  (void)store;
+  (void)cred_namespace;
   return OK;
 }
 
@@ -132,6 +145,8 @@ static const SecretStoreVTable FAKE_SS_VT = {
     .get = fake_ss_get,
     .set = fake_ss_set,
     .delete = fake_ss_delete,
+    .list_refs = fake_ss_list_refs,
+    .wipe_namespace = fake_ss_wipe_namespace,
     .wipe_all = fake_ss_wipe_all,
     .destroy = fake_ss_destroy,
 };
@@ -148,11 +163,14 @@ static SecretStore *fake_secret_store_create(void) {
  * without relying on a real DB. */
 static ConnCatalog *make_catalog(void) {
   ConnCatalog *cat = (ConnCatalog *)xcalloc(1, sizeof(*cat));
+  cat->credential_namespace = dup_or_null("TestNamespace");
   cat->n_profiles = 1;
   cat->profiles = (ConnProfile *)xcalloc(1, sizeof(ConnProfile));
 
   ConnProfile *p = &cat->profiles[0];
   p->connection_name = dup_or_null("db1");
+  p->secret_ref.cred_namespace = cat->credential_namespace;
+  p->secret_ref.connection_name = p->connection_name;
   p->kind = DB_KIND_POSTGRES;
   p->host = dup_or_null("localhost");
   p->port = 5432;

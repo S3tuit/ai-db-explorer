@@ -2,8 +2,10 @@
 #define CONN_CATALOG_H
 
 #include "arena.h"
+#include "secret_store.h"
 #include "safety_policy.h"
 #include "utils.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -53,6 +55,7 @@ typedef struct SafeFunctionPolicy {
  */
 typedef struct {
   const char *connection_name; // stable string id (unique)
+  SecretRefInfo secret_ref;    // borrows catalog namespace + connection_name
   DbKind kind;
 
   const char *host; // e.g., "127.0.0.1"
@@ -72,6 +75,7 @@ typedef struct {
 } ConnProfile;
 
 typedef struct ConnCatalog {
+  const char *credential_namespace; // owned
   ConnProfile *profiles; // owned array
   size_t n_profiles;
 

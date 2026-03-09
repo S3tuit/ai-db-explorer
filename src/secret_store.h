@@ -22,15 +22,30 @@ typedef enum {
   SSERR_WRITE,     // I/O error
 } SecretStoreErrCode;
 
+typedef struct {
+  const char *cred_namespace;
+  const char *connection_name;
+} SecretRefInfo;
+
+typedef struct {
+  SecretRefInfo *items; // owned array
+  size_t n_items;
+} SecretRefList;
+
 struct SecretStoreVTable {
   // Writes a NUL-terminated secret into 'out'.
   // Returns YES when found, NO when missing, ERR on failure.
-  AdbxTriStatus (*get)(SecretStore *store, const char *secret_ref, StrBuf *out);
-  // Stores one NUL-terminated secret.
-  AdbxStatus (*set)(SecretStore *store, const char *secret_ref,
+  AdbxTriStatus (*get)(SecretStore *store, const SecretRefInfo *ref,
+                       StrBuf *out);
+  // Stores/replace one NUL-terminated secret.
+  AdbxStatus (*set)(SecretStore *store, const SecretRefInfo *ref,
                     const char *secret);
   // Deletes one stored secret.
-  AdbxStatus (*delete)(SecretStore *store, const char *secret_ref);
+  AdbxStatus (*delete)(SecretStore *store, const SecretRefInfo *ref);
+  // Lists all stored references.
+  AdbxStatus (*list_refs)(SecretStore *store, SecretRefList *out);
+  // Deletes all stored secrets in one namespace.
+  AdbxStatus (*wipe_namespace)(SecretStore *store, const char *cred_namespace);
   // Deletes all stored secrets in this store namespace.
   AdbxStatus (*wipe_all)(SecretStore *store);
   // Destroys the store and releases resources.
@@ -59,15 +74,22 @@ SecretStore *secret_store_create(void);
 
 void secret_store_destroy(SecretStore *store);
 
-AdbxTriStatus secret_store_get(SecretStore *store, const char *secret_ref,
+AdbxTriStatus secret_store_get(SecretStore *store, const SecretRefInfo *ref,
                                StrBuf *out);
 
-AdbxStatus secret_store_set(SecretStore *store, const char *secret_ref,
+AdbxStatus secret_store_set(SecretStore *store, const SecretRefInfo *ref,
                             const char *secret);
 
-AdbxStatus secret_store_delete(SecretStore *store, const char *secret_ref);
+AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref);
+
+AdbxStatus secret_store_list_refs(SecretStore *store, SecretRefList *out);
+
+AdbxStatus secret_store_wipe_namespace(SecretStore *store,
+                                       const char *cred_namespace);
 
 AdbxStatus secret_store_wipe_all(SecretStore *store);
+
+void secret_ref_list_clean(SecretRefList *list);
 
 /* Returns backend-specific last error text.
  * Error semantics: returns empty string when unavailable or no error detail.

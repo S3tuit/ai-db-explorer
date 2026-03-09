@@ -9,6 +9,11 @@
 #include "string_op.h"
 #include "test.h"
 
+#define TEST_NAMESPACE "TestNamespace"
+#define TEST_REF(name)                                                         \
+  (&(SecretRefInfo){.cred_namespace = TEST_NAMESPACE,                          \
+                    .connection_name = (name)})
+
 static char *cred_path_for_tmp(const char *tmp);
 
 /* Builds a credentials file JSON payload with one entry.
@@ -16,14 +21,18 @@ static char *cred_path_for_tmp(const char *tmp);
  * Side effects: allocates memory.
  * Error semantics: returns NULL on invalid input.
  */
-static char *build_single_entry_json(const char *ref, const char *secret) {
-  if (!ref || !secret)
+static char *build_single_entry_json(const char *cred_namespace,
+                                     const char *connection_name,
+                                     const char *secret) {
+  if (!cred_namespace || !connection_name || !secret)
     return NULL;
-  size_t n = strlen(ref) + strlen(secret) + 128;
+  size_t n = strlen(cred_namespace) + strlen(connection_name) + strlen(secret) +
+             192;
   char *json = xmalloc(n);
   snprintf(json, n,
-           "{\"version\":\"1\",\"entries\":[{\"ref\":\"%s\",\"secret\":\"%s\"}]}",
-           ref, secret);
+           "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":\"%s\","
+           "\"connectionName\":\"%s\",\"secret\":\"%s\"}]}",
+           cred_namespace, connection_name, secret);
   return json;
 }
 
@@ -105,23 +114,23 @@ static void test_file_backend_roundtrip(void) {
   StrBuf out;
   sb_init(&out);
 
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == NO);
-  ASSERT_TRUE(secret_store_set(ss, "MyPostgres", "pw-1") == OK);
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == NO);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-1") == OK);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-1");
 
-  ASSERT_TRUE(secret_store_set(ss, "MyPostgres", "pw-2") == OK);
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-2") == OK);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-2");
 
-  ASSERT_TRUE(secret_store_set(ss, "AnotherPostgres", "pw-x") == OK);
-  ASSERT_TRUE(secret_store_delete(ss, "MyPostgres") == OK);
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == NO);
-  ASSERT_TRUE(secret_store_get(ss, "AnotherPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("AnotherPostgres"), "pw-x") == OK);
+  ASSERT_TRUE(secret_store_delete(ss, TEST_REF("MyPostgres")) == OK);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == NO);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("AnotherPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-x");
 
   ASSERT_TRUE(secret_store_wipe_all(ss) == OK);
-  ASSERT_TRUE(secret_store_get(ss, "AnotherPostgres", &out) == NO);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("AnotherPostgres"), &out) == NO);
 
   char *cred_path = cred_path_for_tmp(tmp);
   ASSERT_TRUE(cred_path != NULL);
@@ -153,14 +162,14 @@ static void test_file_backend_rejects_bad_mode(void) {
   SecretStore *ss = secret_store_file_backend_create();
   ASSERT_TRUE(ss != NULL);
 
-  ASSERT_TRUE(secret_store_set(ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-1") == OK);
   char *cred_path = cred_path_for_tmp(tmp);
   ASSERT_TRUE(cred_path != NULL);
   ASSERT_TRUE(chmod(cred_path, 0644) == 0);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == ERR);
   sb_zero_clean(&out);
 
   free(cred_path);
@@ -183,11 +192,11 @@ static void test_secret_store_factory_usable(void) {
 
   SecretStore *ss = secret_store_create();
   ASSERT_TRUE(ss != NULL);
-  ASSERT_TRUE(secret_store_set(ss, "MyPostgres", "pw-xyz") == OK);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-xyz") == OK);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-xyz");
 
   sb_zero_clean(&out);
@@ -211,22 +220,23 @@ static void test_file_backend_refreshes_on_disk_change(void) {
   SecretStore *ss = secret_store_file_backend_create();
   ASSERT_TRUE(ss != NULL);
 
-  ASSERT_TRUE(secret_store_set(ss, "MyPostgres", "pw-1") == OK);
+  ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-1") == OK);
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-1");
 
   char *cred_path = cred_path_for_tmp(tmp);
   ASSERT_TRUE(cred_path != NULL);
-  char *json = build_single_entry_json("MyPostgres", "pw-2-long");
+  char *json =
+      build_single_entry_json(TEST_NAMESPACE, "MyPostgres", "pw-2-long");
   ASSERT_TRUE(json != NULL);
   ASSERT_TRUE(fileio_write_exact(cred_path, (const uint8_t *)json, strlen(json),
                                  0600) == OK);
   free(json);
 
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == YES);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-2-long");
 
   free(cred_path);
@@ -238,7 +248,7 @@ static void test_file_backend_refreshes_on_disk_change(void) {
   free(tmp);
 }
 
-/* Verifies duplicate refs in credentials file are rejected as hard errors.
+/* Verifies duplicate namespace+connection refs are rejected as hard errors.
  */
 static void test_file_backend_duplicate_ref_is_err(void) {
   char *tmp = make_tmp_dir();
@@ -251,8 +261,10 @@ static void test_file_backend_duplicate_ref_is_err(void) {
   ASSERT_TRUE(ss != NULL);
 
   const char *dup_json =
-      "{\"version\":\"1\",\"entries\":[{\"ref\":\"MyPostgres\",\"secret\":"
-      "\"pw-a\"},{\"ref\":\"MyPostgres\",\"secret\":\"pw-b\"}]}";
+      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "\"TestNamespace\",\"connectionName\":\"MyPostgres\",\"secret\":"
+      "\"pw-a\"},{\"credentialNamespace\":\"TestNamespace\","
+      "\"connectionName\":\"MyPostgres\",\"secret\":\"pw-b\"}]}";
 
   char *cred_path = cred_path_for_tmp(tmp);
   ASSERT_TRUE(cred_path != NULL);
@@ -261,7 +273,7 @@ static void test_file_backend_duplicate_ref_is_err(void) {
 
   StrBuf out;
   sb_init(&out);
-  ASSERT_TRUE(secret_store_get(ss, "MyPostgres", &out) == ERR);
+  ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == ERR);
 
   sb_zero_clean(&out);
   free(cred_path);

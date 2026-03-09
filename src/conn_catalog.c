@@ -725,8 +725,37 @@ static void profile_clean(ConnProfile *p) {
   free((char *)p->db_name);
   free((char *)p->user);
   free((char *)p->options);
+  p->secret_ref.cred_namespace = NULL;
+  p->secret_ref.connection_name = NULL;
   arena_clean(&p->col_policy.arena);
   arena_clean(&p->safe_funcs.arena);
+}
+
+/* Parses the required top-level credential namespace string.
+ * It borrows 'jg' and allocates one owned string for 'cat'.
+ * Side effects: allocates heap memory for 'cat->credential_namespace'.
+ * Error semantics: returns OK on success, ERR on missing, empty, or malformed
+ * input.
+ */
+static AdbxStatus parse_credential_namespace(const JsonGetter *jg,
+                                             ConnCatalog *cat,
+                                             char **err_out) {
+  if (!jg || !cat)
+    return ERR;
+
+  char *ns = NULL;
+  if (jsget_string_decode_alloc(jg, "credentialNamespace", &ns) != YES) {
+    set_parse_err(err_out, "$.credentialNamespace: expected string.");
+    return ERR;
+  }
+  if (ns[0] == '\0') {
+    free(ns);
+    set_parse_err(err_out, "$.credentialNamespace: must not be empty.");
+    return ERR;
+  }
+
+  cat->credential_namespace = ns;
+  return OK;
 }
 
 /* Parses one databases[i] object into 'out'. This will clean 'out' if something
@@ -816,6 +845,8 @@ static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
   type = NULL;
 
   out->connection_name = conn_name;
+  out->secret_ref.cred_namespace = cat->credential_namespace;
+  out->secret_ref.connection_name = conn_name;
   out->kind = DB_KIND_POSTGRES;
   out->host = host;
   out->port = (uint16_t)port;
@@ -848,6 +879,8 @@ error:
 
   // make it safe for caller to call free if ERR
   out->connection_name = NULL;
+  out->secret_ref.cred_namespace = NULL;
+  out->secret_ref.connection_name = NULL;
   out->db_name = NULL;
   out->host = NULL;
   out->options = NULL;
@@ -973,7 +1006,8 @@ static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
   }
 
   // make sure these 2 objects are present in the config file
-  const char *const root_keys[] = {"version", "safetyPolicy", "databases"};
+  const char *const root_keys[] = {"version", "credentialNamespace",
+                                   "safetyPolicy", "databases"};
   JsonStrSpan root_unknown = {0};
   if (jsget_top_level_validation(&jg, NULL, root_keys, ARRLEN(root_keys),
                                  &root_unknown) != YES) {
@@ -996,6 +1030,9 @@ static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
     set_parse_err(&err_msg, "$.safetyPolicy: failed to initialize defaults.");
     goto error;
   }
+
+  if (parse_credential_namespace(&jg, cat, &err_msg) != OK)
+    goto error;
 
   JsonGetter policy_obj = {0};
   if (jsget_object(&jg, "safetyPolicy", &policy_obj) != YES) {
@@ -1080,6 +1117,8 @@ void catalog_destroy(ConnCatalog *cat) {
     free(cat->profiles);
     cat->profiles = NULL;
   }
+  free((char *)cat->credential_namespace);
+  cat->credential_namespace = NULL;
   free(cat);
 }
 

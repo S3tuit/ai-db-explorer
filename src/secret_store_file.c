@@ -22,12 +22,16 @@
 #include <time.h>
 #include <unistd.h>
 
+// TODO: we should ALWAYS print a warning log to the user when SecretStoreFile
+// is in use, users should prefer libsecret/keychain.
+
 #define SS_CRED_FILE "credentials.json"
 #define SS_FILE_VERSION "1"
 #define SS_FILE_MAX_BYTES (16u * 1024u * 1024u)
 
 typedef struct {
-  const char *ref;    // the connectionName
+  const char *cred_namespace;
+  const char *connection_name;
   const char *secret; // the password of the database (in plain text)
 } SecretEntry;
 
@@ -49,9 +53,6 @@ typedef struct {
 } FileSecretStore;
 
 /* Clears one backend error snapshot.
- * It borrows 'store' and does not allocate.
- * Side effects: resets store error code/message.
- * Error semantics: none.
  */
 static void ss_clear_err(FileSecretStore *store) {
   if (!store)
@@ -83,8 +84,6 @@ static void ss_set_err(FileSecretStore *store, SecretStoreErrCode code,
 
 /* Zeroes and frees one heap-allocated secret string.
  * It consumes '*s'.
- * Side effects: overwrites secret bytes before free.
- * Error semantics: none.
  */
 static void ss_secret_free(char **s) {
   if (!s || !*s)
@@ -97,8 +96,6 @@ static void ss_secret_free(char **s) {
 
 /* Clears one cached entry list and zeroes stored values.
  * It consumes arena-owned memory in 'list'.
- * Side effects: overwrites arena payload and releases arena blocks.
- * Error semantics: none.
  */
 static void ss_entries_clean(SecretEntryList *list) {
   if (!list)
@@ -114,15 +111,61 @@ static void ss_entries_clean(SecretEntryList *list) {
   list->n_entries = 0;
 }
 
-/* Comparator for final entries by ref.
+/* Compares one secret reference tuple.
+ * It borrows all inputs and performs no allocations.
+ * Error semantics: returns strcmp-style ordering by namespace then
+ * connection-name.
+ */
+static inline int ss_ref_cmp_parts(const char *a_namespace,
+                                   const char *a_conn_name,
+                                   const char *b_namespace,
+                                   const char *b_conn_name) {
+  int ns_cmp = strcmp(a_namespace, b_namespace);
+  if (ns_cmp != 0)
+    return ns_cmp;
+  return strcmp(a_conn_name, b_conn_name);
+}
+
+/* Comparator for final entries by namespace then connection name.
  * It borrows both inputs and performs no allocations.
- * Side effects: none.
  * Error semantics: returns qsort/bsearch-compatible ordering.
  */
 static int ss_entry_cmp(const void *a, const void *b) {
   const SecretEntry *ea = (const SecretEntry *)a;
   const SecretEntry *eb = (const SecretEntry *)b;
-  return strcmp(ea->ref, eb->ref);
+  return ss_ref_cmp_parts(ea->cred_namespace, ea->connection_name,
+                          eb->cred_namespace, eb->connection_name);
+}
+
+/* Validates one typed secret reference for backend operations.
+ * It borrows inputs and writes backend error state on failure.
+ * Side effects: updates backend error state when invalid.
+ * Error semantics: returns OK on valid namespace+connection name, ERR
+ * otherwise.
+ */
+static AdbxStatus ss_validate_ref(FileSecretStore *store,
+                                  const SecretRefInfo *ref,
+                                  const char *op_name) {
+  if (!store || !op_name)
+    return ERR;
+
+  if (!ref || !ref->cred_namespace || !ref->connection_name) {
+    ss_set_err(store, SSERR_INPUT,
+               "secret-store %s failed: invalid input pointers. This is "
+               "probably a bug, please, report it.",
+               op_name);
+    return ERR;
+  }
+
+  if (ref->cred_namespace[0] == '\0' || ref->connection_name[0] == '\0') {
+    ss_set_err(store, SSERR_INPUT,
+               "secret-store %s failed: secret reference fields cannot be "
+               "empty. This is probably a bug, please, report it.",
+               op_name);
+    return ERR;
+  }
+
+  return OK;
 }
 
 /* Duplicates one C-string into arena-owned NUL-terminated storage.
@@ -173,44 +216,56 @@ static AdbxStatus ss_list_init_with_n_entries(SecretEntryList *out, size_t n) {
   return OK;
 }
 
-/* Copies one ref/secret pair into one list entry.
+/* Copies one typed secret ref/secret pair into one list entry.
  * It borrows all inputs and writes arena-owned strings in list[idx].
  * Side effects: allocates strings in list arena.
  * Error semantics: returns OK on success, ERR on allocation failure.
  */
 static inline AdbxStatus ss_list_set_entry_copy(SecretEntryList *list,
-                                                size_t idx, const char *ref,
+                                                size_t idx,
+                                                const SecretRefInfo *ref,
                                                 const char *secret) {
   assert(list);
   assert(ref);
+  assert(ref->cred_namespace);
+  assert(ref->connection_name);
   assert(secret);
   assert(idx < list->n_entries);
 
-  list->entries[idx].ref = ss_arena_dup_cstr(&list->arena, ref);
+  list->entries[idx].cred_namespace =
+      ss_arena_dup_cstr(&list->arena, ref->cred_namespace);
+  list->entries[idx].connection_name =
+      ss_arena_dup_cstr(&list->arena, ref->connection_name);
   list->entries[idx].secret = ss_arena_dup_cstr(&list->arena, secret);
-  if (!list->entries[idx].ref || !list->entries[idx].secret)
+  if (!list->entries[idx].cred_namespace ||
+      !list->entries[idx].connection_name || !list->entries[idx].secret)
     return ERR;
 
   return OK;
 }
 
-/* Finds one ref position in sorted list.
+/* Finds one typed ref position in sorted list.
  * It borrows list/ref and writes one position to out_pos.
  * Side effects: none.
  * Error semantics: returns YES when found, NO when missing (out_pos is insert
  * point).
  */
 static AdbxTriStatus ss_list_find_ref_pos(const SecretEntryList *list,
-                                          const char *ref, size_t *out_pos) {
+                                          const SecretRefInfo *ref,
+                                          size_t *out_pos) {
   assert(list);
   assert(ref);
+  assert(ref->cred_namespace);
+  assert(ref->connection_name);
   assert(out_pos);
 
   size_t lo = 0;
   size_t hi = list->n_entries;
   while (lo < hi) {
     size_t mid = lo + ((hi - lo) / 2u);
-    int cmp = strcmp(list->entries[mid].ref, ref);
+    int cmp = ss_ref_cmp_parts(list->entries[mid].cred_namespace,
+                               list->entries[mid].connection_name,
+                               ref->cred_namespace, ref->connection_name);
     if (cmp < 0) {
       lo = mid + 1u;
     } else if (cmp > 0) {
@@ -225,14 +280,16 @@ static AdbxTriStatus ss_list_find_ref_pos(const SecretEntryList *list,
   return NO;
 }
 
-/* Builds 'out_next' list by upserting one ref/secret pair into a sorted source
- * list. It borrows all inputs and creates a new object that can outlive 'src'.
+/* Builds 'out_next' list by upserting one typed ref/secret pair into a sorted
+ * source list. It borrows all inputs and creates a new object that can outlive
+ * 'src'.
  * Side effects: allocates output arena memory.
  * Error semantics: returns OK on success, ERR on invalid input or allocation
  * failure.
  */
 static AdbxStatus ss_list_build_with_upsert(const SecretEntryList *src,
-                                            const char *ref, const char *secret,
+                                            const SecretRefInfo *ref,
+                                            const char *secret,
                                             SecretEntryList *out_next) {
   if (!src || !ref || !secret || !out_next)
     return ERR;
@@ -260,8 +317,14 @@ static AdbxStatus ss_list_build_with_upsert(const SecretEntryList *src,
       continue;
     }
 
-    if (src_i >= src->n_entries ||
-        ss_list_set_entry_copy(out_next, dst_i, src->entries[src_i].ref,
+    if (src_i >= src->n_entries) {
+      ss_entries_clean(out_next);
+      return ERR;
+    }
+    SecretRefInfo src_ref = {
+        .cred_namespace = src->entries[src_i].cred_namespace,
+        .connection_name = src->entries[src_i].connection_name};
+    if (ss_list_set_entry_copy(out_next, dst_i, &src_ref,
                                src->entries[src_i].secret) != OK) {
       ss_entries_clean(out_next);
       return ERR;
@@ -293,12 +356,91 @@ static AdbxStatus ss_list_build_without_index(const SecretEntryList *src,
     if (src_i == remove_idx)
       continue;
 
-    if (ss_list_set_entry_copy(out_next, dst_i, src->entries[src_i].ref,
+    SecretRefInfo src_ref = {
+        .cred_namespace = src->entries[src_i].cred_namespace,
+        .connection_name = src->entries[src_i].connection_name};
+    if (ss_list_set_entry_copy(out_next, dst_i, &src_ref,
                                src->entries[src_i].secret) != OK) {
       ss_entries_clean(out_next);
       return ERR;
     }
     dst_i++;
+  }
+
+  return OK;
+}
+
+/* Builds 'out_next' list by removing all entries in one namespace.
+ * It borrows src/cred_namespace and creates a new object that can outlive
+ * 'src'.
+ * Side effects: allocates output arena memory.
+ * Error semantics: returns OK on success, ERR on invalid input or allocation
+ * failure.
+ */
+static AdbxStatus ss_list_build_without_namespace(const SecretEntryList *src,
+                                                  const char *cred_namespace,
+                                                  SecretEntryList *out_next) {
+  if (!src || !cred_namespace || !out_next)
+    return ERR;
+
+  size_t keep_n = 0;
+  for (size_t i = 0; i < src->n_entries; i++) {
+    if (strcmp(src->entries[i].cred_namespace, cred_namespace) != 0)
+      keep_n++;
+  }
+
+  if (ss_list_init_with_n_entries(out_next, keep_n) != OK)
+    return ERR;
+
+  size_t dst_i = 0;
+  for (size_t src_i = 0; src_i < src->n_entries; src_i++) {
+    if (strcmp(src->entries[src_i].cred_namespace, cred_namespace) == 0)
+      continue;
+
+    SecretRefInfo src_ref = {
+        .cred_namespace = src->entries[src_i].cred_namespace,
+        .connection_name = src->entries[src_i].connection_name};
+    if (ss_list_set_entry_copy(out_next, dst_i, &src_ref,
+                               src->entries[src_i].secret) != OK) {
+      ss_entries_clean(out_next);
+      return ERR;
+    }
+    dst_i++;
+  }
+
+  return OK;
+}
+
+/* Copies cached refs into one heap-owned SecretRefList for callers.
+ * It borrows 'src' and writes one owned list into 'out'.
+ * Side effects: allocates heap strings and list storage.
+ * Error semantics: returns OK on success, ERR on invalid input or allocation
+ * failure.
+ */
+static AdbxStatus ss_list_copy_refs(const SecretEntryList *src,
+                                    SecretRefList *out) {
+  if (!src || !out)
+    return ERR;
+
+  out->items = NULL;
+  out->n_items = 0;
+  if (src->n_entries == 0)
+    return OK;
+
+  SecretRefInfo *items =
+      (SecretRefInfo *)calloc(src->n_entries, sizeof(*items));
+  if (!items)
+    return ERR;
+
+  out->items = items;
+  out->n_items = src->n_entries;
+  for (size_t i = 0; i < src->n_entries; i++) {
+    items[i].cred_namespace = dup_or_null(src->entries[i].cred_namespace);
+    items[i].connection_name = dup_or_null(src->entries[i].connection_name);
+    if (!items[i].cred_namespace || !items[i].connection_name) {
+      secret_ref_list_clean(out);
+      return ERR;
+    }
   }
 
   return OK;
@@ -526,7 +668,11 @@ static AdbxStatus ss_serialize_entries(const SecretEntryList *entries,
   for (size_t i = 0; i < entries->n_entries; i++) {
     if (json_obj_begin(out_json) != OK)
       goto error;
-    if (json_kv_str(out_json, "ref", entries->entries[i].ref) != OK)
+    if (json_kv_str(out_json, "credentialNamespace",
+                    entries->entries[i].cred_namespace) != OK)
+      goto error;
+    if (json_kv_str(out_json, "connectionName",
+                    entries->entries[i].connection_name) != OK)
       goto error;
     if (json_kv_str(out_json, "secret", entries->entries[i].secret) != OK)
       goto error;
@@ -550,7 +696,7 @@ error:
  * It borrows 'json' and allocates all output memory in out_list arena.
  * Side effects: allocates temporary decoded strings and output arena.
  * Error semantics: returns OK on success, ERR on malformed input,
- * duplicate refs, or allocation failures.
+ * duplicate namespace+connection pairs, or allocation failures.
  */
 static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
                                         const char *json, size_t json_len,
@@ -636,40 +782,57 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
       goto parse_error;
     }
 
-    const char *const entry_keys[] = {"ref", "secret"};
+    const char *const entry_keys[] = {"credentialNamespace", "connectionName",
+                                      "secret"};
     JsonStrSpan entry_unknown = {0};
     if (jsget_top_level_validation(&entry, NULL, entry_keys, ARRLEN(entry_keys),
                                    &entry_unknown) != YES) {
       ss_set_err(
           store, SSERR_PARSE,
           "credentials file schema invalid: each entry must contain only "
-          "'ref' and 'secret'. Fix credentials.json format or delete it to "
-          "reset.");
+          "'credentialNamespace', 'connectionName', and 'secret'. Fix "
+          "credentials.json format or delete it to reset.");
       goto parse_error;
     }
 
-    char *ref = NULL;
+    char *cred_namespace = NULL;
+    char *connection_name = NULL;
     char *secret = NULL;
-    if (jsget_string_decode_alloc(&entry, "ref", &ref) != YES) {
+    if (jsget_string_decode_alloc(&entry, "credentialNamespace",
+                                  &cred_namespace) != YES) {
       ss_set_err(store, SSERR_PARSE,
-                 "credentials file schema invalid: entry.ref must be a string. "
-                 "Fix credentials.json format or delete it to reset.");
+                 "credentials file schema invalid: entry.credentialNamespace "
+                 "must be a string. Fix credentials.json format or delete it "
+                 "to reset.");
+      goto parse_error;
+    }
+    if (jsget_string_decode_alloc(&entry, "connectionName", &connection_name) !=
+        YES) {
+      ss_set_err(store, SSERR_PARSE,
+                 "credentials file schema invalid: entry.connectionName must "
+                 "be a string. Fix credentials.json format or delete it to "
+                 "reset.");
+      free(cred_namespace);
       goto parse_error;
     }
     if (jsget_string_decode_alloc(&entry, "secret", &secret) != YES) {
       ss_set_err(store, SSERR_PARSE,
                  "credentials file schema invalid: entry.secret must be a "
                  "string. Fix credentials.json format or delete it to reset.");
-      free(ref);
+      free(cred_namespace);
+      free(connection_name);
       goto parse_error;
     }
 
-    if (fill_i >= out_list->n_entries || ref[0] == '\0') {
+    if (fill_i >= out_list->n_entries || cred_namespace[0] == '\0' ||
+        connection_name[0] == '\0') {
       ss_set_err(
           store, SSERR_PARSE,
-          "credentials file schema invalid: entry.ref must be non-empty. Fix "
-          "credentials.json format or delete it to reset.");
-      free(ref);
+          "credentials file schema invalid: entry.credentialNamespace and "
+          "entry.connectionName must be non-empty. Fix credentials.json "
+          "format or delete it to reset.");
+      free(cred_namespace);
+      free(connection_name);
       ss_secret_free(&secret);
       goto parse_error;
     }
@@ -679,16 +842,20 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
 
     // transfer ownership of the strings to the arena and wire the new pointers
     // to the corresponding entry
-    if (ss_list_set_entry_copy(out_list, fill_i, ref, secret) != OK) {
+    SecretRefInfo ref = {.cred_namespace = cred_namespace,
+                         .connection_name = connection_name};
+    if (ss_list_set_entry_copy(out_list, fill_i, &ref, secret) != OK) {
       ss_set_err(store, SSERR_PARSE,
                  "credentials file parse failed: memory allocation error. Fix "
                  "credentials.json format or delete it to reset.");
-      free(ref);
+      free(cred_namespace);
+      free(connection_name);
       ss_secret_free(&secret);
       goto parse_error;
     }
     fill_i++;
-    free(ref);
+    free(cred_namespace);
+    free(connection_name);
     ss_secret_free(&secret);
   }
 
@@ -707,12 +874,16 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
 
   // makes sure there are no duplicates secret references, else fail close
   for (size_t i = 1; i < out_list->n_entries; i++) {
-    if (strcmp(out_list->entries[i - 1].ref, out_list->entries[i].ref) == 0) {
+    if (ss_ref_cmp_parts(out_list->entries[i - 1].cred_namespace,
+                         out_list->entries[i - 1].connection_name,
+                         out_list->entries[i].cred_namespace,
+                         out_list->entries[i].connection_name) == 0) {
       ss_set_err(
           store, SSERR_PARSE,
-          "credentials file schema invalid: duplicate connection "
-          "reference '%s'. Fix credentials.json format or delete it to reset.",
-          out_list->entries[i].ref);
+          "credentials file schema invalid: duplicate connection reference "
+          "'%s/%s'. Fix credentials.json format or delete it to reset.",
+          out_list->entries[i].cred_namespace,
+          out_list->entries[i].connection_name);
       goto parse_error;
     }
   }
@@ -869,33 +1040,26 @@ static AdbxStatus ss_persist_and_swap(FileSecretStore *store,
   return OK;
 }
 
-/* Reads one secret by ref using read-through cache semantics.
+/* Reads one secret by typed reference using read-through cache semantics.
  * It borrows 'base' and writes into caller-owned 'out'.
  * Side effects: may refresh cache from disk and mutates output buffer.
  * Error semantics: returns YES when found, NO when missing, ERR on invalid
  * input, policy, I/O, parse, or allocation failures.
  */
-static AdbxTriStatus
-secret_store_file_get(SecretStore *base, const char *secret_ref, StrBuf *out) {
+static AdbxTriStatus secret_store_file_get(SecretStore *base,
+                                           const SecretRefInfo *ref,
+                                           StrBuf *out) {
   if (!base)
     return ERR;
 
   FileSecretStore *store = (FileSecretStore *)base;
   ss_clear_err(store);
 
-  if (!secret_ref || !out) {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store get failed: invalid input pointers. This is "
-               "probably a bug, please, report it.");
+  if (!out)
     return ERR;
-  }
 
-  if (secret_ref[0] == '\0') {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store get failed: secret reference cannot be empty. "
-               "This is probably a bug, please, report it.");
+  if (ss_validate_ref(store, ref, "get") != OK)
     return ERR;
-  }
 
   sb_zero_clean(out);
   sb_init(out);
@@ -903,8 +1067,9 @@ secret_store_file_get(SecretStore *base, const char *secret_ref, StrBuf *out) {
   if (ss_refresh_if_changed(store) != OK)
     return ERR;
 
-  SecretEntry key = {0};
-  key.ref = secret_ref;
+  SecretEntry key = {.cred_namespace = ref->cred_namespace,
+                     .connection_name = ref->connection_name,
+                     .secret = NULL};
   SecretEntryList *list = &store->cache;
   if (list->n_entries == 0 || !list->entries)
     return NO;
@@ -931,7 +1096,7 @@ secret_store_file_get(SecretStore *base, const char *secret_ref, StrBuf *out) {
  * I/O, parse, or allocation failures.
  */
 static AdbxStatus secret_store_file_set(SecretStore *base,
-                                        const char *secret_ref,
+                                        const SecretRefInfo *ref,
                                         const char *secret) {
   if (!base)
     return ERR;
@@ -939,27 +1104,22 @@ static AdbxStatus secret_store_file_set(SecretStore *base,
   FileSecretStore *store = (FileSecretStore *)base;
   ss_clear_err(store);
 
-  if (!secret_ref || !secret) {
+  if (!secret) {
     ss_set_err(store, SSERR_INPUT,
                "secret-store set failed: invalid input pointers. This is "
                "probably a bug, please, report it.");
     return ERR;
   }
 
-  if (secret_ref[0] == '\0') {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store set failed: secret reference cannot be empty. "
-               "This is probably a bug, please, report it.");
+  if (ss_validate_ref(store, ref, "set") != OK)
     return ERR;
-  }
 
   if (ss_refresh_if_changed(store) != OK) {
     return ERR;
   }
 
   SecretEntryList next = {0};
-  if (ss_list_build_with_upsert(&store->cache, secret_ref, secret, &next) !=
-      OK) {
+  if (ss_list_build_with_upsert(&store->cache, ref, secret, &next) != OK) {
     ss_set_err(
         store, SSERR_WRITE,
         "secret-store set failed: memory allocation error. Please, retry.");
@@ -980,32 +1140,21 @@ static AdbxStatus secret_store_file_set(SecretStore *base,
  * I/O, parse, or allocation failures.
  */
 static AdbxStatus secret_store_file_delete(SecretStore *base,
-                                           const char *secret_ref) {
+                                           const SecretRefInfo *ref) {
   if (!base)
     return ERR;
 
   FileSecretStore *store = (FileSecretStore *)base;
   ss_clear_err(store);
 
-  if (!secret_ref) {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store delete failed: invalid input pointers. This is "
-               "probably a bug, please, report it.");
+  if (ss_validate_ref(store, ref, "delete") != OK)
     return ERR;
-  }
-
-  if (secret_ref[0] == '\0') {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store delete failed: secret reference cannot be empty. "
-               "This is probably a bug, please, report it.");
-    return ERR;
-  }
 
   if (ss_refresh_if_changed(store) != OK)
     return ERR;
 
   size_t pos = 0;
-  AdbxTriStatus fnd = ss_list_find_ref_pos(&store->cache, secret_ref, &pos);
+  AdbxTriStatus fnd = ss_list_find_ref_pos(&store->cache, ref, &pos);
   if (fnd == ERR)
     return ERR;
   if (fnd == NO)
@@ -1021,6 +1170,92 @@ static AdbxStatus secret_store_file_delete(SecretStore *base,
   }
 
   rc = ss_persist_and_swap(store, &next);
+  if (rc != OK)
+    ss_entries_clean(&next);
+  return rc;
+}
+
+/* Lists all stored secret references using read-through cache semantics.
+ * It borrows 'base' and writes one owned list into 'out'.
+ * Side effects: may refresh cache from disk and allocates heap memory for the
+ * returned list.
+ * Error semantics: returns OK on success, ERR on invalid input, policy, I/O,
+ * parse, or allocation failures.
+ */
+static AdbxStatus secret_store_file_list_refs(SecretStore *base,
+                                              SecretRefList *out) {
+  if (!base)
+    return ERR;
+
+  FileSecretStore *store = (FileSecretStore *)base;
+  ss_clear_err(store);
+
+  if (!out) {
+    ss_set_err(store, SSERR_INPUT,
+               "secret-store list failed: invalid output pointer. This is "
+               "probably a bug, please, report it.");
+    return ERR;
+  }
+
+  out->items = NULL;
+  out->n_items = 0;
+
+  if (ss_refresh_if_changed(store) != OK)
+    return ERR;
+
+  if (ss_list_copy_refs(&store->cache, out) != OK) {
+    ss_set_err(store, SSERR_WRITE,
+               "secret-store list failed: memory allocation error. Please, "
+               "retry.");
+    return ERR;
+  }
+
+  return OK;
+}
+
+/* Deletes all secrets in one namespace and updates cache atomically.
+ * It borrows all inputs.
+ * Side effects: refreshes cache, writes credential file, and swaps in-memory
+ * cache on success.
+ * Error semantics: returns OK on success, ERR on invalid input, policy, I/O,
+ * parse, or allocation failures.
+ */
+static AdbxStatus secret_store_file_wipe_namespace(SecretStore *base,
+                                                   const char *cred_namespace) {
+  if (!base)
+    return ERR;
+
+  FileSecretStore *store = (FileSecretStore *)base;
+  ss_clear_err(store);
+
+  if (!cred_namespace || cred_namespace[0] == '\0') {
+    ss_set_err(store, SSERR_INPUT,
+               "secret-store namespace wipe failed: invalid namespace. This "
+               "is probably a bug, please, report it.");
+    return ERR;
+  }
+
+  if (ss_refresh_if_changed(store) != OK)
+    return ERR;
+
+  SecretEntryList *list = &store->cache;
+  size_t keep_n = 0;
+  for (size_t i = 0; i < list->n_entries; i++) {
+    if (strcmp(list->entries[i].cred_namespace, cred_namespace) != 0)
+      keep_n++;
+  }
+  if (keep_n == list->n_entries)
+    return OK;
+
+  SecretEntryList next = {0};
+  if (ss_list_build_without_namespace(list, cred_namespace, &next) != OK) {
+    ss_set_err(store, SSERR_WRITE,
+               "secret-store namespace wipe failed: memory allocation error. "
+               "Please, retry.");
+    return ERR;
+  }
+
+  AdbxStatus rc = ss_persist_and_swap(store, &next);
   if (rc != OK)
     ss_entries_clean(&next);
   return rc;
@@ -1097,6 +1332,8 @@ static const SecretStoreVTable SECRET_STORE_FILE_VT = {
     .get = secret_store_file_get,
     .set = secret_store_file_set,
     .delete = secret_store_file_delete,
+    .list_refs = secret_store_file_list_refs,
+    .wipe_namespace = secret_store_file_wipe_namespace,
     .wipe_all = secret_store_file_wipe_all,
     .destroy = secret_store_file_destroy,
     .last_error = secret_store_file_last_error,

@@ -12,7 +12,7 @@
 #include <string.h>
 
 typedef struct {
-  const char *ref;
+  const char *connection_name;
   const char *secret;
 } SecretPair;
 
@@ -29,10 +29,10 @@ static const SecretPair DUMMY_SECRETS[] = {
  * Error semantics: YES on success, NO when ref is missing, ERR on bad input or
  * allocation failure. */
 static AdbxTriStatus secret_store_dummy_get(SecretStore *store,
-                                            const char *secret_ref,
+                                            const SecretRefInfo *ref,
                                             StrBuf *out) {
   (void)store;
-  if (!secret_ref || !out)
+  if (!ref || !ref->connection_name || !out)
     return ERR;
 
   sb_zero_clean(out);
@@ -40,7 +40,7 @@ static AdbxTriStatus secret_store_dummy_get(SecretStore *store,
 
   const char *secret = NULL;
   for (size_t i = 0; i < ARRLEN(DUMMY_SECRETS); i++) {
-    if (strcmp(DUMMY_SECRETS[i].ref, secret_ref) == 0) {
+    if (strcmp(DUMMY_SECRETS[i].connection_name, ref->connection_name) == 0) {
       secret = DUMMY_SECRETS[i].secret;
       break;
     }
@@ -63,10 +63,10 @@ static AdbxTriStatus secret_store_dummy_get(SecretStore *store,
  * Error semantics: always ERR.
  */
 static AdbxStatus secret_store_dummy_set(SecretStore *store,
-                                         const char *secret_ref,
+                                         const SecretRefInfo *ref,
                                          const char *secret) {
   (void)store;
-  (void)secret_ref;
+  (void)ref;
   (void)secret;
   return ERR;
 }
@@ -77,9 +77,33 @@ static AdbxStatus secret_store_dummy_set(SecretStore *store,
  * Error semantics: always ERR.
  */
 static AdbxStatus secret_store_dummy_delete(SecretStore *store,
-                                            const char *secret_ref) {
+                                            const SecretRefInfo *ref) {
   (void)store;
-  (void)secret_ref;
+  (void)ref;
+  return ERR;
+}
+
+/* Dummy list-refs is intentionally unsupported.
+ * Ownership: borrows inputs.
+ * Side effects: none.
+ * Error semantics: always ERR.
+ */
+static AdbxStatus secret_store_dummy_list_refs(SecretStore *store,
+                                               SecretRefList *out) {
+  (void)store;
+  (void)out;
+  return ERR;
+}
+
+/* Dummy namespace wipe is intentionally unsupported.
+ * Ownership: borrows inputs.
+ * Side effects: none.
+ * Error semantics: always ERR.
+ */
+static AdbxStatus secret_store_dummy_wipe_namespace(SecretStore *store,
+                                                    const char *cred_namespace) {
+  (void)store;
+  (void)cred_namespace;
   return ERR;
 }
 
@@ -123,6 +147,8 @@ static const SecretStoreVTable SECRET_STORE_DUMMY_VT = {
     .get = secret_store_dummy_get,
     .set = secret_store_dummy_set,
     .delete = secret_store_dummy_delete,
+    .list_refs = secret_store_dummy_list_refs,
+    .wipe_namespace = secret_store_dummy_wipe_namespace,
     .wipe_all = secret_store_dummy_wipe_all,
     .destroy = secret_store_dummy_destroy,
     .last_error = secret_store_dummy_last_error,

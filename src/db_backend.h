@@ -84,6 +84,9 @@ struct DbBackend {
   void *impl; // db specific
 };
 
+/* Returns the right DbBackend based on 'kind'. */
+DbBackend *db_backend_create(DbKind kind);
+
 /* Small helpers */
 static inline AdbxStatus db_connect(DbBackend *db, const ConnProfile *profile,
                                     const SafetyPolicy *policy,
