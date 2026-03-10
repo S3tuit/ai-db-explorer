@@ -26,8 +26,8 @@ static char *build_single_entry_json(const char *cred_namespace,
                                      const char *secret) {
   if (!cred_namespace || !connection_name || !secret)
     return NULL;
-  size_t n = strlen(cred_namespace) + strlen(connection_name) + strlen(secret) +
-             192;
+  size_t n =
+      strlen(cred_namespace) + strlen(connection_name) + strlen(secret) + 192;
   char *json = xmalloc(n);
   snprintf(json, n,
            "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":\"%s\","
@@ -36,25 +36,13 @@ static char *build_single_entry_json(const char *cred_namespace,
   return json;
 }
 
-/* Builds an isolated temp directory for secret-store tests.
- * It returns one owned path string and creates the directory on disk.
- * Side effects: creates one directory in /tmp.
- * Error semantics: test helper (aborts on failure via ASSERT_TRUE).
- */
-static char *make_tmp_dir(void) {
-  char templ[] = "/tmp/adbxssXXXXXX";
-  char *out = dup_or_null(templ);
-  ASSERT_TRUE(out != NULL);
-  ASSERT_TRUE(mkdtemp(out) != NULL);
-  return out;
-}
-
 /* Restores one environment variable to previous value.
  * It borrows all inputs and does not allocate.
  * Side effects: updates process environment.
  * Error semantics: test helper (asserts on set/unset failures).
  */
-static void restore_env(const char *name, const char *old_val, int had_old) {
+static void restore_one_env_value(const char *name, const char *old_val,
+                                  int had_old) {
   ASSERT_TRUE(name != NULL);
   if (!had_old) {
     ASSERT_TRUE(unsetenv(name) == 0);
@@ -143,7 +131,7 @@ static void test_file_backend_roundtrip(void) {
   sb_zero_clean(&out);
   secret_store_destroy(ss);
 
-  restore_env("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
   cleanup_tmp_tree(tmp);
   free(tmp);
@@ -174,7 +162,7 @@ static void test_file_backend_rejects_bad_mode(void) {
 
   free(cred_path);
   secret_store_destroy(ss);
-  restore_env("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
   cleanup_tmp_tree(tmp);
   free(tmp);
@@ -201,7 +189,7 @@ static void test_secret_store_factory_usable(void) {
 
   sb_zero_clean(&out);
   secret_store_destroy(ss);
-  restore_env("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
   cleanup_tmp_tree(tmp);
   free(tmp);
@@ -242,7 +230,7 @@ static void test_file_backend_refreshes_on_disk_change(void) {
   free(cred_path);
   sb_zero_clean(&out);
   secret_store_destroy(ss);
-  restore_env("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
   cleanup_tmp_tree(tmp);
   free(tmp);
@@ -278,7 +266,7 @@ static void test_file_backend_duplicate_ref_is_err(void) {
   sb_zero_clean(&out);
   free(cred_path);
   secret_store_destroy(ss);
-  restore_env("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
   cleanup_tmp_tree(tmp);
   free(tmp);
@@ -317,7 +305,7 @@ static void test_backend_probe_contract(void) {
 #endif
   ASSERT_TRUE(store == NULL);
 
-  restore_env("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
   cleanup_tmp_tree(tmp);
   free(tmp);

@@ -50,20 +50,6 @@ static char *make_tmp_path(void) {
   return strdup(tmpl);
 }
 
-/* Creates a unique temporary directory and returns a heap copy of its path.
- * Ownership: caller owns returned path and must remove/free it.
- * Side effects: creates one directory under /tmp.
- * Error semantics: asserts on setup failure and returns non-NULL on success.
- */
-static char *make_tmp_dir(void) {
-  char tmpl[] = "/tmp/test_fileio_dir_XXXXXX";
-  char *dir = mkdtemp(tmpl);
-  ASSERT_TRUE(dir != NULL);
-  char *copy = strdup(dir);
-  ASSERT_TRUE(copy != NULL);
-  return copy;
-}
-
 /* Opens one directory path and returns its fd.
  * Ownership: borrows 'dir_path'; caller owns returned fd and must close it.
  * Side effects: opens one directory descriptor.
@@ -327,10 +313,8 @@ static void test_read_exact_raw_bad_input(void) {
   uint8_t out[8] = {0};
   ASSERT_TRUE(fileio_read_exact(NULL, 8, out) == ERR);
   ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 8, out) == ERR);
-  ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 8, NULL) ==
-              ERR);
-  ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 0, NULL) ==
-              ERR);
+  ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 8, NULL) == ERR);
+  ASSERT_TRUE(fileio_read_exact("/tmp/does_not_exist_file_io", 0, NULL) == ERR);
 }
 
 /* Verifies fileio_write_exact rejects invalid arguments. */

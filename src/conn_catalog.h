@@ -2,8 +2,8 @@
 #define CONN_CATALOG_H
 
 #include "arena.h"
-#include "secret_store.h"
 #include "safety_policy.h"
+#include "secret_store.h"
 #include "utils.h"
 
 #include <stddef.h>
@@ -12,6 +12,7 @@
 #define CURR_CONN_CAT_VERSION "1.0"
 /* Max bytes allowed for ConnProfile.connection_name (excluding NUL). */
 #define CONN_NAME_MAX_LEN 31u
+#define NAMESPACE_MAX_LEN 31u
 
 typedef enum {
   DB_KIND_POSTGRES = 1,
@@ -76,7 +77,7 @@ typedef struct {
 
 typedef struct ConnCatalog {
   const char *credential_namespace; // owned
-  ConnProfile *profiles; // owned array
+  ConnProfile *profiles;            // owned array
   size_t n_profiles;
 
   // Global/default policy loaded from config. Copied into each profile's
@@ -90,6 +91,13 @@ typedef struct ConnCatalog {
 // On failure: returns NULL and sets *err_out to an allocated message that the
 // caller must free(). On success, *err_out is set to NULL.
 ConnCatalog *catalog_load_from_fd(int fd, char **err_out);
+
+/* Creates one empty in-memory state catalog for a namespace with no saved
+ * entries. It allocates the catalog and one owned namespace copy.
+ * Error semantics: returns a caller-owned catalog on success, NULL on invalid
+ * input or allocation failure.
+ */
+ConnCatalog *catalog_create_empty(const char *cred_namespace);
 
 // Free catalog and all owned memory.
 void catalog_destroy(ConnCatalog *cat);

@@ -22,6 +22,7 @@ typedef enum {
 } ConfDirErrCode;
 
 /* Opens the default application config directory for the current platform.
+ * 'out_code' and 'out_err' may be NULL if caller doesn't care about them.
  *
  * Behavior:
  * - Linux:
@@ -71,8 +72,7 @@ AdbxStatus confdir_default_open(ConfDir *out, ConfDirErrCode *out_code,
  * - On ERR, '*out_err' may contain an allocated error string that caller must
  *   free.
  */
-AdbxStatus confdir_open(const char *input_path, ConfFile *out,
-                        char **out_err);
+AdbxStatus confdir_open(const char *input_path, ConfFile *out, char **out_err);
 
 /* Releases one caller-owned default-config directory handle.
  * It consumes 'cd'.

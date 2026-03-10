@@ -20,77 +20,11 @@
                     .connection_name = (name)})
 
 typedef struct {
-  char *xdg_old;
-  int had_xdg;
-  char *home_old;
-  int had_home;
-} EnvGuard;
-
-typedef struct {
   EnvGuard env;
   char *tmp;
   char *cred_path;
   SecretStore *ss;
 } FileStoreCtx;
-
-/* Restores one environment variable to previous value.
- * It borrows all inputs and does not allocate.
- * Side effects: updates process environment.
- * Error semantics: test helper (asserts on set/unset failures).
- */
-static void restore_env(const char *name, const char *old_val, int had_old) {
-  ASSERT_TRUE(name != NULL);
-  if (!had_old) {
-    ASSERT_TRUE(unsetenv(name) == 0);
-    return;
-  }
-  ASSERT_TRUE(old_val != NULL);
-  ASSERT_TRUE(setenv(name, old_val, 1) == 0);
-}
-
-/* Captures HOME/XDG_CONFIG_HOME values for later restoration.
- * It borrows 'g' and allocates owned string copies.
- * Side effects: reads environment and allocates memory.
- * Error semantics: test helper (asserts on invalid input).
- */
-static void env_guard_begin(EnvGuard *g) {
-  ASSERT_TRUE(g != NULL);
-  memset(g, 0, sizeof(*g));
-
-  const char *xdg = getenv("XDG_CONFIG_HOME");
-  g->had_xdg = (xdg != NULL);
-  g->xdg_old = xdg ? dup_or_null(xdg) : NULL;
-
-  const char *home = getenv("HOME");
-  g->had_home = (home != NULL);
-  g->home_old = home ? dup_or_null(home) : NULL;
-}
-
-/* Restores HOME/XDG_CONFIG_HOME captured by env_guard_begin.
- * It consumes heap strings in 'g'.
- * Side effects: updates process environment.
- * Error semantics: test helper (asserts on restore failures).
- */
-static void env_guard_end(EnvGuard *g) {
-  ASSERT_TRUE(g != NULL);
-  restore_env("XDG_CONFIG_HOME", g->xdg_old, g->had_xdg);
-  restore_env("HOME", g->home_old, g->had_home);
-  free(g->xdg_old);
-  free(g->home_old);
-  memset(g, 0, sizeof(*g));
-}
-
-/* Creates one temporary directory path under /tmp.
- * It returns an owned path string and creates the directory on disk.
- * Side effects: filesystem mutation.
- */
-static char *make_tmp_dir(void) {
-  char templ[] = "/tmp/adbxss_file_XXXXXX";
-  char *out = dup_or_null(templ);
-  ASSERT_TRUE(out != NULL);
-  ASSERT_TRUE(mkdtemp(out) != NULL);
-  return out;
-}
 
 /* Returns the expected app directory when XDG_CONFIG_HOME is used directly.
  * It borrows 'tmp' and returns one owned path.
@@ -490,7 +424,8 @@ static void test_missing_file_wipe_all_creates_and_set_get_works(void) {
   StrBuf out;
   sb_init(&out);
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == NO);
-  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-after-wipe") == OK);
+  ASSERT_TRUE(
+      secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-after-wipe") == OK);
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-after-wipe");
   sb_zero_clean(&out);
@@ -534,7 +469,8 @@ static void test_truncate_after_valid_load_fails_closed(void) {
 
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   assert_parse_error(ctx.ss);
-  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("AnotherPostgres"), "pw-2") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("AnotherPostgres"), "pw-2") ==
+              ERR);
   assert_parse_error(ctx.ss);
   sb_zero_clean(&out);
 
@@ -584,7 +520,7 @@ static void test_json_schema_violations_are_parse(void) {
   run_schema_violation_case(
       "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
       "\"TestNamespace\",\"connectionName\":\"x\"}]}",
-                            "missing-secret");
+      "missing-secret");
   run_schema_violation_case(
       "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":\"\","
       "\"connectionName\":\"x\",\"secret\":\"x\"}]}",
@@ -598,7 +534,7 @@ static void test_json_schema_violations_are_parse(void) {
   run_schema_violation_case(
       "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
       "\"TestNamespace\",\"connectionName\":\"x\",\"secret\":\"y\",\"k\":1}]}",
-                            "unknown-entry-key");
+      "unknown-entry-key");
 }
 
 /* Verifies symlink at credentials path fails closed with O_NOFOLLOW path. */
@@ -618,7 +554,8 @@ static void test_symlink_credentials_path_fails(void) {
   sb_init(&out);
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
-  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-new") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-new") ==
+              ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
   sb_zero_clean(&out);
 
@@ -638,7 +575,8 @@ static void test_directory_at_credentials_path_fails(void) {
   sb_init(&out);
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
-  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-new") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-new") ==
+              ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_CRED_FILE);
   sb_zero_clean(&out);
 
@@ -788,7 +726,8 @@ static void test_external_malformed_rewrite_fails_closed(void) {
 
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == ERR);
   assert_parse_error(ctx.ss);
-  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("AnotherPostgres"), "pw-2") == ERR);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("AnotherPostgres"), "pw-2") ==
+              ERR);
   assert_parse_error(ctx.ss);
 
   write_text_0600(ctx.cred_path,
@@ -870,7 +809,8 @@ static void test_stale_lock_file_does_not_block_set(void) {
   ASSERT_TRUE(lstat(lock_path, &st) == 0);
   ASSERT_TRUE(S_ISREG(st.st_mode));
 
-  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-stale") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-stale") ==
+              OK);
 
   StrBuf out;
   sb_init(&out);

@@ -738,8 +738,7 @@ static void profile_clean(ConnProfile *p) {
  * input.
  */
 static AdbxStatus parse_credential_namespace(const JsonGetter *jg,
-                                             ConnCatalog *cat,
-                                             char **err_out) {
+                                             ConnCatalog *cat, char **err_out) {
   if (!jg || !cat)
     return ERR;
 
@@ -751,6 +750,13 @@ static AdbxStatus parse_credential_namespace(const JsonGetter *jg,
   if (ns[0] == '\0') {
     free(ns);
     set_parse_err(err_out, "$.credentialNamespace: must not be empty.");
+    return ERR;
+  }
+
+  if (strlen(ns) > NAMESPACE_MAX_LEN) {
+    free(ns);
+    set_parse_err(err_out, "$.credentialNamespace: must be at most %d bytes.",
+                  NAMESPACE_MAX_LEN);
     return ERR;
   }
 
@@ -806,10 +812,8 @@ static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
     goto error;
   }
   if (strlen(conn_name) > CONN_NAME_MAX_LEN) {
-    set_parse_err(
-        err_out,
-        "%s.connectionName: must be shorter than 32 bytes (max 31 bytes).",
-        db_path);
+    set_parse_err(err_out, "%s.connectionName: must be at most %d bytes.",
+                  db_path, CONN_NAME_MAX_LEN);
     goto error;
   }
   if (jsget_string_decode_alloc(jg, "host", &host) != YES) {
@@ -1104,6 +1108,21 @@ ConnCatalog *catalog_load_from_fd(int fd, char **err_out) {
 
   ConnCatalog *cat = catalog_parse_config_bytes(sb.data, sb.len, err_out);
   sb_clean(&sb);
+  return cat;
+}
+
+ConnCatalog *catalog_create_empty(const char *cred_namespace) {
+  if (!cred_namespace || cred_namespace[0] == '\0')
+    return NULL;
+
+  ConnCatalog *cat = (ConnCatalog *)xcalloc(1, sizeof(*cat));
+
+  cat->credential_namespace = dup_or_null(cred_namespace);
+  if (!cat->credential_namespace) {
+    free(cat);
+    return NULL;
+  }
+
   return cat;
 }
 
