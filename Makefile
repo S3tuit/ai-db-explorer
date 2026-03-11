@@ -62,7 +62,7 @@ BENCH_SRC := $(wildcard benchmarks/bench_*.c)
 BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
 BENCH_COMMON_SRC := src/arena.c src/utils.c
 
-.PHONY: all clean run test test-unit test-integration test-integration-cached test-postgres test-build asan clean-testobj pg-dump-ast bench
+.PHONY: all clean run test test-unit test-unit-notty test-integration test-integration-cached test-postgres test-build asan clean-testobj pg-dump-ast bench
 
 all: $(BIN)
 
@@ -144,6 +144,10 @@ test-unit: $(UNIT_TEST_BINS)
 	  ASAN_OPTIONS=$(ASAN_RUN_OPTS) $$t; \
 	done; \
 	echo "ALL TESTS PASSED"
+
+# Some of our unit tests assume to run inside a non tty env
+test-unit-notty:
+	+@setsid -w $(MAKE) test-unit
 
 # Integration compose file used by docker targets.
 DOCKER_POSTGRES_COMPOSE := tests/integration/postgres/postgres.test.yml

@@ -562,9 +562,10 @@ static AdbxStatus credm_append_state_db_json(StrBuf *sb,
  * Error semantics: returns OK on success, ERR on invalid input, unsupported
  * backend kind, or allocation failure while growing the buffer.
  */
-static AdbxStatus
-credm_build_state_json(StrBuf *out_json, const char *cred_namespace,
-                       const ConnProfile *const *profiles, size_t n_profiles) {
+static AdbxStatus credm_build_state_json(StrBuf *out_json,
+                                         const char *cred_namespace,
+                                         const ConnProfile *const *profiles,
+                                         size_t n_profiles) {
   if (!out_json || !cred_namespace || (!profiles && n_profiles > 0))
     return ERR;
 
@@ -604,8 +605,7 @@ credm_build_state_json(StrBuf *out_json, const char *cred_namespace,
 static AdbxStatus credm_save_state_profiles(const ConfDir *app,
                                             const char *cred_namespace,
                                             const ConnProfile *const *profiles,
-                                            size_t n_profiles,
-                                            char **out_err) {
+                                            size_t n_profiles, char **out_err) {
   if (!app || app->fd < 0 || !cred_namespace || (!profiles && n_profiles > 0))
     return ERR;
 
@@ -627,9 +627,8 @@ static AdbxStatus credm_save_state_profiles(const ConfDir *app,
     return ERR;
   }
 
-  AdbxTriStatus wrc =
-      write_atomic(app->fd, state_name, (const uint8_t *)json.data, json.len,
-                   NULL);
+  AdbxTriStatus wrc = write_atomic(app->fd, state_name,
+                                   (const uint8_t *)json.data, json.len, NULL);
   sb_clean(&json);
   if (wrc == YES)
     return OK;
@@ -663,9 +662,10 @@ static AdbxTriStatus credm_find_catalog_name(const ConnCatalog *cat,
  * NO when the current saved state is already correct, ERR on invalid input or
  * inconsistent action data.
  */
-static AdbxTriStatus credm_sync_one_needs_state_write(
-    const ConnCatalog *conf_cat, size_t conf_idx, const ConnCatalog *state_cat,
-    const CredmSyncAction *act) {
+static AdbxTriStatus
+credm_sync_one_needs_state_write(const ConnCatalog *conf_cat, size_t conf_idx,
+                                 const ConnCatalog *state_cat,
+                                 const CredmSyncAction *act) {
   if (!conf_cat || conf_idx >= conf_cat->n_profiles || !state_cat || !act)
     return ERR;
 
@@ -695,6 +695,25 @@ static AdbxTriStatus credm_sync_one_needs_state_write(
 /* Plans one targeted sync for a single config connection by reconciling it
  * against the saved state and active secret store. It borrows all inputs and
  * writes one small caller-owned action into 'out_act'.
+ *
+ * Business logic — three-phase decision for one connection:
+ *
+ * 1. Name match: look up connection_name in the saved state.
+ *    - Found, fields identical, secret present → KEEP  (nothing to do)
+ *    - Found, fields identical, secret missing → PROMPT (re-ask password)
+ *    - Found, fields differ                   → PROMPT (config changed)
+ *
+ * 2. Rename detection (no name match): scan ALL state entries by tuple
+ *    (host/port/user/db). Also count how many config entries share the same
+ *    tuple. Unlike plan_sync_all which uses sequential claiming via
+ *    state_seen[], targeted sync has no ordering context, so it checks both
+ *    sides to avoid ambiguity:
+ *    - Exactly 1 state match AND exactly 1 config match → unique rename
+ *      detected. If the old secret exists → RENAME, else → PROMPT.
+ *    - Multiple matches on either side → ambiguous, fall through to PROMPT.
+ *
+ * 3. Fallback: no name match and no unique rename → PROMPT.
+ *
  * Side effects: may read the secret store to decide whether prompting is
  * needed.
  * Error semantics: returns OK on success, ERR on invalid input, missing target
@@ -733,6 +752,7 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
   *out_conf_idx = conf_idx;
   const ConnProfile *conf_p = &conf_cat->profiles[conf_idx];
 
+  // Phase 1: try to match by connection name in the saved state.
   size_t state_idx = SIZE_MAX;
   AdbxTriStatus src =
       credm_find_catalog_name(state_cat, connection_name, &state_idx);
@@ -746,8 +766,9 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
   if (src == YES) {
     out_act->state_idx = state_idx;
 
-    AdbxTriStatus same = credm_profile_same_sync_fields(
-        conf_p, &state_cat->profiles[state_idx]);
+    // name matched — check whether the connection fields changed
+    AdbxTriStatus same =
+        credm_profile_same_sync_fields(conf_p, &state_cat->profiles[state_idx]);
     if (same == ERR) {
       credm_set_err(out_err,
                     "credential sync hit an internal bug while comparing the "
@@ -755,10 +776,12 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
       return ERR;
     }
     if (same == NO) {
+      // fields changed: the old password is no longer valid
       out_act->kind = CREDM_SYNC_ACT_PROMPT;
       return OK;
     }
 
+    // fields unchanged — only KEEP if the secret actually exists in the store
     StrBuf secret;
     sb_init(&secret);
     AdbxTriStatus grc = secret_store_get(store, &conf_p->secret_ref, &secret);
@@ -770,6 +793,8 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
     return OK;
   }
 
+  // Phase 2: no name match — try rename detection.
+  // Count how many state entries share the same tuple (host/port/user/db).
   size_t tuple_match_idx = 0;
   size_t tuple_match_count = 0;
   for (size_t i = 0; i < state_cat->n_profiles; i++) {
@@ -787,6 +812,9 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
     }
   }
 
+  // Count how many config entries share the same tuple as the target.
+  // If >1 config entries have the same tuple, we can't tell which one is the
+  // "real" rename, so we must fall through to PROMPT.
   size_t conf_tuple_match_count = 0;
   for (size_t i = 0; i < conf_cat->n_profiles; i++) {
     AdbxTriStatus same =
@@ -801,6 +829,8 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
       conf_tuple_match_count++;
   }
 
+  // Unique 1:1 rename: exactly one state entry and one config entry share the
+  // tuple. Reuse the old secret if it still exists, otherwise prompt.
   if (tuple_match_count == 1 && conf_tuple_match_count == 1) {
     out_act->state_idx = tuple_match_idx;
 
@@ -812,31 +842,31 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
     if (grc == ERR)
       return credm_set_store_err(out_err, store, "lookup");
 
-    out_act->kind = (grc == YES) ? CREDM_SYNC_ACT_RENAME : CREDM_SYNC_ACT_PROMPT;
+    out_act->kind =
+        (grc == YES) ? CREDM_SYNC_ACT_RENAME : CREDM_SYNC_ACT_PROMPT;
     return OK;
   }
 
+  // Phase 3: ambiguous or no tuple match — must prompt for a fresh password.
   out_act->kind = CREDM_SYNC_ACT_PROMPT;
   out_act->state_idx = SIZE_MAX;
   return OK;
 }
 
-/* Applies one targeted sync action to the active secret store. It borrows all
- * inputs and prompts only when the action requires a new password.
- * Side effects: may prompt on /dev/tty and mutate the secret store.
- * Error semantics: returns OK on success, ERR on invalid input, tty failure,
- * interruption, or secret-store mutation failure.
+/* Applies one sync action for a single connection against the secret store.
+ * It borrows all inputs. The caller must provide a valid 'sess' when
+ * act->kind == CREDM_SYNC_ACT_PROMPT; it may be NULL otherwise.
+ * Side effects: may prompt on /dev/tty (via 'sess') and mutate the store.
+ * Error semantics: returns OK on success, ERR on failure.
  */
-static AdbxStatus credm_apply_sync_one(const ConnCatalog *conf_cat,
-                                       size_t conf_idx,
-                                       const ConnCatalog *state_cat,
-                                       const CredmSyncAction *act,
-                                       SecretStore *store, char **out_err) {
-  if (!conf_cat || conf_idx >= conf_cat->n_profiles || !state_cat || !act ||
-      !store)
+static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
+                                     const ConnCatalog *state_cat,
+                                     const CredmSyncAction *act,
+                                     SecretStore *store,
+                                     CredmPromptSession *sess,
+                                     char **out_err) {
+  if (!conf_p || !state_cat || !act || !store)
     return ERR;
-
-  const ConnProfile *conf_p = &conf_cat->profiles[conf_idx];
 
   if (act->kind == CREDM_SYNC_ACT_KEEP)
     return OK;
@@ -879,16 +909,12 @@ static AdbxStatus credm_apply_sync_one(const ConnCatalog *conf_cat,
   }
 
   if (act->kind == CREDM_SYNC_ACT_PROMPT) {
-    CredmPromptSession sess;
-    memset(&sess, 0, sizeof(sess));
-    sess.tty_fd = -1;
-    if (credm_prompt_session_begin(&sess, out_err) != OK)
+    if (!sess)
       return ERR;
-
     StrBuf secret;
     sb_init(&secret);
     AdbxStatus rc = OK;
-    if (credm_prompt_password(&sess, conf_p->connection_name, &secret,
+    if (credm_prompt_password(sess, conf_p->connection_name, &secret,
                               out_err) != OK) {
       rc = ERR;
     } else if (secret_store_set(store, &conf_p->secret_ref, secret.data) !=
@@ -896,13 +922,44 @@ static AdbxStatus credm_apply_sync_one(const ConnCatalog *conf_cat,
       rc = credm_set_store_err(out_err, store, "write");
     }
     sb_zero_clean(&secret);
-    credm_prompt_session_end(&sess);
     return rc;
   }
 
-  credm_set_err(out_err,
-                "credential sync hit an internal reconciliation bug.");
+  credm_set_err(out_err, "credential sync hit an internal reconciliation bug.");
   return ERR;
+}
+
+/* Applies one targeted sync action to the active secret store. It borrows all
+ * inputs and manages its own prompt session when the action requires one.
+ * Side effects: may prompt on /dev/tty and mutate the secret store.
+ * Error semantics: returns OK on success, ERR on failure.
+ */
+static AdbxStatus credm_apply_sync_one(const ConnCatalog *conf_cat,
+                                       size_t conf_idx,
+                                       const ConnCatalog *state_cat,
+                                       const CredmSyncAction *act,
+                                       SecretStore *store, char **out_err) {
+  if (!conf_cat || conf_idx >= conf_cat->n_profiles || !state_cat || !act ||
+      !store)
+    return ERR;
+
+  if (act->kind == CREDM_SYNC_ACT_KEEP)
+    return OK;
+
+  CredmPromptSession sess;
+  memset(&sess, 0, sizeof(sess));
+  sess.tty_fd = -1;
+  int need_prompt = (act->kind == CREDM_SYNC_ACT_PROMPT);
+  if (need_prompt && credm_prompt_session_begin(&sess, out_err) != OK)
+    return ERR;
+
+  AdbxStatus rc = credm_apply_action(&conf_cat->profiles[conf_idx], state_cat,
+                                     act, store, need_prompt ? &sess : NULL,
+                                     out_err);
+
+  if (need_prompt)
+    credm_prompt_session_end(&sess);
+  return rc;
 }
 
 /* Persists one targeted sync state patch while keeping unrelated state entries
@@ -911,13 +968,11 @@ static AdbxStatus credm_apply_sync_one(const ConnCatalog *conf_cat,
  * Error semantics: returns OK on success, ERR on invalid input, allocation
  * failure, or snapshot write failure.
  */
-static AdbxStatus credm_save_state_sync_one(const ConfDir *app,
-                                            const ConnCatalog *state_cat,
-                                            const ConnCatalog *conf_cat,
-                                            size_t conf_idx,
-                                            const ConnProfile *target,
-                                            const CredmSyncAction *act,
-                                            char **out_err) {
+static AdbxStatus
+credm_save_state_sync_one(const ConfDir *app, const ConnCatalog *state_cat,
+                          const ConnCatalog *conf_cat, size_t conf_idx,
+                          const ConnProfile *target, const CredmSyncAction *act,
+                          char **out_err) {
   if (!app || !state_cat || !conf_cat || conf_idx >= conf_cat->n_profiles ||
       !target || !act)
     return ERR;
@@ -955,31 +1010,50 @@ static AdbxStatus credm_save_state_sync_one(const ConfDir *app,
     profiles[state_cat->n_profiles] = target;
   }
 
-  AdbxStatus rc = credm_save_state_profiles(app, target->secret_ref.cred_namespace,
-                                            profiles, n_out, out_err);
+  AdbxStatus rc = credm_save_state_profiles(
+      app, target->secret_ref.cred_namespace, profiles, n_out, out_err);
   free(profiles);
   return rc;
 }
 
 /* Plans one full sync by reconciling config entries against the saved state and
  * current secret store. It allocates 'actions' and 'state_seen' for caller.
- * Reads from 'store' to decide whether prompting is needed; '*out_need_prompt'.
+ *
+ * Business logic — two-phase decision for all connections:
+ *
+ * Phase 1 — name matching: for each config entry, look up its connection name
+ * in the saved state.
+ *   - Found, fields identical, secret present → KEEP  (nothing to do)
+ *   - Found, fields identical, secret missing → PROMPT (re-ask password)
+ *   - Found, fields differ                   → PROMPT (config changed)
+ *   - Not found                              → leave as UNKNOWN for phase 2
+ *   Each matched state entry is marked in state_seen[] so it cannot be
+ *   claimed twice. After this phase, state_seen[] also tells the apply step
+ *   which state entries were removed (unseen → delete their secrets).
+ *
+ * Phase 2 — rename detection: for each still-UNKNOWN config entry, scan only
+ * the UNSEEN state entries by tuple (host/port/user/db).
+ *   - Exactly 1 unseen state match → unique rename detected. Claim it (mark
+ *     seen). If the old secret exists → RENAME, else → PROMPT.
+ *   - 0 or >1 matches → ambiguous or brand new, → PROMPT.
+ *   Unlike plan_sync_one which checks both sides (state AND config tuple
+ *   counts), plan_sync_all handles ambiguity via sequential claiming: the
+ *   first config entry that uniquely matches a state entry claims it, so
+ *   later entries with the same tuple see it as already-seen and fall
+ *   through to PROMPT.
+ *
  * Error semantics: returns OK on success, else, ERR and modifies 'out_err'.
  */
-static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
-                                      const ConnCatalog *state_cat,
-                                      SecretStore *store,
-                                      CredmSyncAction **out_actions,
-                                      unsigned char **out_state_seen,
-                                      int *out_need_prompt, char **out_err) {
-  if (!conf_cat || !state_cat || !store || !out_actions || !out_state_seen ||
-      !out_need_prompt) {
+static AdbxStatus
+credm_plan_sync_all(const ConnCatalog *conf_cat, const ConnCatalog *state_cat,
+                    SecretStore *store, CredmSyncAction **out_actions,
+                    unsigned char **out_state_seen, char **out_err) {
+  if (!conf_cat || !state_cat || !store || !out_actions || !out_state_seen) {
     return ERR;
   }
 
   *out_actions = NULL;
   *out_state_seen = NULL;
-  *out_need_prompt = 0;
 
   size_t conf_n = conf_cat->n_profiles;
   size_t state_n = state_cat->n_profiles;
@@ -993,6 +1067,7 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
     actions[i].state_idx = 0;
   }
 
+  // Phase 1: match each config entry by connection name in the saved state.
   for (size_t i = 0; i < conf_n; i++) {
     const ConnProfile *conf_p = &conf_cat->profiles[i];
     size_t state_idx = 0;
@@ -1006,11 +1081,13 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
                                  "a bug, please, report it.");
     }
     if (mrc == NO)
-      continue;
+      continue; // no name match — leave UNKNOWN for phase 2
 
+    // name matched — claim the state entry so phase 2 won't reuse it
     state_seen[state_idx] = 1;
     actions[i].state_idx = state_idx;
 
+    // check whether the connection fields changed
     const ConnProfile *state_p = &state_cat->profiles[state_idx];
     AdbxTriStatus same = credm_profile_same_sync_fields(conf_p, state_p);
     if (same == ERR) {
@@ -1021,11 +1098,12 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
                                  "a bug, please, report it.");
     }
     if (same == NO) {
+      // fields changed: the old password is no longer valid
       actions[i].kind = CREDM_SYNC_ACT_PROMPT;
-      *out_need_prompt = 1;
       continue;
     }
 
+    // fields unchanged — only KEEP if the secret actually exists in the store
     StrBuf secret;
     sb_init(&secret);
     AdbxTriStatus src = secret_store_get(store, &conf_p->secret_ref, &secret);
@@ -1039,14 +1117,11 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
     }
     actions[i].kind =
         (src == YES) ? CREDM_SYNC_ACT_KEEP : CREDM_SYNC_ACT_PROMPT;
-    if (src == NO)
-      *out_need_prompt = 1;
   }
 
-  // this loop serves as rename detection. If in the config there's a connection
-  // with no connectionName match inside the state... but we find exactly one
-  // connection inside the state with the same fields as the one in the config,
-  // we infer that's renamed and do not re-ask user for password
+  // Phase 2: rename detection for entries that had no name match.
+  // Scan only UNSEEN state entries by tuple. The first config entry that
+  // uniquely matches claims the state entry, preventing later duplicates.
   for (size_t i = 0; i < conf_n; i++) {
     if (actions[i].kind != CREDM_SYNC_ACT_UNKNOWN)
       continue;
@@ -1055,7 +1130,7 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
     size_t match_count = 0;
     for (size_t j = 0; j < state_n; j++) {
       if (state_seen[j])
-        continue;
+        continue; // already claimed by phase 1 or an earlier rename
       AdbxTriStatus same = credm_profile_same_tuple(&conf_cat->profiles[i],
                                                     &state_cat->profiles[j]);
       if (same == ERR) {
@@ -1073,9 +1148,11 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
     }
 
     if (match_count == 1) {
+      // unique rename — claim the state entry
       state_seen[match_idx] = 1;
       actions[i].state_idx = match_idx;
 
+      // we can only reuse the credential if the old secret still exists
       StrBuf secret;
       sb_init(&secret);
       AdbxTriStatus src = secret_store_get(
@@ -1086,18 +1163,16 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
         free(state_seen);
         return credm_set_store_err(out_err, store, "lookup");
       }
-      // we can actually rename only if there's the secret inside the store
       if (src == YES) {
         actions[i].kind = CREDM_SYNC_ACT_RENAME;
       } else {
         actions[i].kind = CREDM_SYNC_ACT_PROMPT;
-        *out_need_prompt = 1;
       }
       continue;
     }
 
+    // 0 or >1 matches — ambiguous or brand new connection
     actions[i].kind = CREDM_SYNC_ACT_PROMPT;
-    *out_need_prompt = 1;
   }
 
   *out_actions = actions;
@@ -1106,7 +1181,9 @@ static AdbxStatus credm_plan_sync_all(const ConnCatalog *conf_cat,
 }
 
 /* Applies one full sync plan against the active secret store. It borrows all
- * inputs. May prompt on /dev/tty, mutate the secret store, and log
+ * inputs. Opens one prompt session shared across all entries that need it,
+ * then deletes secrets for state entries no longer present in the config.
+ * Side effects: may prompt on /dev/tty, mutate the secret store, and log
  * automatic rename reuse messages to stderr.
  * Error semantics: returns OK on success, ERR on invalid input, terminal
  * failures, interruptions, or secret-store mutation failures.
@@ -1115,92 +1192,32 @@ static AdbxStatus credm_apply_sync_all(const ConnCatalog *conf_cat,
                                        const ConnCatalog *state_cat,
                                        const CredmSyncAction *actions,
                                        const unsigned char *state_seen,
-                                       SecretStore *store, int need_prompt,
-                                       char **out_err) {
+                                       SecretStore *store, char **out_err) {
   if (!conf_cat || !state_cat || !actions || !state_seen || !store)
     return ERR;
 
   CredmPromptSession sess;
   memset(&sess, 0, sizeof(sess));
   sess.tty_fd = -1;
+
+  int need_prompt = 0;
+  for (size_t i = 0; i < conf_cat->n_profiles; i++) {
+    if (actions[i].kind == CREDM_SYNC_ACT_PROMPT)
+      need_prompt = 1;
+  }
+
   if (need_prompt && credm_prompt_session_begin(&sess, out_err) != OK)
     return ERR;
 
   AdbxStatus rc = OK;
   for (size_t i = 0; i < conf_cat->n_profiles; i++) {
-    const ConnProfile *conf_p = &conf_cat->profiles[i];
-    const CredmSyncAction *act = &actions[i];
-
-    if (act->kind == CREDM_SYNC_ACT_KEEP)
-      continue;
-
-    if (act->kind == CREDM_SYNC_ACT_RENAME) {
-      const ConnProfile *old_p = &state_cat->profiles[act->state_idx];
-      StrBuf secret;
-      sb_init(&secret);
-      AdbxTriStatus grc = secret_store_get(store, &old_p->secret_ref, &secret);
-      if (grc == ERR) {
-        sb_zero_clean(&secret);
-        rc = credm_set_store_err(out_err, store,
-                                 "lookup failure during sync. Please, retry.");
-        break;
-      }
-      if (grc == NO) {
-        sb_zero_clean(&secret);
-        credm_set_err(out_err,
-                      "stored credential for renamed connection '%s' "
-                      "disappeared during sync; rerun the command.",
-                      old_p->connection_name);
-        rc = ERR;
-        break;
-      }
-
-      fprintf(stderr,
-              "LOG: reusing stored credential for renamed connection '%s' -> "
-              "'%s'\n",
-              old_p->connection_name, conf_p->connection_name);
-      if (secret_store_set(store, &conf_p->secret_ref, secret.data) != OK) {
-        sb_zero_clean(&secret);
-        rc = credm_set_store_err(
-            out_err, store, "secret write failure during sync. Please, retry.");
-        break;
-      }
-      if (secret_store_delete(store, &old_p->secret_ref) != OK) {
-        sb_zero_clean(&secret);
-        rc = credm_set_store_err(
-            out_err, store,
-            "secret delete failure during sync. Please, retry.");
-        break;
-      }
-      sb_zero_clean(&secret);
-      continue;
-    }
-
-    if (act->kind == CREDM_SYNC_ACT_PROMPT) {
-      StrBuf secret;
-      sb_init(&secret);
-      if (credm_prompt_password(&sess, conf_p->connection_name, &secret,
-                                out_err) != OK) {
-        sb_zero_clean(&secret);
-        rc = ERR;
-        break;
-      }
-      if (secret_store_set(store, &conf_p->secret_ref, secret.data) != OK) {
-        sb_zero_clean(&secret);
-        rc = credm_set_store_err(out_err, store, "write");
-        break;
-      }
-      sb_zero_clean(&secret);
-      continue;
-    }
-
-    credm_set_err(out_err,
-                  "credential sync hit an internal reconciliation bug.");
-    rc = ERR;
-    break;
+    rc = credm_apply_action(&conf_cat->profiles[i], state_cat, &actions[i],
+                            store, need_prompt ? &sess : NULL, out_err);
+    if (rc != OK)
+      break;
   }
 
-  // deletion of the secret that are no longer present inside the config
+  // delete secrets for state entries that are no longer in the config
   if (rc == OK) {
     for (size_t i = 0; i < state_cat->n_profiles; i++) {
       if (state_seen[i])
@@ -1289,7 +1306,6 @@ static AdbxStatus credm_execute_sync_all(const char *config_input,
   SecretStore *store = NULL;
   CredmSyncAction *actions = NULL;
   unsigned char *state_seen = NULL;
-  int need_prompt = 0;
   AdbxStatus rc = ERR;
 
   char *cfg_err = NULL;
@@ -1329,12 +1345,12 @@ static AdbxStatus credm_execute_sync_all(const char *config_input,
   }
 
   if (credm_plan_sync_all(conf_cat, state_cat, store, &actions, &state_seen,
-                          &need_prompt, out_err) != OK) {
+                          out_err) != OK) {
     goto cleanup;
   }
 
   if (credm_apply_sync_all(conf_cat, state_cat, actions, state_seen, store,
-                           need_prompt, out_err) != OK) {
+                           out_err) != OK) {
     goto cleanup;
   }
 
