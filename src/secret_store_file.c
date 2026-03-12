@@ -1261,10 +1261,11 @@ static AdbxStatus secret_store_file_wipe_namespace(SecretStore *base,
   return rc;
 }
 
-/* Deletes all secrets and updates cache atomically.
+/* Deletes all secrets from the file-backed store.
  * It borrows 'base'.
- * Side effects: refreshes cache, writes credential file, and swaps in-memory
- * cache on success.
+ * Side effects: refreshes cache, and when entries exist, writes the emptied
+ * credential file and swaps in-memory cache on success. Missing/empty store is
+ * treated as a successful no-op.
  * Error semantics: returns OK on success, ERR on invalid input, policy,
  * I/O, or allocation failures.
  */
@@ -1277,6 +1278,9 @@ static AdbxStatus secret_store_file_wipe_all(SecretStore *base) {
 
   if (ss_refresh_if_changed(store) != OK)
     return ERR;
+
+  if (store->cache.n_entries == 0)
+    return OK;
 
   SecretEntryList next = {0};
   AdbxStatus rc = ss_persist_and_swap(store, &next);

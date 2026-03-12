@@ -32,6 +32,13 @@ typedef struct {
   size_t n_items;
 } SecretRefList;
 
+/* SecretStore supports concurrent reads, but mutating operations are not
+ * guaranteed to form one multi-process transaction across backends. Current
+ * production code relies on a higher-level single-writer discipline: the
+ * credential manager is the only process that mutates stored secrets, while
+ * the rest of the application only reads them. Callers must preserve that
+ * invariant or provide external writer serialization.
+ */
 struct SecretStoreVTable {
   // Writes a NUL-terminated secret into 'out'.
   // Returns YES when found, NO when missing, ERR on failure.

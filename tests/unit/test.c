@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "safety_policy.h"
 #include "test.h"
 
 /* ----------------------------- IN-MEMORY I/O ----------------------------- */
@@ -167,6 +168,155 @@ char *make_tmp_dir(void) {
   ASSERT_TRUE(mkdtemp(out) != NULL);
   return out;
 }
+
+/* ------------------------------ fake backend ------------------------------ */
+
+typedef struct {
+  int connected;
+  const char *last_error;
+} FakeDbImpl;
+
+static int g_fake_connect_calls = 0;
+static int g_fake_disconnect_calls = 0;
+static int g_fake_destroy_calls = 0;
+
+/* Implements a deterministic auth rule for unit tests.
+ * It borrows all inputs and updates only the fake backend state.
+ * Side effects: marks the backend connected on success, stores a static
+ * diagnostic string on failure, and bumps the shared connect counter.
+ * Error semantics: returns OK only when 'pwd' equals
+ * 'profile->connection_name'; returns ERR otherwise or on invalid input.
+ */
+static int fake_connect(DbBackend *db, const ConnProfile *profile,
+                        const SafetyPolicy *policy, const char *pwd) {
+  (void)policy;
+  if (!db || !db->impl || !profile || !profile->connection_name || !pwd)
+    return ERR;
+
+  FakeDbImpl *impl = (FakeDbImpl *)db->impl;
+  g_fake_connect_calls++;
+
+  if (strcmp(pwd, profile->connection_name) == 0) {
+    impl->connected = 1;
+    impl->last_error = NULL;
+    return OK;
+  }
+
+  impl->connected = 0;
+  impl->last_error = "fake auth failed";
+  return ERR;
+}
+
+/* Reports whether the shared fake backend currently considers itself
+ * connected. It borrows 'db' and performs no allocations.
+ * Error semantics: returns YES when connected, NO when disconnected, ERR on
+ * invalid input.
+ */
+static int fake_is_connected(DbBackend *db) {
+  if (!db || !db->impl)
+    return ERR;
+  FakeDbImpl *impl = (FakeDbImpl *)db->impl;
+  return impl->connected ? YES : NO;
+}
+
+/* Disconnects the shared fake backend instance.
+ * It borrows 'db' and performs no allocations.
+ * Side effects: marks the fake backend disconnected and bumps the disconnect
+ * counter.
+ * Error semantics: none.
+ */
+static void fake_disconnect(DbBackend *db) {
+  if (!db || !db->impl)
+    return;
+  FakeDbImpl *impl = (FakeDbImpl *)db->impl;
+  impl->connected = 0;
+  g_fake_disconnect_calls++;
+}
+
+/* Destroys one shared fake backend instance.
+ * It consumes 'db' and frees the owned fake implementation.
+ * Side effects: frees memory and bumps the destroy counter.
+ * Error semantics: none.
+ */
+static void fake_destroy(DbBackend *db) {
+  if (!db)
+    return;
+  g_fake_destroy_calls++;
+  free(db->impl);
+  free(db);
+}
+
+/* Fake exec implementation shared by unit tests that do not execute SQL.
+ * It borrows all inputs and performs no allocations.
+ * Side effects: none.
+ * Error semantics: always returns ERR because these tests don't execute SQL.
+ */
+static int fake_exec(DbBackend *db, const char *sql,
+                     const QueryResultBuildPolicy *qb_policy,
+                     QueryResult **out_qr) {
+  (void)db;
+  (void)sql;
+  (void)qb_policy;
+  (void)out_qr;
+  return ERR;
+}
+
+/* Fake safe-function provider for the shared unit-test backend.
+ * It borrows 'db' and returns one static empty list.
+ * Side effects: none.
+ * Error semantics: never fails; may return an empty list.
+ */
+static const DbSafeFuncList *fake_safe_functions(DbBackend *db) {
+  (void)db;
+  static const DbSafeFuncList list = {0};
+  return &list;
+}
+
+/* Returns the latest fake backend error string.
+ * It borrows 'db' and returns a static string owned by the fake backend
+ * implementation.
+ * Error semantics: returns NULL when there is no stored fake error or the
+ * backend input is invalid.
+ */
+static const char *fake_last_error(DbBackend *db) {
+  if (!db || !db->impl)
+    return NULL;
+  FakeDbImpl *impl = (FakeDbImpl *)db->impl;
+  return impl->last_error;
+}
+
+static const DbBackendVTable FAKE_VT = {
+    .connect = fake_connect,
+    .is_connected = fake_is_connected,
+    .disconnect = fake_disconnect,
+    .destroy = fake_destroy,
+    .exec = fake_exec,
+    .safe_functions = fake_safe_functions,
+    .last_error = fake_last_error,
+};
+
+DbBackend *fake_backend_create(DbKind kind) {
+  (void)kind;
+  DbBackend *db = (DbBackend *)xmalloc(sizeof(*db));
+  FakeDbImpl *impl = (FakeDbImpl *)xmalloc(sizeof(*impl));
+  impl->connected = 0;
+  impl->last_error = NULL;
+  db->vt = &FAKE_VT;
+  db->impl = impl;
+  return db;
+}
+
+void fake_backend_reset_counters(void) {
+  g_fake_connect_calls = 0;
+  g_fake_disconnect_calls = 0;
+  g_fake_destroy_calls = 0;
+}
+
+int fake_backend_connect_calls(void) { return g_fake_connect_calls; }
+
+int fake_backend_disconnect_calls(void) { return g_fake_disconnect_calls; }
+
+int fake_backend_destroy_calls(void) { return g_fake_destroy_calls; }
 
 /* -------------------------------------- ENV ------------------------------ */
 

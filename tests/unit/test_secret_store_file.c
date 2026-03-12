@@ -15,9 +15,10 @@
 #include "test.h"
 
 #define TEST_NAMESPACE "TestNamespace"
-#define TEST_REF(name)                                                         \
-  (&(SecretRefInfo){.cred_namespace = TEST_NAMESPACE,                          \
-                    .connection_name = (name)})
+#define OTHER_NAMESPACE "OtherNamespace"
+#define TEST_REF_NS(ns, name)                                                  \
+  (&(SecretRefInfo){.cred_namespace = (ns), .connection_name = (name)})
+#define TEST_REF(name) TEST_REF_NS(TEST_NAMESPACE, name)
 
 typedef struct {
   EnvGuard env;
@@ -405,15 +406,17 @@ static void test_missing_file_delete_returns_ok(void) {
   ctx_close(&ctx);
 }
 
-/* Verifies missing file + wipe_all creates valid non-empty JSON and later
- * set/get work.
+/* Verifies missing file + wipe_all is a successful no-op and later set/get
+ * work.
  */
-static void test_missing_file_wipe_all_creates_and_set_get_works(void) {
+static void test_missing_file_wipe_all_is_noop_and_later_set_get_works(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
   ASSERT_TRUE(secret_store_wipe_all(ctx.ss) == OK);
-  assert_nonempty_regular_file(ctx.cred_path);
+  struct stat st = {0};
+  ASSERT_TRUE(lstat(ctx.cred_path, &st) != 0);
+  ASSERT_TRUE(errno == ENOENT);
 
   // deletes the secret store while keeping the context
   secret_store_destroy(ctx.ss);
@@ -429,6 +432,124 @@ static void test_missing_file_wipe_all_creates_and_set_get_works(void) {
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-after-wipe");
   sb_zero_clean(&out);
+
+  ctx_close(&ctx);
+}
+
+/* Verifies missing file + wipe_namespace is a successful no-op and later
+ * namespace-scoped set/get still work.
+ */
+static void test_missing_file_wipe_namespace_is_noop_and_later_set_get_works(
+    void) {
+  FileStoreCtx ctx;
+  ctx_open_xdg(&ctx);
+
+  ASSERT_TRUE(secret_store_wipe_namespace(ctx.ss, TEST_NAMESPACE) == OK);
+  struct stat st = {0};
+  ASSERT_TRUE(lstat(ctx.cred_path, &st) != 0);
+  ASSERT_TRUE(errno == ENOENT);
+
+  secret_store_destroy(ctx.ss);
+  ctx.ss = NULL;
+  ctx.ss = secret_store_file_backend_create();
+  ASSERT_TRUE(ctx.ss != NULL);
+
+  StrBuf out;
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == NO);
+  ASSERT_TRUE(
+      secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-after-wipe") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF_NS(OTHER_NAMESPACE, "OtherPg"),
+                               "pw-other") == OK);
+
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
+  ASSERT_STREQ(out.data, "pw-after-wipe");
+  sb_zero_clean(&out);
+
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF_NS(OTHER_NAMESPACE, "OtherPg"),
+                               &out) == YES);
+  ASSERT_STREQ(out.data, "pw-other");
+  sb_zero_clean(&out);
+
+  ctx_close(&ctx);
+}
+
+/* Verifies wipe_namespace deletes only entries in the selected namespace and
+ * keeps unrelated namespaces intact across reopen.
+ */
+static void test_wipe_namespace_removes_only_target_namespace(void) {
+  FileStoreCtx ctx;
+  ctx_open_xdg(&ctx);
+
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("KeepPg"), "pw-keep") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("GonePg"), "pw-gone") == OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF_NS(OTHER_NAMESPACE, "OtherPg"),
+                               "pw-other") == OK);
+
+  ASSERT_TRUE(secret_store_wipe_namespace(ctx.ss, TEST_NAMESPACE) == OK);
+
+  secret_store_destroy(ctx.ss);
+  ctx.ss = NULL;
+  ctx.ss = secret_store_file_backend_create();
+  ASSERT_TRUE(ctx.ss != NULL);
+
+  StrBuf out;
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("KeepPg"), &out) == NO);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("GonePg"), &out) == NO);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF_NS(OTHER_NAMESPACE, "OtherPg"),
+                               &out) == YES);
+  ASSERT_STREQ(out.data, "pw-other");
+  sb_zero_clean(&out);
+
+  ctx_close(&ctx);
+}
+
+/* Verifies wiping a namespace that is not present is a no-op.
+ * It borrows the current store and confirms existing refs remain readable.
+ */
+static void test_wipe_namespace_missing_namespace_is_noop(void) {
+  FileStoreCtx ctx;
+  ctx_open_xdg(&ctx);
+
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF("MyPostgres"), "pw-main") ==
+              OK);
+  ASSERT_TRUE(secret_store_set(ctx.ss, TEST_REF_NS(OTHER_NAMESPACE, "OtherPg"),
+                               "pw-other") == OK);
+
+  ASSERT_TRUE(secret_store_wipe_namespace(ctx.ss, "MissingNamespace") == OK);
+
+  secret_store_destroy(ctx.ss);
+  ctx.ss = NULL;
+  ctx.ss = secret_store_file_backend_create();
+  ASSERT_TRUE(ctx.ss != NULL);
+
+  StrBuf out;
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
+  ASSERT_STREQ(out.data, "pw-main");
+  sb_zero_clean(&out);
+
+  sb_init(&out);
+  ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF_NS(OTHER_NAMESPACE, "OtherPg"),
+                               &out) == YES);
+  ASSERT_STREQ(out.data, "pw-other");
+  sb_zero_clean(&out);
+
+  ctx_close(&ctx);
+}
+
+/* Verifies wipe_namespace rejects invalid namespace inputs with SSERR_INPUT.
+ */
+static void test_wipe_namespace_invalid_namespace_reports_input_error(void) {
+  FileStoreCtx ctx;
+  ctx_open_xdg(&ctx);
+
+  ASSERT_TRUE(secret_store_wipe_namespace(ctx.ss, NULL) == ERR);
+  ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_INPUT);
+  ASSERT_TRUE(secret_store_wipe_namespace(ctx.ss, "") == ERR);
+  ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_INPUT);
 
   ctx_close(&ctx);
 }
@@ -846,6 +967,8 @@ static void test_calls_report_env_error_when_env_missing(void) {
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
   ASSERT_TRUE(secret_store_delete(ctx.ss, TEST_REF("MyPostgres")) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
+  ASSERT_TRUE(secret_store_wipe_namespace(ctx.ss, TEST_NAMESPACE) == ERR);
+  ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
   ASSERT_TRUE(secret_store_wipe_all(ctx.ss) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_ENV);
   sb_zero_clean(&out);
@@ -875,6 +998,8 @@ static void test_calls_report_dir_error_after_config_dir_deleted(void) {
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
   ASSERT_TRUE(secret_store_delete(ctx.ss, TEST_REF("MyPostgres")) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
+  ASSERT_TRUE(secret_store_wipe_namespace(ctx.ss, TEST_NAMESPACE) == ERR);
+  ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
   ASSERT_TRUE(secret_store_wipe_all(ctx.ss) == ERR);
   ASSERT_TRUE(secret_store_last_error_code(ctx.ss) == SSERR_DIR);
   sb_zero_clean(&out);
@@ -887,7 +1012,11 @@ int main(void) {
   test_set_overwrite_current_secret();
   test_missing_file_get_returns_no();
   test_missing_file_delete_returns_ok();
-  test_missing_file_wipe_all_creates_and_set_get_works();
+  test_missing_file_wipe_all_is_noop_and_later_set_get_works();
+  test_missing_file_wipe_namespace_is_noop_and_later_set_get_works();
+  test_wipe_namespace_removes_only_target_namespace();
+  test_wipe_namespace_missing_namespace_is_noop();
+  test_wipe_namespace_invalid_namespace_reports_input_error();
   test_zero_size_credentials_file_fails_closed();
   test_truncate_after_valid_load_fails_closed();
   test_json_schema_violations_are_parse();

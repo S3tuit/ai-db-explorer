@@ -6,14 +6,22 @@
 typedef enum {
   CRED_MAN_SYNC = 0,
   CRED_MAN_TEST,
-  CRED_MAN_PRUNE,
   CRED_MAN_RESET,
-  CRED_MAN_LIST,
 } CredManagerCommand;
+
+typedef enum {
+  CRED_MAN_RESET_SCOPE_NONE = 0,
+  CRED_MAN_RESET_SCOPE_ALL,
+  CRED_MAN_RESET_SCOPE_NAMESPACE,
+} CredManagerResetScope;
 
 typedef struct {
   CredManagerCommand cmd;
-  const char *connection_name; // borrowed; optional for sync/test
+  union {
+    const char *connection_name; // borrowed; optional for sync/test
+    const char *cred_namespace;  // borrowed; optional for reset --namespace
+  };
+  CredManagerResetScope reset_scope; // valid only for CRED_MAN_RESET
 } CredManagerReq;
 
 /* Executes one credential-management command using the requested config input.
@@ -23,12 +31,13 @@ typedef struct {
  *   "use the default config path".
  * - CRED_MAN_TEST uses 'config_input' with confdir_open(); passing NULL means
  *   "use the default config path".
- * - CRED_MAN_PRUNE uses 'config_input' with confdir_open(); passing NULL means
- *   "use the default config path".
- * - CRED_MAN_RESET ignores 'config_input' and removes all adbxplorer-managed
- *   credential state.
- * - CRED_MAN_LIST may use 'config_input' when the implementation needs to
- *   report status for one config; otherwise it may be NULL.
+ * - CRED_MAN_RESET ignores 'config_input'.
+ * - For CRED_MAN_RESET with reset_scope == CRED_MAN_RESET_SCOPE_ALL, the
+ *   implementation removes all adbxplorer-managed credential state.
+ * - For CRED_MAN_RESET with
+ *   reset_scope == CRED_MAN_RESET_SCOPE_NAMESPACE, 'req->cred_namespace' must
+ *   be a non-empty namespace string and the implementation removes only that
+ *   namespace's secrets and state file.
  *
  * Ownership:
  * - It borrows 'req' and 'config_input'.

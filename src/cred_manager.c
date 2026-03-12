@@ -2,6 +2,7 @@
 
 #include "config_dir.h"
 #include "conn_catalog.h"
+#include "db_backend.h"
 #include "file_io.h"
 #include "json_codec.h"
 #include "rapidhash.h"
@@ -863,8 +864,7 @@ static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
                                      const ConnCatalog *state_cat,
                                      const CredmSyncAction *act,
                                      SecretStore *store,
-                                     CredmPromptSession *sess,
-                                     char **out_err) {
+                                     CredmPromptSession *sess, char **out_err) {
   if (!conf_p || !state_cat || !act || !store)
     return ERR;
 
@@ -891,7 +891,7 @@ static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
     }
 
     fprintf(stderr,
-            "LOG: reusing stored credential for renamed connection '%s' -> "
+            "Reusing stored password for renamed connection '%s' -> "
             "'%s'\n",
             old_p->connection_name, conf_p->connection_name);
     if (secret_store_set(store, &conf_p->secret_ref, secret.data) != OK) {
@@ -953,9 +953,9 @@ static AdbxStatus credm_apply_sync_one(const ConnCatalog *conf_cat,
   if (need_prompt && credm_prompt_session_begin(&sess, out_err) != OK)
     return ERR;
 
-  AdbxStatus rc = credm_apply_action(&conf_cat->profiles[conf_idx], state_cat,
-                                     act, store, need_prompt ? &sess : NULL,
-                                     out_err);
+  AdbxStatus rc =
+      credm_apply_action(&conf_cat->profiles[conf_idx], state_cat, act, store,
+                         need_prompt ? &sess : NULL, out_err);
 
   if (need_prompt)
     credm_prompt_session_end(&sess);
@@ -1297,10 +1297,17 @@ static AdbxStatus credm_save_state_snapshot(const ConfDir *app,
  * failures, secret-store failures, prompt failures, or snapshot write
  * failures.
  */
-static AdbxStatus credm_execute_sync_all(const char *config_input,
+static AdbxStatus credm_execute_sync_all(const char *config_input, ConfDir *app,
                                          char **out_err) {
+  if (!app || app->fd < 0 || !app->path) {
+    credm_set_err(out_err,
+                  "credential manager hit an unsafe state while opening the "
+                  "credential state directory. This is probably a bug, "
+                  "please, report it.");
+    return ERR;
+  }
+
   ConfFile cfg = {.fd = -1, .path = NULL};
-  ConfDir app = {.fd = -1, .path = NULL};
   ConnCatalog *conf_cat = NULL;  // the config.json catalog
   ConnCatalog *state_cat = NULL; // the state.json catalog
   SecretStore *store = NULL;
@@ -1325,15 +1332,7 @@ static AdbxStatus credm_execute_sync_all(const char *config_input,
     goto cleanup;
   }
 
-  char *app_err = NULL;
-  if (confdir_default_open(&app, NULL, &app_err) != OK) {
-    credm_set_err(out_err, "failed to open the credential state directory: %s",
-                  app_err ? app_err : "unknown error");
-    free(app_err);
-    goto cleanup;
-  }
-
-  if (credm_load_state_catalog(&app, conf_cat->credential_namespace, &state_cat,
+  if (credm_load_state_catalog(app, conf_cat->credential_namespace, &state_cat,
                                out_err) != OK) {
     goto cleanup;
   }
@@ -1354,7 +1353,7 @@ static AdbxStatus credm_execute_sync_all(const char *config_input,
     goto cleanup;
   }
 
-  if (credm_save_state_snapshot(&app, conf_cat->credential_namespace, cfg.fd,
+  if (credm_save_state_snapshot(app, conf_cat->credential_namespace, cfg.fd,
                                 out_err) != OK) {
     goto cleanup;
   }
@@ -1367,7 +1366,6 @@ cleanup:
   secret_store_destroy(store);
   catalog_destroy(state_cat);
   catalog_destroy(conf_cat);
-  confdir_clean(&app);
   conffile_clean(&cfg);
   return rc;
 }
@@ -1383,16 +1381,22 @@ cleanup:
  */
 static AdbxStatus credm_execute_sync_one(const char *config_input,
                                          const char *connection_name,
-                                         char **out_err) {
+                                         ConfDir *app, char **out_err) {
   if (!connection_name || connection_name[0] == '\0') {
     credm_set_err(out_err,
                   "targeted credential sync requires a non-empty connection "
                   "name.");
     return ERR;
   }
+  if (!app || app->fd < 0 || !app->path) {
+    credm_set_err(out_err,
+                  "credential manager hit an unsafe state while opening the "
+                  "credential state directory. This is probably a bug, "
+                  "please, report it.");
+    return ERR;
+  }
 
   ConfFile cfg = {.fd = -1, .path = NULL};
-  ConfDir app = {.fd = -1, .path = NULL};
   ConnCatalog *conf_cat = NULL;
   ConnCatalog *state_cat = NULL;
   SecretStore *store = NULL;
@@ -1417,15 +1421,7 @@ static AdbxStatus credm_execute_sync_one(const char *config_input,
     goto cleanup;
   }
 
-  char *app_err = NULL;
-  if (confdir_default_open(&app, NULL, &app_err) != OK) {
-    credm_set_err(out_err, "failed to open the credential state directory: %s",
-                  app_err ? app_err : "unknown error");
-    free(app_err);
-    goto cleanup;
-  }
-
-  if (credm_load_state_catalog(&app, conf_cat->credential_namespace, &state_cat,
+  if (credm_load_state_catalog(app, conf_cat->credential_namespace, &state_cat,
                                out_err) != OK) {
     goto cleanup;
   }
@@ -1446,7 +1442,7 @@ static AdbxStatus credm_execute_sync_one(const char *config_input,
     goto cleanup;
   }
 
-  if (credm_save_state_sync_one(&app, state_cat, conf_cat, conf_idx,
+  if (credm_save_state_sync_one(app, state_cat, conf_cat, conf_idx,
                                 &conf_cat->profiles[conf_idx], &act,
                                 out_err) != OK) {
     goto cleanup;
@@ -1458,9 +1454,300 @@ cleanup:
   secret_store_destroy(store);
   catalog_destroy(state_cat);
   catalog_destroy(conf_cat);
-  confdir_clean(&app);
   conffile_clean(&cfg);
   return rc;
+}
+
+/* Executes the test path by attempting a real database connection for each
+ * selected profile. It borrows 'config_input' and 'connection_name' and
+ * returns user-facing errors through '*out_err'.
+ * Error semantics: returns OK when every tested connection succeeds, ERR when
+ * any connection fails or on invalid input / infrastructure errors.
+ */
+static AdbxStatus credm_execute_test(const char *config_input,
+                                     const char *connection_name,
+                                     char **out_err) {
+  ConfFile cfg = {.fd = -1, .path = NULL};
+  ConnCatalog *conf_cat = NULL;
+  SecretStore *store = NULL;
+  AdbxStatus rc = ERR;
+
+  // open config and load the connection catalog
+  char *cfg_err = NULL;
+  if (confdir_open(config_input, &cfg, &cfg_err) != OK) {
+    credm_set_err(out_err, "failed to open the config file: %s",
+                  cfg_err ? cfg_err : "unknown error");
+    free(cfg_err);
+    goto cleanup;
+  }
+
+  char *cat_err = NULL;
+  conf_cat = catalog_load_from_fd(cfg.fd, &cat_err);
+  if (!conf_cat) {
+    credm_set_err(out_err, "failed to parse the config file: %s",
+                  cat_err ? cat_err : "unknown error");
+    free(cat_err);
+    goto cleanup;
+  }
+
+  // resolve the profile range to test
+  size_t start_idx = 0;
+  size_t end_idx = conf_cat->n_profiles;
+  if (connection_name) {
+    size_t idx = 0;
+    AdbxTriStatus frc =
+        credm_find_catalog_name(conf_cat, connection_name, &idx);
+    if (frc == ERR) {
+      credm_set_err(out_err, "internal error while resolving connection '%s'.",
+                    connection_name);
+      goto cleanup;
+    }
+    if (frc == NO) {
+      credm_set_err(out_err, "connection '%s' was not found in the config.",
+                    connection_name);
+      goto cleanup;
+    }
+    start_idx = idx;
+    end_idx = idx + 1;
+  }
+
+  // create the secret store
+  store = secret_store_create();
+  if (!store) {
+    credm_set_err(out_err, "failed to initialize the configured secret store.");
+    goto cleanup;
+  }
+
+  int use_color = isatty(STDOUT_FILENO);
+  int any_failed = 0;
+
+  // test each selected connection.
+  for (size_t i = start_idx; i < end_idx; i++) {
+    const ConnProfile *profile = &conf_cat->profiles[i];
+
+    StrBuf pw;
+    sb_init(&pw);
+    AdbxTriStatus grc = secret_store_get(store, &profile->secret_ref, &pw);
+
+    if (grc == NO) {
+      if (use_color)
+        fprintf(stdout, "\033[31mFAIL\033[0m %s: missing stored credential\n",
+                profile->connection_name);
+      else
+        fprintf(stdout, "FAIL %s: missing stored credential\n",
+                profile->connection_name);
+      sb_zero_clean(&pw);
+      any_failed = 1;
+      continue;
+    }
+    if (grc == ERR) {
+      if (use_color)
+        fprintf(stdout, "\033[31mFAIL\033[0m %s: %s\n",
+                profile->connection_name, secret_store_last_error(store));
+      else
+        fprintf(stdout, "FAIL %s: %s\n", profile->connection_name,
+                secret_store_last_error(store));
+      sb_zero_clean(&pw);
+      any_failed = 1;
+      continue;
+    }
+
+    DbBackend *backend = db_backend_create(profile->kind);
+    if (!backend) {
+      if (use_color)
+        fprintf(stdout,
+                "\033[31mFAIL\033[0m %s: unsupported database backend\n",
+                profile->connection_name);
+      else
+        fprintf(stdout, "FAIL %s: unsupported database backend\n",
+                profile->connection_name);
+      sb_zero_clean(&pw);
+      any_failed = 1;
+      continue;
+    }
+
+    AdbxStatus crc =
+        db_connect(backend, profile, &profile->safe_policy, pw.data);
+    if (crc == OK) {
+      if (use_color)
+        fprintf(stdout, "\033[32m OK \033[0m %s\n", profile->connection_name);
+      else
+        fprintf(stdout, " OK  %s\n", profile->connection_name);
+    } else {
+      const char *be_err =
+          backend->vt->last_error ? backend->vt->last_error(backend) : NULL;
+      if (use_color)
+        fprintf(stdout, "\033[31mFAIL\033[0m %s: %s\n",
+                profile->connection_name,
+                be_err ? be_err : "connection failed");
+      else
+        fprintf(stdout, "FAIL %s: %s\n", profile->connection_name,
+                be_err ? be_err : "connection failed");
+      any_failed = 1;
+    }
+
+    db_destroy(backend);
+    sb_zero_clean(&pw);
+  }
+
+  // return OK only if every connection succeeded.
+  rc = any_failed ? ERR : OK;
+
+cleanup:
+  secret_store_destroy(store);
+  catalog_destroy(conf_cat);
+  conffile_clean(&cfg);
+  return rc;
+}
+
+typedef struct {
+  ConfDir app;
+  int l_fd; // lock fd
+} CredmLock;
+
+#define CREDM_LOCK_FILE "credm.lock"
+/* Acquires an advisory lock to ensure there's only one instance of the
+ * cred_manager running in a given environment. On success, populates
+ * 'out_lock', caller must then call credm_release_lock(). On error, assigns
+ * 'out_err' and returns -1.*/
+static AdbxStatus credm_acquire_lock(CredmLock *out_lock, char **out_err) {
+  if (!out_lock) {
+    credm_set_err(out_err,
+                  "credential manager hit an unsafe state during lock "
+                  "acquisition. This is probably a bug, please, report it.");
+    return ERR;
+  }
+  int l_fd = -1;
+  ConfDir app = {.fd = -1, .path = NULL};
+
+  // open the base dir
+  char *app_err = NULL;
+  if (confdir_default_open(&app, NULL, &app_err) != OK) {
+    credm_set_err(out_err, "failed to open the credential state directory: %s",
+                  app_err ? app_err : "unknown error");
+    free(app_err);
+    return ERR;
+  }
+
+  // acquire the lock
+  int flags = O_CREAT | O_WRONLY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+
+  l_fd = openat(app.fd, CREDM_LOCK_FILE, flags, 0600);
+  if (l_fd < 0) {
+    credm_set_err(out_err,
+                  "failed to open lock file at %s/%s and start credential "
+                  "manager, please retry.",
+                  app.path, CREDM_LOCK_FILE);
+    goto err;
+  }
+
+  struct flock exclusive_lock = {
+      .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
+
+  if (fcntl(l_fd, F_SETLK, &exclusive_lock) < 0) {
+    if (errno == EACCES || errno == EAGAIN) {
+      credm_set_err(out_err,
+                    "it seems to be another instance of adbxplorer in 'cred' "
+                    "mode. There can be only one process in 'cred' mode: %s",
+                    strerror(errno));
+    } else {
+      credm_set_err(out_err,
+                    "failed to acquire lock at %s/%s and start credential "
+                    "manager: %s. Please, retry.",
+                    app.path, CREDM_LOCK_FILE, strerror(errno));
+    }
+    goto err;
+  }
+
+  out_lock->app = app;
+  out_lock->l_fd = l_fd;
+  return OK;
+
+err:
+  confdir_clean(&app);
+  if (l_fd >= 0)
+    close(l_fd);
+  return ERR;
+}
+
+/* Releases the advisory lock acquire with credm_acquire_lock(). */
+static void credm_release_lock(CredmLock *lock) {
+  if (!lock)
+    return;
+  unlinkat(lock->app.fd, CREDM_LOCK_FILE, 0);
+  close(lock->l_fd);
+  confdir_clean(&lock->app);
+}
+
+#ifdef ADBX_TEST_MODE
+#include <time.h>
+/* Suspend the execution of the calling thread for the env variable
+ * ADBX_CREDM_HOLD_LOCK_MS ms if set. We use this in unit tests to assert
+ * cred_manager cannot be multiprocess. */
+static void credm_test_hold_lock_if_requested(void) {
+  const char *s = getenv("ADBX_CREDM_HOLD_LOCK_MS");
+  if (!s || s[0] == '\0')
+    return;
+  long ms = strtol(s, NULL, 10);
+  if (ms <= 0 || ms > 10000)
+    return;
+
+  struct timespec ts = {.tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L};
+  while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+  }
+}
+#endif
+
+/* Resets all credential state for one namespace: wipes the secrets from the
+ * active store and removes the corresponding state file. It borrows
+ * 'cred_namespace' and 'app'.
+ * Side effects: deletes secrets from the store and unlinks one state file.
+ * Error semantics: returns OK on success, ERR on invalid input, store
+ * failures, or state-file removal failures.
+ */
+static AdbxStatus credm_execute_reset_namespace(const char *cred_namespace,
+                                                ConfDir *app, char **out_err) {
+  if (!cred_namespace || cred_namespace[0] == '\0') {
+    credm_set_err(out_err,
+                  "namespace reset requires a non-empty namespace string.");
+    return ERR;
+  }
+
+  SecretStore *store = secret_store_create();
+  if (!store) {
+    credm_set_err(out_err, "failed to initialize the configured secret store.");
+    return ERR;
+  }
+
+  if (secret_store_wipe_namespace(store, cred_namespace) != OK) {
+    credm_set_err(out_err, "failed to wipe secrets for namespace '%s': %s",
+                  cred_namespace, secret_store_last_error(store));
+    secret_store_destroy(store);
+    return ERR;
+  }
+  secret_store_destroy(store);
+
+  char state_name[CREDM_FSTATE_NAME];
+  if (credm_state_file_name(cred_namespace, state_name) != OK) {
+    credm_set_err(out_err,
+                  "secrets were removed but the state file could not be "
+                  "derived for namespace '%s'; please retry.",
+                  cred_namespace);
+    return ERR;
+  }
+
+  if (unlinkat(app->fd, state_name, 0) != 0 && errno != ENOENT) {
+    credm_set_err(out_err,
+                  "secrets were removed but the state file '%s' could not be "
+                  "deleted: %s; please retry.",
+                  state_name, strerror(errno));
+    return ERR;
+  }
+
+  return OK;
 }
 
 AdbxStatus cred_manager_execute(const CredManagerReq *req,
@@ -1473,26 +1760,43 @@ AdbxStatus cred_manager_execute(const CredManagerReq *req,
     return ERR;
   }
 
+  // credm must be single process
+  CredmLock lock;
+  if (credm_acquire_lock(&lock, out_err) != OK)
+    return ERR;
+
+#ifdef ADBX_TEST_MODE
+  credm_test_hold_lock_if_requested();
+#endif
+
+  AdbxStatus rc;
+  ConfDir *app = &lock.app;
   switch (req->cmd) {
   case CRED_MAN_SYNC:
-    if (req->connection_name)
-      return credm_execute_sync_one(config_input, req->connection_name,
-                                    out_err);
-    return credm_execute_sync_all(config_input, out_err);
+    if (req->connection_name) {
+      rc = credm_execute_sync_one(config_input, req->connection_name, app,
+                                  out_err);
+      break;
+    }
+    rc = credm_execute_sync_all(config_input, app, out_err);
+    break;
   case CRED_MAN_TEST:
-    credm_set_err(out_err, "credential testing is not implemented yet.");
-    return ERR;
-  case CRED_MAN_PRUNE:
-    credm_set_err(out_err, "credential pruning is not implemented yet.");
-    return ERR;
+    rc = credm_execute_test(config_input, req->connection_name, out_err);
+    break;
   case CRED_MAN_RESET:
-    credm_set_err(out_err, "credential reset is not implemented yet.");
-    return ERR;
-  case CRED_MAN_LIST:
-    credm_set_err(out_err, "credential listing is not implemented yet.");
-    return ERR;
+    if (req->reset_scope == CRED_MAN_RESET_SCOPE_NAMESPACE) {
+      rc = credm_execute_reset_namespace(req->cred_namespace, app, out_err);
+    } else {
+      credm_set_err(out_err, "credential reset is not implemented yet.");
+      rc = ERR;
+    }
+    break;
   default:
     credm_set_err(out_err, "credential command failed: unknown command.");
-    return ERR;
+    rc = ERR;
+    break;
   }
+
+  credm_release_lock(&lock);
+  return rc;
 }

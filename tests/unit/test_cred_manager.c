@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "config_dir.h"
@@ -23,6 +25,15 @@ typedef struct {
   char *state_path;
 } SyncTestCtx;
 
+typedef struct {
+  AdbxStatus rc;
+  char *err;
+  char *stdout_text;
+} CredTestResult;
+
+#define CHILD_OK 0
+#define CHILD_ERR 1
+
 /* ---------------------------------------------------------------------------
  * Shared JSON fixtures
  *
@@ -36,146 +47,190 @@ typedef struct {
 static const char *NS_A = "TestNsA";
 
 /* Single connection: KeepPg. */
-static const char *JSON_ONE_DB =
-    "{"
-    "\"version\":\"1.0\","
-    "\"credentialNamespace\":\"TestNsA\","
-    "\"safetyPolicy\":{},"
-    "\"databases\":["
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"KeepPg\","
-    "\"host\":\"keep-host\","
-    "\"port\":5432,"
-    "\"username\":\"keep-user\","
-    "\"database\":\"keep-db\""
-    "}"
-    "]"
-    "}";
+static const char *JSON_ONE_DB = "{"
+                                 "\"version\":\"1.0\","
+                                 "\"credentialNamespace\":\"TestNsA\","
+                                 "\"safetyPolicy\":{},"
+                                 "\"databases\":["
+                                 "{"
+                                 "\"type\":\"postgres\","
+                                 "\"connectionName\":\"KeepPg\","
+                                 "\"host\":\"keep-host\","
+                                 "\"port\":5432,"
+                                 "\"username\":\"keep-user\","
+                                 "\"database\":\"keep-db\""
+                                 "}"
+                                 "]"
+                                 "}";
 
 /* Two connections: KeepPg + OtherPg. */
-static const char *JSON_TWO_DB =
-    "{"
-    "\"version\":\"1.0\","
-    "\"credentialNamespace\":\"TestNsA\","
-    "\"safetyPolicy\":{},"
-    "\"databases\":["
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"KeepPg\","
-    "\"host\":\"keep-host\","
-    "\"port\":5432,"
-    "\"username\":\"keep-user\","
-    "\"database\":\"keep-db\""
-    "},"
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"OtherPg\","
-    "\"host\":\"other-host\","
-    "\"port\":5432,"
-    "\"username\":\"other-user\","
-    "\"database\":\"other-db\""
-    "}"
-    "]"
-    "}";
+static const char *JSON_TWO_DB = "{"
+                                 "\"version\":\"1.0\","
+                                 "\"credentialNamespace\":\"TestNsA\","
+                                 "\"safetyPolicy\":{},"
+                                 "\"databases\":["
+                                 "{"
+                                 "\"type\":\"postgres\","
+                                 "\"connectionName\":\"KeepPg\","
+                                 "\"host\":\"keep-host\","
+                                 "\"port\":5432,"
+                                 "\"username\":\"keep-user\","
+                                 "\"database\":\"keep-db\""
+                                 "},"
+                                 "{"
+                                 "\"type\":\"postgres\","
+                                 "\"connectionName\":\"OtherPg\","
+                                 "\"host\":\"other-host\","
+                                 "\"port\":5432,"
+                                 "\"username\":\"other-user\","
+                                 "\"database\":\"other-db\""
+                                 "}"
+                                 "]"
+                                 "}";
 
 /* Two connections: KeepPg + OtherPg with altered host (for "changed field"
  * tests where OtherPg has a different host between config and state). */
-static const char *JSON_TWO_DB_ALT =
-    "{"
-    "\"version\":\"1.0\","
-    "\"credentialNamespace\":\"TestNsA\","
-    "\"safetyPolicy\":{},"
-    "\"databases\":["
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"KeepPg\","
-    "\"host\":\"keep-host\","
-    "\"port\":5432,"
-    "\"username\":\"keep-user\","
-    "\"database\":\"keep-db\""
-    "},"
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"OtherPg\","
-    "\"host\":\"alt-host\","
-    "\"port\":5432,"
-    "\"username\":\"other-user\","
-    "\"database\":\"other-db\""
-    "}"
-    "]"
-    "}";
+static const char *JSON_TWO_DB_ALT = "{"
+                                     "\"version\":\"1.0\","
+                                     "\"credentialNamespace\":\"TestNsA\","
+                                     "\"safetyPolicy\":{},"
+                                     "\"databases\":["
+                                     "{"
+                                     "\"type\":\"postgres\","
+                                     "\"connectionName\":\"KeepPg\","
+                                     "\"host\":\"keep-host\","
+                                     "\"port\":5432,"
+                                     "\"username\":\"keep-user\","
+                                     "\"database\":\"keep-db\""
+                                     "},"
+                                     "{"
+                                     "\"type\":\"postgres\","
+                                     "\"connectionName\":\"OtherPg\","
+                                     "\"host\":\"alt-host\","
+                                     "\"port\":5432,"
+                                     "\"username\":\"other-user\","
+                                     "\"database\":\"other-db\""
+                                     "}"
+                                     "]"
+                                     "}";
 
 /* Two connections: KeepPg + RenamedPg (same tuple as OtherPg). */
-static const char *JSON_RENAME_CONF =
-    "{"
-    "\"version\":\"1.0\","
-    "\"credentialNamespace\":\"TestNsA\","
-    "\"safetyPolicy\":{},"
-    "\"databases\":["
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"KeepPg\","
-    "\"host\":\"keep-host\","
-    "\"port\":5432,"
-    "\"username\":\"keep-user\","
-    "\"database\":\"keep-db\""
-    "},"
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"RenamedPg\","
-    "\"host\":\"other-host\","
-    "\"port\":5432,"
-    "\"username\":\"other-user\","
-    "\"database\":\"other-db\""
-    "}"
-    "]"
-    "}";
+static const char *JSON_RENAME_CONF = "{"
+                                      "\"version\":\"1.0\","
+                                      "\"credentialNamespace\":\"TestNsA\","
+                                      "\"safetyPolicy\":{},"
+                                      "\"databases\":["
+                                      "{"
+                                      "\"type\":\"postgres\","
+                                      "\"connectionName\":\"KeepPg\","
+                                      "\"host\":\"keep-host\","
+                                      "\"port\":5432,"
+                                      "\"username\":\"keep-user\","
+                                      "\"database\":\"keep-db\""
+                                      "},"
+                                      "{"
+                                      "\"type\":\"postgres\","
+                                      "\"connectionName\":\"RenamedPg\","
+                                      "\"host\":\"other-host\","
+                                      "\"port\":5432,"
+                                      "\"username\":\"other-user\","
+                                      "\"database\":\"other-db\""
+                                      "}"
+                                      "]"
+                                      "}";
+
+/* Three connections: KeepPg + WrongPg + MissingPg. */
+static const char *JSON_THREE_DB = "{"
+                                   "\"version\":\"1.0\","
+                                   "\"credentialNamespace\":\"TestNsA\","
+                                   "\"safetyPolicy\":{},"
+                                   "\"databases\":["
+                                   "{"
+                                   "\"type\":\"postgres\","
+                                   "\"connectionName\":\"KeepPg\","
+                                   "\"host\":\"keep-host\","
+                                   "\"port\":5432,"
+                                   "\"username\":\"keep-user\","
+                                   "\"database\":\"keep-db\""
+                                   "},"
+                                   "{"
+                                   "\"type\":\"postgres\","
+                                   "\"connectionName\":\"WrongPg\","
+                                   "\"host\":\"wrong-host\","
+                                   "\"port\":5432,"
+                                   "\"username\":\"wrong-user\","
+                                   "\"database\":\"wrong-db\""
+                                   "},"
+                                   "{"
+                                   "\"type\":\"postgres\","
+                                   "\"connectionName\":\"MissingPg\","
+                                   "\"host\":\"missing-host\","
+                                   "\"port\":5432,"
+                                   "\"username\":\"missing-user\","
+                                   "\"database\":\"missing-db\""
+                                   "}"
+                                   "]"
+                                   "}";
 
 /* Two connections with identical tuples (same as KeepPg): for ambiguous rename
  * detection tests. */
-static const char *JSON_AMBIG_CONF =
-    "{"
-    "\"version\":\"1.0\","
-    "\"credentialNamespace\":\"TestNsA\","
-    "\"safetyPolicy\":{},"
-    "\"databases\":["
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"AlphaPg\","
-    "\"host\":\"keep-host\","
-    "\"port\":5432,"
-    "\"username\":\"keep-user\","
-    "\"database\":\"keep-db\""
-    "},"
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"BetaPg\","
-    "\"host\":\"keep-host\","
-    "\"port\":5432,"
-    "\"username\":\"keep-user\","
-    "\"database\":\"keep-db\""
-    "}"
-    "]"
-    "}";
+static const char *JSON_AMBIG_CONF = "{"
+                                     "\"version\":\"1.0\","
+                                     "\"credentialNamespace\":\"TestNsA\","
+                                     "\"safetyPolicy\":{},"
+                                     "\"databases\":["
+                                     "{"
+                                     "\"type\":\"postgres\","
+                                     "\"connectionName\":\"AlphaPg\","
+                                     "\"host\":\"keep-host\","
+                                     "\"port\":5432,"
+                                     "\"username\":\"keep-user\","
+                                     "\"database\":\"keep-db\""
+                                     "},"
+                                     "{"
+                                     "\"type\":\"postgres\","
+                                     "\"connectionName\":\"BetaPg\","
+                                     "\"host\":\"keep-host\","
+                                     "\"port\":5432,"
+                                     "\"username\":\"keep-user\","
+                                     "\"database\":\"keep-db\""
+                                     "}"
+                                     "]"
+                                     "}";
 
 /* Single connection with a different namespace (for mismatch tests). */
-static const char *JSON_ONE_DB_NS_B =
-    "{"
-    "\"version\":\"1.0\","
-    "\"credentialNamespace\":\"TestNsB\","
-    "\"safetyPolicy\":{},"
-    "\"databases\":["
-    "{"
-    "\"type\":\"postgres\","
-    "\"connectionName\":\"KeepPg\","
-    "\"host\":\"keep-host\","
-    "\"port\":5432,"
-    "\"username\":\"keep-user\","
-    "\"database\":\"keep-db\""
-    "}"
-    "]"
-    "}";
+static const char *JSON_ONE_DB_NS_B = "{"
+                                      "\"version\":\"1.0\","
+                                      "\"credentialNamespace\":\"TestNsB\","
+                                      "\"safetyPolicy\":{},"
+                                      "\"databases\":["
+                                      "{"
+                                      "\"type\":\"postgres\","
+                                      "\"connectionName\":\"KeepPg\","
+                                      "\"host\":\"keep-host\","
+                                      "\"port\":5432,"
+                                      "\"username\":\"keep-user\","
+                                      "\"database\":\"keep-db\""
+                                      "}"
+                                      "]"
+                                      "}";
+
+/* Single connection in a different namespace for reset tests. */
+static const char *JSON_ONE_DB_OTHER_NS = "{"
+                                          "\"version\":\"1.0\","
+                                          "\"credentialNamespace\":\"OtherNs\","
+                                          "\"safetyPolicy\":{},"
+                                          "\"databases\":["
+                                          "{"
+                                          "\"type\":\"postgres\","
+                                          "\"connectionName\":\"OtherNsPg\","
+                                          "\"host\":\"otherns-host\","
+                                          "\"port\":5432,"
+                                          "\"username\":\"otherns-user\","
+                                          "\"database\":\"otherns-db\""
+                                          "}"
+                                          "]"
+                                          "}";
 
 /* ---------------------------------------------------------------------------
  * Test helpers
@@ -396,6 +451,125 @@ static char *run_sync_one_err(const char *config_path,
   return err;
 }
 
+static void run_reset_namespace_ok(const char *cred_namespace,
+                                   const char *config_input) {
+  CredManagerReq req = {
+      .cmd = CRED_MAN_RESET,
+      .cred_namespace = cred_namespace,
+      .reset_scope = CRED_MAN_RESET_SCOPE_NAMESPACE,
+  };
+  char *err = NULL;
+  ASSERT_TRUE(cred_manager_execute(&req, config_input, &err) == OK);
+  ASSERT_TRUE(err == NULL);
+  free(err);
+}
+
+static char *run_reset_namespace_err(const char *cred_namespace,
+                                     const char *config_input) {
+  CredManagerReq req = {
+      .cmd = CRED_MAN_RESET,
+      .cred_namespace = cred_namespace,
+      .reset_scope = CRED_MAN_RESET_SCOPE_NAMESPACE,
+  };
+  char *err = NULL;
+  ASSERT_TRUE(cred_manager_execute(&req, config_input, &err) == ERR);
+  ASSERT_TRUE(err != NULL);
+  return err;
+}
+
+/* Releases one captured credential-test result.
+ * It consumes owned strings inside 'res'.
+ * Side effects: frees heap memory.
+ * Error semantics: test helper.
+ */
+static void cred_test_result_clean(CredTestResult *res) {
+  if (!res)
+    return;
+  free(res->err);
+  free(res->stdout_text);
+  memset(res, 0, sizeof(*res));
+}
+
+/* Runs one credential-manager test command while capturing stdout.
+ *
+ * We intentionally redirect STDOUT_FILENO to a temporary file so the
+ * production code sees a non-tty stdout and emits stable plain-text output
+ * without ANSI colors. When 'factory' is non-NULL we install it through the
+ * db_backend_set_test_factory() seam and always clear it before returning.
+ *
+ * Ownership: writes owned strings into caller-owned 'out'.
+ * Side effects: temporarily redirects stdout and may install a test-only
+ * backend factory.
+ * Error semantics: test helper (asserts on setup or teardown failure).
+ */
+static void run_test_capture(CredTestResult *out, const char *config_path,
+                             const char *connection_name,
+                             DbBackendFactory factory) {
+  ASSERT_TRUE(out != NULL);
+  memset(out, 0, sizeof(*out));
+
+  FILE *capture = tmpfile();
+  ASSERT_TRUE(capture != NULL);
+
+  fflush(stdout);
+  int saved_stdout = dup(STDOUT_FILENO);
+  ASSERT_TRUE(saved_stdout >= 0);
+  ASSERT_TRUE(dup2(fileno(capture), STDOUT_FILENO) >= 0);
+
+  db_backend_set_test_factory(factory);
+  CredManagerReq req = {
+      .cmd = CRED_MAN_TEST,
+      .connection_name = connection_name,
+  };
+  out->rc = cred_manager_execute(&req, config_path, &out->err);
+  db_backend_set_test_factory(NULL);
+
+  fflush(stdout);
+  ASSERT_TRUE(dup2(saved_stdout, STDOUT_FILENO) >= 0);
+  ASSERT_TRUE(close(saved_stdout) == 0);
+
+  out->stdout_text = read_all(capture);
+  ASSERT_TRUE(out->stdout_text != NULL);
+  ASSERT_TRUE(fclose(capture) == 0);
+}
+
+/* Runs one sync-all command inside a forked child and exits with CHILD_OK only
+ * when the observed return code and error string match the expected outcome.
+ * It borrows all inputs and does not return to the caller.
+ * Side effects: updates one test-only env var in the child process and invokes
+ * credential-manager sync logic before exiting the process.
+ * Error semantics: test helper; exits CHILD_OK on the expected outcome,
+ * CHILD_ERR otherwise.
+ */
+static void run_sync_child_and_exit(const char *config_path,
+                                    const char *hold_lock_ms,
+                                    AdbxStatus expect_rc,
+                                    const char *expect_err_substr) {
+  if (hold_lock_ms) {
+    if (setenv("ADBX_CREDM_HOLD_LOCK_MS", hold_lock_ms, 1) != 0)
+      _exit(CHILD_ERR);
+  } else {
+    if (unsetenv("ADBX_CREDM_HOLD_LOCK_MS") != 0)
+      _exit(CHILD_ERR);
+  }
+
+  CredManagerReq req = {.cmd = CRED_MAN_SYNC, .connection_name = NULL};
+  char *err = NULL;
+  AdbxStatus rc = cred_manager_execute(&req, config_path, &err);
+
+  int ok = (rc == expect_rc);
+  if (expect_rc == OK) {
+    ok = ok && (err == NULL);
+  } else {
+    ok = ok && err != NULL;
+    if (ok && expect_err_substr)
+      ok = (strstr(err, expect_err_substr) != NULL);
+  }
+
+  free(err);
+  _exit(ok ? CHILD_OK : CHILD_ERR);
+}
+
 /* ---------------------------------------------------------------------------
  * sync-all tests
  * -------------------------------------------------------------------------*/
@@ -517,6 +691,44 @@ static void test_sync_ambiguous_tuple_match_requires_prompt(void) {
   assert_secret_missing(NS_A, "AlphaPg");
   assert_secret_missing(NS_A, "BetaPg");
   ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies overlapping sync-all processes are rejected instead of both
+ * succeeding. The holder child uses the test-only hold hook to stay inside
+ * cred_manager long enough for the contender child to overlap.
+ */
+static void test_sync_concurrent_process_rejected(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, JSON_TWO_DB);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret(NS_A, "OtherPg", "other-secret");
+
+  pid_t holder = fork();
+  ASSERT_TRUE(holder >= 0);
+  if (holder == 0)
+    run_sync_child_and_exit(ctx.config_path, "300", OK, NULL);
+
+  struct timespec ts = {.tv_sec = 0, .tv_nsec = 100 * 1000 * 1000L};
+  while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+  }
+
+  pid_t contender = fork();
+  ASSERT_TRUE(contender >= 0);
+  if (contender == 0)
+    run_sync_child_and_exit(ctx.config_path, NULL, ERR,
+                            "another instance of adbxplorer in 'cred' mode");
+
+  int holder_status = 0;
+  int contender_status = 0;
+  ASSERT_TRUE(waitpid(holder, &holder_status, 0) == holder);
+  ASSERT_TRUE(waitpid(contender, &contender_status, 0) == contender);
+  ASSERT_TRUE(WIFEXITED(holder_status));
+  ASSERT_TRUE(WIFEXITED(contender_status));
+  ASSERT_TRUE(WEXITSTATUS(holder_status) == CHILD_OK);
+  ASSERT_TRUE(WEXITSTATUS(contender_status) == CHILD_OK);
 
   sync_test_ctx_clean(&ctx);
 }
@@ -741,6 +953,364 @@ test_sync_one_target_leaves_unrelated_stale_entries_untouched(void) {
   sync_test_ctx_clean(&ctx);
 }
 
+/* ---------------------------------------------------------------------------
+ * test-action tests
+ * -------------------------------------------------------------------------*/
+
+/* Verifies '--test <connection>' fails clearly when the requested connection
+ * is not present in the config file.
+ */
+static void test_test_one_target_missing_from_config(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, "MissingPg", NULL);
+
+  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.err != NULL);
+  ASSERT_TRUE(strstr(res.err, "was not found in the config") != NULL);
+  ASSERT_STREQ(res.stdout_text, "");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies '--test <connection>' reports a missing stored credential through
+ * stdout without creating or modifying credential state files.
+ */
+static void test_test_one_missing_secret_reports_fail(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, "KeepPg", NULL);
+
+  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.err == NULL);
+  ASSERT_TRUE(strstr(res.stdout_text,
+                     "FAIL KeepPg: missing stored credential\n") != NULL);
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies '--test' keeps going across all profiles and reports both success
+ * and missing-credential results.
+ */
+static void test_test_all_with_one_missing_secret(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  seed_secret(NS_A, "KeepPg", "KeepPg");
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, NULL, fake_backend_create);
+
+  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.err == NULL);
+  ASSERT_TRUE(strstr(res.stdout_text, " OK  KeepPg\n") != NULL);
+  ASSERT_TRUE(strstr(res.stdout_text,
+                     "FAIL OtherPg: missing stored credential\n") != NULL);
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies '--test <connection>' succeeds when the fake backend receives the
+ * expected password for the selected connection.
+ */
+static void test_test_one_success(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  seed_secret(NS_A, "KeepPg", "KeepPg");
+  assert_secret_missing(NS_A, "OtherPg");
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, "KeepPg", fake_backend_create);
+
+  ASSERT_TRUE(res.rc == OK);
+  ASSERT_TRUE(res.err == NULL);
+  ASSERT_TRUE(strstr(res.stdout_text, " OK  KeepPg\n") != NULL);
+  ASSERT_TRUE(strstr(res.stdout_text, "OtherPg") == NULL);
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies '--test <connection>' reports backend auth failure when the stored
+ * password does not match the fake backend auth rule.
+ */
+static void test_test_one_backend_failure(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  seed_secret(NS_A, "KeepPg", "wrong-secret");
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, "KeepPg", fake_backend_create);
+
+  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.err == NULL);
+  ASSERT_TRUE(strstr(res.stdout_text, "FAIL KeepPg: fake auth failed\n") !=
+              NULL);
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies '--test' keeps testing every configured profile and reports mixed
+ * success, backend failure, and missing-secret results in config order.
+ */
+static void test_test_all_mixed_results(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_THREE_DB, NULL);
+
+  seed_secret(NS_A, "KeepPg", "KeepPg");
+  seed_secret(NS_A, "WrongPg", "wrong-secret");
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, NULL, fake_backend_create);
+
+  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.err == NULL);
+
+  char *keep = strstr(res.stdout_text, " OK  KeepPg\n");
+  char *wrong = strstr(res.stdout_text, "FAIL WrongPg: fake auth failed\n");
+  char *missing =
+      strstr(res.stdout_text, "FAIL MissingPg: missing stored credential\n");
+  ASSERT_TRUE(keep != NULL);
+  ASSERT_TRUE(wrong != NULL);
+  ASSERT_TRUE(missing != NULL);
+  ASSERT_TRUE(keep < wrong);
+  ASSERT_TRUE(wrong < missing);
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies '--test' returns OK when every configured profile succeeds against
+ * the fake backend.
+ */
+static void test_test_all_success(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  seed_secret(NS_A, "KeepPg", "KeepPg");
+  seed_secret(NS_A, "OtherPg", "OtherPg");
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, NULL, fake_backend_create);
+
+  ASSERT_TRUE(res.rc == OK);
+  ASSERT_TRUE(res.err == NULL);
+  ASSERT_TRUE(strstr(res.stdout_text, " OK  KeepPg\n") != NULL);
+  ASSERT_TRUE(strstr(res.stdout_text, " OK  OtherPg\n") != NULL);
+  ASSERT_TRUE(strstr(res.stdout_text, "FAIL") == NULL);
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* ---------------------------------------------------------------------------
+ * reset-namespace tests
+ * -------------------------------------------------------------------------*/
+
+/* Verifies namespace reset deletes only the selected namespace and preserves
+ * unrelated secrets and state.
+ */
+static void test_reset_namespace_deletes_only_selected_namespace(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  ConfDir app = {.fd = -1, .path = NULL};
+  char *app_err = NULL;
+  ASSERT_TRUE(confdir_default_open(&app, NULL, &app_err) == OK);
+  free(app_err);
+  char *other_state_name = state_file_name_for_namespace("OtherNs");
+  char *other_state_path = path_join(app.path, other_state_name);
+  ASSERT_TRUE(other_state_path != NULL);
+  write_json_file(other_state_path, JSON_ONE_DB_OTHER_NS);
+  confdir_clean(&app);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret(NS_A, "OtherPg", "other-secret");
+  seed_secret("OtherNs", "OtherNsPg", "other-ns-secret");
+
+  run_reset_namespace_ok(NS_A, NULL);
+
+  assert_secret_missing(NS_A, "KeepPg");
+  assert_secret_missing(NS_A, "OtherPg");
+  assert_secret_value("OtherNs", "OtherNsPg", "other-ns-secret");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+  ASSERT_TRUE(access(other_state_path, F_OK) == 0);
+
+  unlink_if_exists(other_state_path);
+  free(other_state_name);
+  free(other_state_path);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset succeeds when the state file is already missing.
+ */
+static void test_reset_namespace_missing_state_succeeds(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+
+  run_reset_namespace_ok(NS_A, NULL);
+
+  assert_secret_missing(NS_A, "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset succeeds when there are no secrets in that
+ * namespace and only the matching state file is removed.
+ */
+static void test_reset_namespace_missing_secrets_succeeds(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  ConfDir app = {.fd = -1, .path = NULL};
+  char *app_err = NULL;
+  ASSERT_TRUE(confdir_default_open(&app, NULL, &app_err) == OK);
+  free(app_err);
+  char *other_state_name = state_file_name_for_namespace("OtherNs");
+  char *other_state_path = path_join(app.path, other_state_name);
+  ASSERT_TRUE(other_state_path != NULL);
+  write_json_file(other_state_path, JSON_ONE_DB_OTHER_NS);
+  confdir_clean(&app);
+
+  seed_secret("OtherNs", "OtherNsPg", "other-ns-secret");
+
+  run_reset_namespace_ok(NS_A, NULL);
+
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+  ASSERT_TRUE(access(other_state_path, F_OK) == 0);
+  assert_secret_value("OtherNs", "OtherNsPg", "other-ns-secret");
+
+  unlink_if_exists(other_state_path);
+  free(other_state_name);
+  free(other_state_path);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset is a successful no-op when both state and secrets
+ * are already absent.
+ */
+static void test_reset_namespace_missing_state_and_secrets_is_noop(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_reset_namespace_ok(NS_A, NULL);
+
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+  assert_secret_missing(NS_A, "KeepPg");
+
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset rejects a NULL namespace with a clear error.
+ */
+static void test_reset_namespace_null_namespace_fails(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  char *err = run_reset_namespace_err(NULL, NULL);
+  ASSERT_TRUE(strstr(err, "non-empty namespace string") != NULL);
+  free(err);
+
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset rejects an empty namespace with a clear error.
+ */
+static void test_reset_namespace_empty_namespace_fails(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  char *err = run_reset_namespace_err("", NULL);
+  ASSERT_TRUE(strstr(err, "non-empty namespace string") != NULL);
+  free(err);
+
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset ignores config_input and does not try to open it.
+ */
+static void test_reset_namespace_ignores_config_input(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+
+  run_reset_namespace_ok(NS_A, "/definitely/not/a/real/config.json");
+
+  assert_secret_missing(NS_A, "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset propagates secret-store failures and leaves the
+ * state file untouched when credentials.json is malformed.
+ */
+static void test_reset_namespace_secret_store_failure_propagates(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  ConfDir app = {.fd = -1, .path = NULL};
+  char *app_err = NULL;
+  ASSERT_TRUE(confdir_default_open(&app, NULL, &app_err) == OK);
+  free(app_err);
+  char *cred_path = path_join(app.path, "credentials.json");
+  ASSERT_TRUE(cred_path != NULL);
+  confdir_clean(&app);
+
+  write_json_file(cred_path, "{\"version\":");
+
+  char *err = run_reset_namespace_err(NS_A, NULL);
+  ASSERT_TRUE(strstr(err, "failed to wipe secrets for namespace") != NULL);
+  free(err);
+
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+
+  free(cred_path);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies namespace reset reports a state-file unlink failure after the
+ * secrets were already removed.
+ */
+static void test_reset_namespace_state_unlink_failure_reports_err(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  ASSERT_TRUE(mkdir(ctx.state_path, 0700) == 0);
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+
+  char *err = run_reset_namespace_err(NS_A, NULL);
+  ASSERT_TRUE(strstr(err, "state file") != NULL);
+  free(err);
+
+  assert_secret_missing(NS_A, "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+
+  ASSERT_TRUE(rmdir(ctx.state_path) == 0);
+  sync_test_ctx_clean(&ctx);
+}
+
 int main(void) {
   test_sync_missing_state_all_secrets_present();
   test_sync_unchanged_state_and_config();
@@ -748,6 +1318,7 @@ int main(void) {
   test_sync_removed_connection_deletion();
   test_sync_namespace_mismatch_fails_closed();
   test_sync_ambiguous_tuple_match_requires_prompt();
+  test_sync_concurrent_process_rejected();
 
   test_sync_one_target_unchanged_unrelated_changed();
   test_sync_one_target_missing_from_config();
@@ -760,6 +1331,23 @@ int main(void) {
   test_sync_one_target_missing_state_requires_prompt();
   test_sync_one_target_namespace_mismatch_fails_closed();
   test_sync_one_target_leaves_unrelated_stale_entries_untouched();
+  test_test_one_target_missing_from_config();
+  test_test_one_missing_secret_reports_fail();
+  test_test_all_with_one_missing_secret();
+  test_test_one_success();
+  test_test_one_backend_failure();
+  test_test_all_mixed_results();
+  test_test_all_success();
+
+  test_reset_namespace_deletes_only_selected_namespace();
+  test_reset_namespace_missing_state_succeeds();
+  test_reset_namespace_missing_secrets_succeeds();
+  test_reset_namespace_missing_state_and_secrets_is_noop();
+  test_reset_namespace_null_namespace_fails();
+  test_reset_namespace_empty_namespace_fails();
+  test_reset_namespace_ignores_config_input();
+  test_reset_namespace_secret_store_failure_propagates();
+  test_reset_namespace_state_unlink_failure_reports_err();
   fprintf(stderr, "test_cred_manager: OK\n");
   return 0;
 }

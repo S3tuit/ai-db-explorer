@@ -141,4 +141,15 @@ static inline const DbSafeFuncList *db_safe_functions(DbBackend *db) {
   return db->vt->safe_functions(db);
 }
 
+/* ------------------------------- for tests --------------------------------*/
+
+#ifdef ADBX_TEST_MODE
+typedef DbBackend *(*DbBackendFactory)(DbKind kind);
+
+/* Installs one test-only backend factory override used by db_backend_create().
+ * Passing NULL clears the override.
+ */
+void db_backend_set_test_factory(DbBackendFactory factory);
+#endif
+
 #endif

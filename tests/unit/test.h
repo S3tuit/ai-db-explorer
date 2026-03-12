@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "conn_catalog.h"
+#include "db_backend.h"
 #include "postgres_backend.h"
 #include "utils.h"
 #include "validator.h"
@@ -78,6 +79,43 @@ int get_validate_query_out(ValidateQueryOut *out, char *sql);
  * Error semantics: test helper (asserts on failure).
  */
 char *make_tmp_dir(void);
+
+/* ----------------------------- FAKE BACKEND ------------------------------ */
+
+/* Builds one shared fake DbBackend for unit tests.
+ *
+ * This fake intentionally encodes a simple authentication rule:
+ * the connection succeeds only when 'pwd' equals 'profile->connection_name'.
+ * We use that rule so tests can control success/failure without networking or
+ * backend-specific fixtures.
+ *
+ * Ownership: caller owns the returned backend and must destroy it with
+ * db_destroy().
+ * Side effects: allocates one backend instance.
+ * Error semantics: test helper; aborts on allocation failure.
+ */
+DbBackend *fake_backend_create(DbKind kind);
+
+/* Resets the shared fake-backend counters to zero.
+ * It performs no allocations.
+ * Side effects: mutates unit-test global state.
+ * Error semantics: none.
+ */
+void fake_backend_reset_counters(void);
+
+/* Returns how many times the shared fake backend accepted or rejected a
+ * connection attempt since the last reset.
+ */
+int fake_backend_connect_calls(void);
+
+/* Returns how many times the shared fake backend was disconnected since the
+ * last reset.
+ */
+int fake_backend_disconnect_calls(void);
+
+/* Returns how many fake backend instances were destroyed since the last reset.
+ */
+int fake_backend_destroy_calls(void);
 
 /* ------------------------------- ENV --------------------------------------*/
 typedef struct {
