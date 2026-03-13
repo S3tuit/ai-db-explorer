@@ -141,6 +141,11 @@ static inline const DbSafeFuncList *db_safe_functions(DbBackend *db) {
   return db->vt->safe_functions(db);
 }
 
+static inline const char *db_last_error(DbBackend *db) {
+  if (!db || !db->vt || !db->vt->last_error)
+    return NULL;
+  return db->vt->last_error(db);
+}
 /* ------------------------------- for tests --------------------------------*/
 
 #ifdef ADBX_TEST_MODE

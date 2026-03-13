@@ -9,6 +9,8 @@
 #include "secret_store.h"
 #include "string_op.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -398,33 +400,145 @@ static AdbxStatus credm_restore_tty_cfg(CredmPromptSession *sess,
   return OK;
 }
 
+/* Reads one action line from /dev/tty and consumes input through the trailing
+ * newline. It borrows 'sess' and writes one normalized action byte into
+ * '*out_action': '\n' for empty line, else the first non-CR byte typed by the
+ * user.
+ * Error semantics: returns OK on success, else ERR and modifies 'out_err'.
+ */
+static AdbxStatus credm_tty_read_action_line(CredmPromptSession *sess,
+                                             char *out_action, char **out_err) {
+  if (!sess || sess->tty_fd < 0 || !out_action)
+    return ERR;
+
+  *out_action = '\n';
+  int saw_action = 0;
+
+  for (;;) {
+    char ch = '\0';
+    ssize_t nread = read(sess->tty_fd, &ch, 1);
+    if (nread == 0) {
+      credm_set_err(out_err, "interactive terminal closed while syncing a "
+                             "password.");
+      return ERR;
+    }
+    if (nread < 0) {
+      if (errno == EINTR && g_credm_signal != 0) {
+        credm_set_err(out_err, "credential sync interrupted.");
+        return ERR;
+      }
+      if (errno == EINTR)
+        continue;
+      credm_set_err(out_err, "failed while reading from the terminal.");
+      return ERR;
+    }
+
+    if (ch == '\r')
+      continue;
+    if (ch == '\n')
+      return OK;
+    if (!saw_action) {
+      *out_action = ch;
+      saw_action = 1;
+    }
+  }
+}
+
+/* Runs one advisory connectivity test for 'profile' using 'secret' as password.
+ * Reports the result back to the controlling 'sess->tty_fd'. It borrows all
+ * inputs and does not persist any secret state. Returns ERR only on invalid
+ * input, backend infrastructure failures, or tty write failures... modifies
+ * 'out_err'
+ */
+static AdbxStatus credm_tty_test_connectivity(CredmPromptSession *sess,
+                                              const ConnProfile *profile,
+                                              const char *secret,
+                                              char **out_err) {
+  if (!sess || sess->tty_fd < 0 || !profile || !secret)
+    return ERR;
+
+  DbBackend *db_backend = db_backend_create(profile->kind);
+  int use_color = isatty(sess->tty_fd);
+  char res[256];
+
+  if (!db_backend) {
+    int n = snprintf(
+        res, sizeof(res),
+        use_color ? "\033[31mFAIL\033[0m %s: unsupported database backend\n"
+                  : "FAIL %s: unsupported database backend\n",
+        profile->connection_name);
+    if (n < 0 || (size_t)n >= sizeof(res)) {
+      credm_set_err(out_err, "failed to format the connectivity test result.");
+      return ERR;
+    }
+    if (credm_tty_write_all(sess->tty_fd, res, (size_t)n) != OK) {
+      credm_set_err(out_err, "failed to write the connectivity test result.");
+      return ERR;
+    }
+    return OK;
+  }
+
+  AdbxStatus crc =
+      db_connect(db_backend, profile, &profile->safe_policy, secret);
+  if (crc == OK) {
+    int n = snprintf(res, sizeof(res),
+                     use_color ? "\033[32m OK \033[0m %s\n" : " OK  %s\n",
+                     profile->connection_name);
+    if (n < 0 || (size_t)n >= sizeof(res)) {
+      db_destroy(db_backend);
+      credm_set_err(out_err, "failed to format the connectivity test result.");
+      return ERR;
+    }
+    if (db_is_connected(db_backend) == YES)
+      db_disconnect(db_backend);
+    db_destroy(db_backend);
+    if (credm_tty_write_all(sess->tty_fd, res, (size_t)n) != OK) {
+      credm_set_err(out_err, "failed to write the connectivity test result.");
+      return ERR;
+    }
+    return OK;
+  }
+
+  const char *be_err = db_last_error(db_backend);
+  int n =
+      snprintf(res, sizeof(res),
+               use_color ? "\033[31mFAIL\033[0m %s: %s\n" : "FAIL %s: %s\n",
+               profile->connection_name, be_err ? be_err : "connection failed");
+  db_destroy(db_backend);
+  if (n < 0 || (size_t)n >= sizeof(res)) {
+    credm_set_err(out_err, "failed to format the connectivity test result.");
+    return ERR;
+  }
+  if (credm_tty_write_all(sess->tty_fd, res, (size_t)n) != OK) {
+    credm_set_err(out_err, "failed to write the connectivity test result.");
+    return ERR;
+  }
+  return OK;
+}
+
 /* Reads one password from /dev/tty with echo disabled and writes the plaintext
  * into caller-owned 'out_secret'. It borrows 'sess' and 'connection_name'.
  * It always restore tty settings to the state right before entering the method
  * unless system crashes.
  */
 static AdbxStatus credm_prompt_password(CredmPromptSession *sess,
-                                        const char *connection_name,
+                                        const ConnProfile *profile,
                                         StrBuf *out_secret, char **out_err) {
-  if (!sess || sess->tty_fd < 0 || !connection_name || !out_secret)
+  if (!sess || sess->tty_fd < 0 || !profile || !out_secret)
     return ERR;
 
-  sb_reset(out_secret);
+  sb_zero_clean(out_secret);
+  sb_init(out_secret);
 
-  char prompt[128];
-  int pn =
-      snprintf(prompt, sizeof(prompt), "Password for %s: ", connection_name);
-  if (pn < 0 || (size_t)pn >= sizeof(prompt)) {
-    credm_set_err(out_err, "failed to format the password prompt for '%s'.",
-                  connection_name);
-    return ERR;
-  }
-  if (credm_tty_write_all(sess->tty_fd, prompt, (size_t)pn) != OK) {
-    credm_set_err(out_err, "failed to write the password prompt.");
-    return ERR;
-  }
+  static const char action_prompt[] =
+      "Press Enter to save and continue, type t then Enter to test, or r then "
+      "Enter to re-enter password:\n";
 
   if (credm_save_tty_cfg(sess, out_err) != OK) {
+    credm_set_err(out_err,
+                  "failed to save interactive terminal configuration before "
+                  "prompting for '%s'.",
+                  profile->connection_name);
     return ERR;
   }
 
@@ -435,35 +549,91 @@ static AdbxStatus credm_prompt_password(CredmPromptSession *sess,
     goto restore_n_ret;
   }
 
+  // loop to get the password and ask for confirmation
   for (;;) {
-    char ch = '\0';
-    ssize_t nread = read(sess->tty_fd, &ch, 1);
-    if (nread == 0) {
-      credm_set_err(out_err, "interactive terminal closed while reading a "
-                             "password.");
+    char pwd_prompt[128];
+    int pn = snprintf(pwd_prompt, sizeof(pwd_prompt),
+                      "Password for %s: ", profile->connection_name);
+    if (pn < 0 || (size_t)pn >= sizeof(pwd_prompt)) {
+      credm_set_err(out_err, "failed to format the password prompt for '%s'.",
+                    profile->connection_name);
       goto restore_n_ret;
     }
-    if (nread < 0) {
-      if (errno == EINTR && g_credm_signal != 0) {
-        credm_set_err(out_err, "credential sync interrupted.");
-        goto restore_n_ret;
-      }
-      if (errno == EINTR)
-        continue;
-      credm_set_err(out_err, "failed while reading a password from the "
-                             "terminal.");
+    if (credm_tty_write_all(sess->tty_fd, pwd_prompt, (size_t)pn) != OK) {
+      credm_set_err(out_err, "failed to write the password prompt.");
       goto restore_n_ret;
     }
 
-    if (ch == '\n')
-      break;
-    if (ch == '\r')
-      continue;
-    if (sb_append_bytes(out_secret, &ch, 1) != OK) {
-      credm_set_err(out_err, "password is too large to keep in memory.");
+    // read the password
+    for (;;) {
+      char ch = '\0';
+      ssize_t nread = read(sess->tty_fd, &ch, 1);
+      if (nread == 0) {
+        credm_set_err(out_err, "interactive terminal closed while reading a "
+                               "password.");
+        goto restore_n_ret;
+      }
+      if (nread < 0) {
+        if (errno == EINTR && g_credm_signal != 0) {
+          credm_set_err(out_err, "credential sync interrupted.");
+          goto restore_n_ret;
+        }
+        if (errno == EINTR)
+          continue;
+        credm_set_err(out_err, "failed while reading a password from the "
+                               "terminal.");
+        goto restore_n_ret;
+      }
+
+      if (ch == '\n')
+        break;
+      if (ch == '\r')
+        continue;
+      if (sb_append_bytes(out_secret, &ch, 1) != OK) {
+        credm_set_err(out_err, "password is too large to keep in memory.");
+        goto restore_n_ret;
+      }
+    }
+
+    if (credm_tty_write_all(sess->tty_fd, "\n", 1) != OK) {
+      credm_set_err(out_err, "failed to advance the terminal prompt.");
       goto restore_n_ret;
     }
+
+    // read the prompt response
+    for (;;) {
+      if (credm_tty_write_all(sess->tty_fd, action_prompt,
+                              sizeof(action_prompt) - 1) != OK) {
+        credm_set_err(out_err, "failed to write the password action prompt.");
+        goto restore_n_ret;
+      }
+
+      char action = '\n';
+      if (credm_tty_read_action_line(sess, &action, out_err) != OK)
+        goto restore_n_ret;
+
+      if (action == '\n')
+        goto pwd_confirmed;
+      if (action == 'r' || action == 'R') {
+        sb_zero_clean(out_secret);
+        sb_init(out_secret);
+        break;
+      }
+      // test for connectivity
+      if (action == 't' || action == 'T') {
+        if (!sb_to_cstr(out_secret)) {
+          credm_set_err(out_err, "failed to terminate the typed password.");
+          goto restore_n_ret;
+        }
+        if (credm_tty_test_connectivity(sess, profile, out_secret->data,
+                                        out_err) != OK) {
+          goto restore_n_ret;
+        }
+      }
+      // loop again if char was different
+    }
   }
+pwd_confirmed:
 
   if (credm_tty_write_all(sess->tty_fd, "\n", 1) != OK) {
     credm_set_err(out_err, "failed to write the prompt terminator.");
@@ -914,12 +1084,13 @@ static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
     StrBuf secret;
     sb_init(&secret);
     AdbxStatus rc = OK;
-    if (credm_prompt_password(sess, conf_p->connection_name, &secret,
-                              out_err) != OK) {
+    if (credm_prompt_password(sess, conf_p, &secret, out_err) != OK) {
       rc = ERR;
     } else if (secret_store_set(store, &conf_p->secret_ref, secret.data) !=
                OK) {
-      rc = credm_set_store_err(out_err, store, "write");
+      rc = credm_set_store_err(
+          out_err, store,
+          "secret store write failure during sync. Please, retry.");
     }
     sb_zero_clean(&secret);
     return rc;
@@ -1750,6 +1921,149 @@ static AdbxStatus credm_execute_reset_namespace(const char *cred_namespace,
   return OK;
 }
 
+// CREDM_FSTATE_NAME includes the NUL terminator; d_name length is one less.
+#define CREDM_FSTATE_NAMELEN (CREDM_FSTATE_NAME - 1)
+
+/* Resets all credential state across every namespace: wipes the entire secret
+ * store and removes every state.<hash>.json file from the app directory.
+ * Prompts for interactive confirmation on /dev/tty before proceeding.
+ * It borrows 'app'.
+ * Side effects: reads/writes /dev/tty, deletes secrets, unlinks state files.
+ * Error semantics: returns OK on success or when the user aborts, ERR on
+ * infrastructure failures.
+ */
+static AdbxStatus credm_execute_reset_all(ConfDir *app, char **out_err) {
+  if (!app || app->fd < 0) {
+    credm_set_err(out_err,
+                  "credential manager hit an unsafe state during reset. "
+                  "This is probably a bug, please, report it.");
+    return ERR;
+  }
+
+  // open /dev/tty for the confirmation prompt.
+  int tty_flags = O_RDWR;
+#ifdef O_CLOEXEC
+  tty_flags |= O_CLOEXEC;
+#endif
+  int tty_fd = open("/dev/tty", tty_flags);
+  if (tty_fd < 0) {
+    credm_set_err(out_err,
+                  "credential reset --all requires an interactive terminal.");
+    return ERR;
+  }
+
+  // print warning and read confirmation.
+  int use_color = isatty(tty_fd);
+  const char *prompt =
+      use_color
+          ? "\033[1;31mWARNING:\033[0m this deletes \033[1mall\033[0m stored "
+            "credentials and credential state files for \033[1mevery\033[0m "
+            "namespace.\nType '\033[1mRESET ALL\033[0m' to continue: "
+          : "WARNING: this deletes all stored credentials and credential state "
+            "files for every namespace.\nType 'RESET ALL' to continue: ";
+  size_t plen = strlen(prompt);
+  if (credm_tty_write_all(tty_fd, prompt, plen) != OK) {
+    (void)close(tty_fd);
+    credm_set_err(out_err, "failed to write the confirmation prompt.");
+    return ERR;
+  }
+
+  // read one line from /dev/tty.
+  char buf[64];
+  size_t pos = 0;
+  for (;;) {
+    char ch = '\0';
+    ssize_t nread = read(tty_fd, &ch, 1);
+    if (nread <= 0)
+      break;
+    if (ch == '\n')
+      break;
+    if (ch == '\r')
+      continue;
+    if (pos < sizeof(buf) - 1)
+      buf[pos++] = ch;
+  }
+  buf[pos] = '\0';
+  (void)close(tty_fd);
+
+  // check confirmation.
+  for (char *c = buf; *c != '\0'; c++) {
+    *c = tolower((unsigned char)*c);
+  }
+  if (strcmp(buf, "reset all") != 0) {
+    fprintf(stderr, "Aborted.\n");
+    return OK;
+  }
+
+  // create the secret store and wipe everything.
+  SecretStore *store = secret_store_create();
+  if (!store) {
+    credm_set_err(out_err, "failed to initialize the configured secret store.");
+    return ERR;
+  }
+
+  // wipe all secrets.
+  if (secret_store_wipe_all(store) != OK) {
+    credm_set_err(out_err, "failed to wipe all stored secrets: %s",
+                  secret_store_last_error(store));
+    secret_store_destroy(store);
+    return ERR;
+  }
+  secret_store_destroy(store);
+
+  // scan app dir for state.<16hex>.json files.
+  int dir_fd = dup(app->fd);
+  if (dir_fd < 0) {
+    credm_set_err(out_err,
+                  "all secrets were removed but could not open the state "
+                  "directory for cleanup: %s; please retry.",
+                  strerror(errno));
+    return ERR;
+  }
+  DIR *dir = fdopendir(dir_fd);
+  if (!dir) {
+    (void)close(dir_fd);
+    credm_set_err(out_err,
+                  "all secrets were removed but could not scan the state "
+                  "directory for cleanup: %s; please retry.",
+                  strerror(errno));
+    return ERR;
+  }
+
+  // delete matched files; remember first failure but keep going
+  int unlink_failed = 0;
+  int saved_errno = 0;
+  struct dirent *ent;
+  while ((ent = readdir(dir)) != NULL) {
+    size_t len = strlen(ent->d_name);
+    if (len != CREDM_FSTATE_NAMELEN)
+      continue;
+    if (memcmp(ent->d_name, "state.", 6) != 0)
+      continue;
+    if (memcmp(ent->d_name + len - 5, ".json", 5) != 0)
+      continue;
+
+    if (unlinkat(app->fd, ent->d_name, 0) != 0 && errno != ENOENT) {
+      if (!unlink_failed)
+        saved_errno = errno;
+      unlink_failed = 1;
+    }
+  }
+  closedir(dir);
+
+  // report partial failure if any state file deletion failed
+  if (unlink_failed) {
+    credm_set_err(out_err,
+                  "all secrets were removed but some credential state files "
+                  "could not be deleted: %s; please retry.",
+                  strerror(saved_errno));
+    return ERR;
+  }
+
+  // success
+  return OK;
+}
+
 AdbxStatus cred_manager_execute(const CredManagerReq *req,
                                 const char *config_input, char **out_err) {
   if (out_err)
@@ -1784,10 +2098,12 @@ AdbxStatus cred_manager_execute(const CredManagerReq *req,
     rc = credm_execute_test(config_input, req->connection_name, out_err);
     break;
   case CRED_MAN_RESET:
-    if (req->reset_scope == CRED_MAN_RESET_SCOPE_NAMESPACE) {
+    if (req->reset_scope == CRED_MAN_RESET_SCOPE_ALL) {
+      rc = credm_execute_reset_all(app, out_err);
+    } else if (req->reset_scope == CRED_MAN_RESET_SCOPE_NAMESPACE) {
       rc = credm_execute_reset_namespace(req->cred_namespace, app, out_err);
     } else {
-      credm_set_err(out_err, "credential reset is not implemented yet.");
+      credm_set_err(out_err, "credential command requires a valid scope.");
       rc = ERR;
     }
     break;

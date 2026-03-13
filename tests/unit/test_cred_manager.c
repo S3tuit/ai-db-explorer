@@ -1,6 +1,11 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -470,6 +475,18 @@ static char *run_reset_namespace_err(const char *cred_namespace,
       .cmd = CRED_MAN_RESET,
       .cred_namespace = cred_namespace,
       .reset_scope = CRED_MAN_RESET_SCOPE_NAMESPACE,
+  };
+  char *err = NULL;
+  ASSERT_TRUE(cred_manager_execute(&req, config_input, &err) == ERR);
+  ASSERT_TRUE(err != NULL);
+  return err;
+}
+
+static char *run_reset_all_err(const char *config_input) {
+  CredManagerReq req = {
+      .cmd = CRED_MAN_RESET,
+      .cred_namespace = NULL,
+      .reset_scope = CRED_MAN_RESET_SCOPE_ALL,
   };
   char *err = NULL;
   ASSERT_TRUE(cred_manager_execute(&req, config_input, &err) == ERR);
@@ -1311,6 +1328,773 @@ static void test_reset_namespace_state_unlink_failure_reports_err(void) {
   sync_test_ctx_clean(&ctx);
 }
 
+/* Verifies reset --all requires an interactive terminal and does not mutate
+ * any secrets or state files on that failure path.
+ */
+static void test_reset_all_requires_tty_and_is_noop(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  ConfDir app = {.fd = -1, .path = NULL};
+  char *app_err = NULL;
+  ASSERT_TRUE(confdir_default_open(&app, NULL, &app_err) == OK);
+  free(app_err);
+  char *other_state_name = state_file_name_for_namespace("OtherNs");
+  char *other_state_path = path_join(app.path, other_state_name);
+  ASSERT_TRUE(other_state_path != NULL);
+  write_json_file(other_state_path, JSON_ONE_DB_OTHER_NS);
+  confdir_clean(&app);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret("OtherNs", "OtherNsPg", "other-ns-secret");
+
+  char *err = run_reset_all_err("/definitely/not/a/real/config.json");
+  ASSERT_TRUE(strstr(err, "requires an interactive terminal") != NULL);
+  free(err);
+
+  assert_secret_value(NS_A, "KeepPg", "keep-secret");
+  assert_secret_value("OtherNs", "OtherNsPg", "other-ns-secret");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  ASSERT_TRUE(access(other_state_path, F_OK) == 0);
+
+  unlink_if_exists(other_state_path);
+  free(other_state_name);
+  free(other_state_path);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* ------------------------------ TTY TEST --------------------------------- */
+
+typedef int (*TtyChildFn)(void);
+typedef void (*TtyParentFn)(int master_fd);
+static const char *g_reset_all_tty_config_input;
+static const char *g_sync_all_tty_config_input;
+static DbBackendFactory g_sync_all_tty_factory;
+static int g_sync_all_tty_min_connect_calls = -1;
+static const char *g_sync_one_tty_config_input;
+static const char *g_sync_one_tty_connection_name;
+static DbBackendFactory g_sync_one_tty_factory;
+static int g_sync_one_tty_min_connect_calls = -1;
+
+/* Runs 'child_fn' inside a fresh controlling terminal backed by a PTY and lets
+ * 'parent_fn' drive the PTY master from the parent process. It borrows both
+ * callbacks. Side effects: forks, creates a PTY pair, wires the child stdio to
+ * the PTY slave, and may kill the child on timeout. It asserts on setup or
+ * child-process failures and returns no value.
+ */
+static void test_tty(TtyChildFn child_fn, TtyParentFn parent_fn) {
+  ASSERT_TRUE(child_fn != NULL);
+  ASSERT_TRUE(parent_fn != NULL);
+
+  int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+  ASSERT_TRUE(master_fd >= 0);
+  if (grantpt(master_fd) < 0) {
+    fprintf(stderr, "failed grantpt: %s", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+  if (unlockpt(master_fd) < 0) {
+    fprintf(stderr, "failed unlockpt: %s", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+  char *slave_path = ptsname(master_fd);
+  ASSERT_TRUE(slave_path);
+
+  pid_t pid = fork();
+  ASSERT_TRUE(pid >= 0);
+
+  if (pid == 0) {
+    close(master_fd);
+    if (setsid() < 0)
+      _exit(CHILD_ERR);
+
+    /* Opening the PTY slave after setsid() gives the child a controlling
+     * terminal so cred_manager can reopen it through /dev/tty.
+     */
+    int slave_fd = open(slave_path, O_RDWR);
+    if (slave_fd < 0)
+      _exit(CHILD_ERR);
+
+    if (dup2(slave_fd, STDIN_FILENO) < 0 || dup2(slave_fd, STDOUT_FILENO) < 0 ||
+        dup2(slave_fd, STDERR_FILENO) < 0) {
+      close(slave_fd);
+      _exit(CHILD_ERR);
+    }
+    close(slave_fd);
+
+    int rc = child_fn();
+    _exit(rc);
+  } else {
+    parent_fn(master_fd);
+
+    int status = 0;
+    for (;;) {
+      pid_t w_rc = waitpid(pid, &status, 0);
+      if (w_rc < 0) {
+        if (errno == EINTR)
+          continue;
+        ASSERT_TRUE(0);
+        break;
+      }
+      ASSERT_TRUE(w_rc == pid);
+      break;
+    }
+    ASSERT_TRUE(WIFEXITED(status));
+
+    int child_rc = WEXITSTATUS(status);
+    ASSERT_TRUE(close(master_fd) == 0);
+    ASSERT_TRUE(child_rc == CHILD_OK);
+  }
+}
+
+/* Writes the NUL-terminated string 'str' to 'tty_fd'. */
+static AdbxStatus tty_write_str(int tty_fd, const char *str) {
+  if (tty_fd < 0 || !str)
+    return ERR;
+
+  size_t len = strlen(str);
+  size_t off = 0;
+  while (off < len) {
+    ssize_t wr = write(tty_fd, str + off, len - off);
+    if (wr < 0) {
+      if (errno == EINTR)
+        continue;
+      return ERR;
+    }
+    off += (size_t)wr;
+  }
+
+  return OK;
+}
+
+/* Reads bytes from 'tty_fd' until 'str' is found or there are no more bytes to
+ * read.
+ */
+static AdbxStatus tty_read_until(int tty_fd, const char *str) {
+  if (tty_fd < 0 || !str || *str == '\0')
+    return ERR;
+
+  size_t len = strlen(str);
+  char buf[512];
+  size_t b_idx = 0;
+  if (len >= sizeof(buf) - 2)
+    return ERR;
+
+  for (;;) {
+    char ch = '\0';
+    ssize_t nread = read(tty_fd, &ch, 1);
+    if (nread == 0) {
+      return ERR;
+    }
+    if (nread < 0) {
+      if (errno == EINTR)
+        continue;
+      return ERR;
+    }
+
+    buf[b_idx++] = ch;
+    if (b_idx >= len) {
+      buf[b_idx] = '\0';
+      if (strcmp(str, buf + b_idx - len) == 0) {
+        return OK;
+      }
+    }
+
+    if (b_idx > sizeof(buf) - 2) {
+      return ERR;
+    }
+  }
+}
+
+/* Reads the remaining PTY output into 'buf' until EOF/EIO or the buffer fills.
+ * It borrows 'buf' and NUL-terminates it on success.
+ */
+static AdbxStatus tty_read_rest(int tty_fd, char *buf, size_t cap) {
+  if (tty_fd < 0 || !buf || cap < 2)
+    return ERR;
+
+  size_t off = 0;
+  for (;;) {
+    ssize_t nread = read(tty_fd, buf + off, cap - off - 1);
+    if (nread == 0)
+      break;
+    if (nread < 0) {
+      if (errno == EINTR)
+        continue;
+      if (errno == EIO)
+        break;
+      return ERR;
+    }
+
+    off += (size_t)nread;
+    if (off >= cap - 1)
+      break;
+  }
+
+  buf[off] = '\0';
+  return OK;
+}
+
+/* Waits for the password prompt of one specific connection. It borrows
+ * 'connection_name' and performs no allocations.
+ * Side effects: consumes prompt bytes from the PTY stream.
+ * Error semantics: test helper (asserts on mismatch).
+ */
+static void tty_expect_password_prompt(int tty_fd,
+                                       const char *connection_name) {
+  ASSERT_TRUE(connection_name != NULL);
+
+  char prompt[128];
+  int n =
+      snprintf(prompt, sizeof(prompt), "Password for %s: ", connection_name);
+  ASSERT_TRUE(n > 0);
+  ASSERT_TRUE((size_t)n < sizeof(prompt));
+  ASSERT_TRUE(tty_read_until(tty_fd, prompt) == OK);
+}
+
+/* Waits until the current password flow reaches the action prompt.
+ * It performs no allocations.
+ * Side effects: consumes bytes from the PTY stream.
+ * Error semantics: test helper (asserts on mismatch).
+ */
+static void tty_expect_action_prompt(int tty_fd) {
+  ASSERT_TRUE(tty_read_until(tty_fd, "re-enter password:") == OK);
+}
+
+/* Enters one password for 'connection_name' and waits for the follow-up action
+ * prompt. It borrows all inputs and performs no allocations.
+ * Side effects: writes one password line to the PTY and consumes the resulting
+ * action prompt.
+ * Error semantics: test helper (asserts on protocol failure).
+ */
+static void tty_enter_password(int tty_fd, const char *connection_name,
+                               const char *password) {
+  ASSERT_TRUE(password != NULL);
+  tty_expect_password_prompt(tty_fd, connection_name);
+  ASSERT_TRUE(tty_write_str(tty_fd, password) == OK);
+  ASSERT_TRUE(tty_write_str(tty_fd, "\n") == OK);
+  tty_expect_action_prompt(tty_fd);
+}
+
+/* ------------------------------ TTY RESET -------------------------------- */
+
+/* Runs reset --all in the PTY child and succeeds only when the command returns
+ * OK with no heap-allocated error string. It borrows the current test-global
+ * config input.
+ */
+static int tty_child_reset_all_ok(void) {
+  CredManagerReq req = {
+      .cmd = CRED_MAN_RESET,
+      .reset_scope = CRED_MAN_RESET_SCOPE_ALL,
+  };
+  char *err = NULL;
+  AdbxStatus rc =
+      cred_manager_execute(&req, g_reset_all_tty_config_input, &err);
+  int ok = (rc == OK && err == NULL);
+  free(err);
+  return ok ? CHILD_OK : CHILD_ERR;
+}
+
+/* Drives the reset --all confirmation prompt and confirms the destructive
+ * action with mixed-case input. It borrows the PTY master fd.
+ */
+static void tty_parent_confirm_reset_all(int master_fd) {
+  char tail[128];
+  ASSERT_TRUE(tty_read_until(master_fd, "RESET ALL") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "to continue: ") == OK);
+  ASSERT_TRUE(tty_write_str(master_fd, "Reset aLl\n") == OK);
+  ASSERT_TRUE(tty_read_rest(master_fd, tail, sizeof(tail)) == OK);
+  ASSERT_TRUE(strstr(tail, "Aborted.") == NULL);
+}
+
+/* Drives the reset --all confirmation prompt and sends an invalid
+ * confirmation. It borrows the PTY master fd.
+ */
+static void tty_parent_abort_reset_all(int master_fd) {
+  ASSERT_TRUE(tty_read_until(master_fd, "RESET ALL") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "to continue: ") == OK);
+  ASSERT_TRUE(tty_write_str(master_fd, "reset  all\n") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "Aborted.") == OK);
+}
+
+/* Verifies reset --all accepts a mixed-case confirmation, wipes every stored
+ * secret, deletes only managed state.<hash>.json files, and leaves unrelated
+ * files in the app dir untouched.
+ */
+static void test_reset_all_tty_confirm_wipes_secrets_and_state(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  ConfDir app = {.fd = -1, .path = NULL};
+  ASSERT_TRUE(confdir_default_open(&app, NULL, NULL) == OK);
+  char *other_state_name = state_file_name_for_namespace("OtherNs");
+  char *other_state_path = path_join(app.path, other_state_name);
+  char *ignore_path = path_join(app.path, "state-ignore.json");
+  ASSERT_TRUE(other_state_path != NULL);
+  ASSERT_TRUE(ignore_path != NULL);
+  write_json_file(other_state_path, JSON_ONE_DB_OTHER_NS);
+  write_json_file(ignore_path, JSON_ONE_DB);
+  confdir_clean(&app);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret("OtherNs", "OtherNsPg", "other-ns-secret");
+  g_reset_all_tty_config_input = "/definitely/not/a/real/config.json";
+  test_tty(tty_child_reset_all_ok, tty_parent_confirm_reset_all);
+  g_reset_all_tty_config_input = NULL;
+
+  assert_secret_missing(NS_A, "KeepPg");
+  assert_secret_missing("OtherNs", "OtherNsPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
+  ASSERT_TRUE(access(other_state_path, F_OK) != 0);
+  ASSERT_TRUE(access(ignore_path, F_OK) == 0);
+
+  unlink_if_exists(ignore_path);
+  free(other_state_name);
+  free(other_state_path);
+  free(ignore_path);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies reset --all treats malformed confirmation input as an abort and
+ * leaves secrets plus managed and unmanaged state files untouched.
+ */
+static void test_reset_all_tty_invalid_confirmation_is_noop(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  ConfDir app = {.fd = -1, .path = NULL};
+  ASSERT_TRUE(confdir_default_open(&app, NULL, NULL) == OK);
+  char *other_state_name = state_file_name_for_namespace("OtherNs");
+  char *other_state_path = path_join(app.path, other_state_name);
+  char *ignore_path = path_join(app.path, "state-ignore.json");
+  ASSERT_TRUE(other_state_path != NULL);
+  ASSERT_TRUE(ignore_path != NULL);
+  write_json_file(other_state_path, JSON_ONE_DB_OTHER_NS);
+  write_json_file(ignore_path, JSON_ONE_DB);
+  confdir_clean(&app);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret("OtherNs", "OtherNsPg", "other-ns-secret");
+  g_reset_all_tty_config_input = "/definitely/not/a/real/config.json";
+  test_tty(tty_child_reset_all_ok, tty_parent_abort_reset_all);
+  g_reset_all_tty_config_input = NULL;
+
+  assert_secret_value(NS_A, "KeepPg", "keep-secret");
+  assert_secret_value("OtherNs", "OtherNsPg", "other-ns-secret");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  ASSERT_TRUE(access(other_state_path, F_OK) == 0);
+  ASSERT_TRUE(access(ignore_path, F_OK) == 0);
+
+  unlink_if_exists(other_state_path);
+  unlink_if_exists(ignore_path);
+  free(other_state_name);
+  free(other_state_path);
+  free(ignore_path);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* ----------------------------- TTY SYNC ALL ------------------------------ */
+
+/* Runs sync-all in the PTY child and succeeds only when the command returns OK
+ * with no heap-allocated error string. When configured, it also installs the
+ * shared fake backend and requires at least 'g_sync_all_tty_min_connect_calls'
+ * connect attempts inside the child process.
+ * Returns CHILD_OK on the expected outcome, CHILD_ERR otherwise.
+ */
+static int tty_child_sync_all_ok(void) {
+  CredManagerReq req = {.cmd = CRED_MAN_SYNC, .connection_name = NULL};
+  char *err = NULL;
+  if (g_sync_all_tty_factory) {
+    fake_backend_reset_counters();
+    db_backend_set_test_factory(g_sync_all_tty_factory);
+  }
+
+  AdbxStatus rc = cred_manager_execute(&req, g_sync_all_tty_config_input, &err);
+  int ok = (rc == OK && err == NULL);
+  if (ok && g_sync_all_tty_min_connect_calls >= 0) {
+    ok = (fake_backend_connect_calls() >= g_sync_all_tty_min_connect_calls);
+  }
+
+  db_backend_set_test_factory(NULL);
+  free(err);
+  return ok ? CHILD_OK : CHILD_ERR;
+}
+
+/* Executes one PTY-backed sync-all run using 'parent_fn' as the scripted user
+ * interaction. It borrows 'config_input' and 'parent_fn'.
+ * Side effects: updates PTY-test globals, forks, and runs one sync-all
+ * command.
+ */
+static void run_sync_all_tty(const char *config_input, DbBackendFactory factory,
+                             int min_connect_calls, TtyParentFn parent_fn) {
+  g_sync_all_tty_config_input = config_input;
+  g_sync_all_tty_factory = factory;
+  g_sync_all_tty_min_connect_calls = min_connect_calls;
+  test_tty(tty_child_sync_all_ok, parent_fn);
+  g_sync_all_tty_config_input = NULL;
+  g_sync_all_tty_factory = NULL;
+  g_sync_all_tty_min_connect_calls = -1;
+}
+
+static void tty_parent_sync_all_simple_save(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+  tty_enter_password(master_fd, "OtherPg", "OtherPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_all_retry_password(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "wrong");
+  ASSERT_TRUE(tty_write_str(master_fd, "r\n") == OK);
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_all_test_success(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "t\n") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "KeepPg") == OK);
+  tty_expect_action_prompt(master_fd);
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_all_test_fail_then_retry(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "wrong");
+  ASSERT_TRUE(tty_write_str(master_fd, "t\n") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "fake auth failed") == OK);
+  tty_expect_action_prompt(master_fd);
+  ASSERT_TRUE(tty_write_str(master_fd, "r\n") == OK);
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_all_test_fail_then_save(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "wrong");
+  ASSERT_TRUE(tty_write_str(master_fd, "t\n") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "fake auth failed") == OK);
+  tty_expect_action_prompt(master_fd);
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_all_only_changed_prompts(int master_fd) {
+  tty_enter_password(master_fd, "OtherPg", "new-other");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+/* Verifies sync-all can bootstrap an empty namespace by prompting for both
+ * configured connections and persisting both secrets plus the current state
+ * snapshot.
+ */
+static void test_sync_all_tty_missing_state_simple_save(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  run_sync_all_tty(ctx.config_path, NULL, -1, tty_parent_sync_all_simple_save);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  assert_secret_value(NS_A, "OtherPg", "OtherPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_TWO_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies the retry path discards the earlier typed password and stores only
+ * the final retried secret.
+ */
+static void test_sync_all_tty_retry_replaces_typed_secret(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_all_tty(ctx.config_path, NULL, -1,
+                   tty_parent_sync_all_retry_password);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies advisory connectivity testing can succeed before saving a password,
+ * and that the fake backend was actually exercised.
+ */
+static void test_sync_all_tty_connectivity_success(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_all_tty(ctx.config_path, fake_backend_create, 1,
+                   tty_parent_sync_all_test_success);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies a failed advisory connectivity test can be followed by password
+ * retry, after which only the retried secret is stored.
+ */
+static void test_sync_all_tty_connectivity_fail_then_retry(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_all_tty(ctx.config_path, fake_backend_create, 1,
+                   tty_parent_sync_all_test_fail_then_retry);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies a failed advisory connectivity test does not block saving when the
+ * user explicitly continues with the typed password.
+ */
+static void test_sync_all_tty_connectivity_fail_then_save_anyway(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_all_tty(ctx.config_path, fake_backend_create, 1,
+                   tty_parent_sync_all_test_fail_then_save);
+
+  assert_secret_value(NS_A, "KeepPg", "wrong");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies sync-all prompts only for the changed-by-name profile when another
+ * profile is already unchanged and synchronized.
+ */
+static void test_sync_all_tty_only_changed_profile_prompts(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB_ALT, JSON_TWO_DB);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret(NS_A, "OtherPg", "old-other");
+  run_sync_all_tty(ctx.config_path, NULL, -1,
+                   tty_parent_sync_all_only_changed_prompts);
+
+  assert_secret_value(NS_A, "KeepPg", "keep-secret");
+  assert_secret_value(NS_A, "OtherPg", "new-other");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_TWO_DB_ALT);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* ----------------------------- TTY SYNC ONE ------------------------------ */
+
+/* Runs targeted sync in the PTY child and succeeds only when the command
+ * returns OK with no heap-allocated error string. When configured, it also
+ * installs the shared fake backend and requires at least
+ * 'g_sync_one_tty_min_connect_calls' connectivity attempts.
+ * Returns CHILD_OK on the expected outcome, CHILD_ERR otherwise.
+ */
+static int tty_child_sync_one_ok(void) {
+  CredManagerReq req = {
+      .cmd = CRED_MAN_SYNC,
+      .connection_name = g_sync_one_tty_connection_name,
+  };
+  char *err = NULL;
+  if (g_sync_one_tty_factory) {
+    fake_backend_reset_counters();
+    db_backend_set_test_factory(g_sync_one_tty_factory);
+  }
+
+  AdbxStatus rc = cred_manager_execute(&req, g_sync_one_tty_config_input, &err);
+  int ok = (rc == OK && err == NULL);
+  if (ok && g_sync_one_tty_min_connect_calls >= 0) {
+    ok = (fake_backend_connect_calls() >= g_sync_one_tty_min_connect_calls);
+  }
+
+  db_backend_set_test_factory(NULL);
+  free(err);
+  return ok ? CHILD_OK : CHILD_ERR;
+}
+
+/* Executes one PTY-backed sync-one run using 'parent_fn' as the scripted user
+ * interaction. It borrows all inputs.
+ */
+static void run_sync_one_tty(const char *config_input,
+                             const char *connection_name,
+                             DbBackendFactory factory, int min_connect_calls,
+                             TtyParentFn parent_fn) {
+  g_sync_one_tty_config_input = config_input;
+  g_sync_one_tty_connection_name = connection_name;
+  g_sync_one_tty_factory = factory;
+  g_sync_one_tty_min_connect_calls = min_connect_calls;
+  test_tty(tty_child_sync_one_ok, parent_fn);
+  g_sync_one_tty_config_input = NULL;
+  g_sync_one_tty_connection_name = NULL;
+  g_sync_one_tty_factory = NULL;
+  g_sync_one_tty_min_connect_calls = -1;
+}
+
+static void tty_parent_sync_one_simple_save(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_retry_password(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "wrong");
+  ASSERT_TRUE(tty_write_str(master_fd, "r\n") == OK);
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_test_success(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "t\n") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "KeepPg") == OK);
+  tty_expect_action_prompt(master_fd);
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_test_fail_then_retry(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "wrong");
+  ASSERT_TRUE(tty_write_str(master_fd, "t\n") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "fake auth failed") == OK);
+  tty_expect_action_prompt(master_fd);
+  ASSERT_TRUE(tty_write_str(master_fd, "r\n") == OK);
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_test_fail_then_save(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "wrong");
+  ASSERT_TRUE(tty_write_str(master_fd, "t\n") == OK);
+  ASSERT_TRUE(tty_read_until(master_fd, "fake auth failed") == OK);
+  tty_expect_action_prompt(master_fd);
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_only_target_prompts(int master_fd) {
+  tty_enter_password(master_fd, "OtherPg", "new-other");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_missing_secret_prompt(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+/* Verifies targeted sync can bootstrap one missing-state connection without
+ * touching unrelated config entries.
+ */
+static void test_sync_one_tty_missing_state_simple_save(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, NULL);
+
+  run_sync_one_tty(ctx.config_path, "KeepPg", NULL, -1,
+                   tty_parent_sync_one_simple_save);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  assert_secret_missing(NS_A, "OtherPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  const char *names[] = {"KeepPg"};
+  assert_state_names(ctx.state_path, NS_A, names, ARRLEN(names));
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies the retry path in targeted sync discards the earlier typed secret
+ * and stores only the retried value.
+ */
+static void test_sync_one_tty_retry_replaces_typed_secret(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_one_tty(ctx.config_path, "KeepPg", NULL, -1,
+                   tty_parent_sync_one_retry_password);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies advisory connectivity testing can succeed before targeted sync
+ * persists the password, and that the fake backend is exercised.
+ */
+static void test_sync_one_tty_connectivity_success(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_one_tty(ctx.config_path, "KeepPg", fake_backend_create, 1,
+                   tty_parent_sync_one_test_success);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies a failed advisory connectivity test can be followed by password
+ * retry during targeted sync, after which only the retried secret is stored.
+ */
+static void test_sync_one_tty_connectivity_fail_then_retry(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_one_tty(ctx.config_path, "KeepPg", fake_backend_create, 1,
+                   tty_parent_sync_one_test_fail_then_retry);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies a failed advisory connectivity test does not block targeted sync
+ * when the user explicitly continues with the typed password.
+ */
+static void test_sync_one_tty_connectivity_fail_then_save_anyway(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_one_tty(ctx.config_path, "KeepPg", fake_backend_create, 1,
+                   tty_parent_sync_one_test_fail_then_save);
+
+  assert_secret_value(NS_A, "KeepPg", "wrong");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies targeted sync prompts only for the selected changed profile and
+ * leaves unrelated synchronized secrets untouched.
+ */
+static void test_sync_one_tty_only_target_profile_prompts(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB_ALT, JSON_TWO_DB);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret(NS_A, "OtherPg", "old-other");
+  run_sync_one_tty(ctx.config_path, "OtherPg", NULL, -1,
+                   tty_parent_sync_one_only_target_prompts);
+
+  assert_secret_value(NS_A, "KeepPg", "keep-secret");
+  assert_secret_value(NS_A, "OtherPg", "new-other");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_TWO_DB_ALT);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies targeted sync re-prompts for an unchanged profile when the secret is
+ * missing, without altering unrelated synchronized entries.
+ */
+static void test_sync_one_tty_unchanged_but_secret_missing_prompts(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_TWO_DB, JSON_TWO_DB);
+
+  seed_secret(NS_A, "OtherPg", "other-secret");
+  run_sync_one_tty(ctx.config_path, "KeepPg", NULL, -1,
+                   tty_parent_sync_one_missing_secret_prompt);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  assert_secret_value(NS_A, "OtherPg", "other-secret");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_TWO_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
 int main(void) {
   test_sync_missing_state_all_secrets_present();
   test_sync_unchanged_state_and_config();
@@ -1348,6 +2132,24 @@ int main(void) {
   test_reset_namespace_ignores_config_input();
   test_reset_namespace_secret_store_failure_propagates();
   test_reset_namespace_state_unlink_failure_reports_err();
+  test_reset_all_requires_tty_and_is_noop();
+
+  // TTY tests
+  test_reset_all_tty_confirm_wipes_secrets_and_state();
+  test_reset_all_tty_invalid_confirmation_is_noop();
+  test_sync_all_tty_missing_state_simple_save();
+  test_sync_all_tty_retry_replaces_typed_secret();
+  test_sync_all_tty_connectivity_success();
+  test_sync_all_tty_connectivity_fail_then_retry();
+  test_sync_all_tty_connectivity_fail_then_save_anyway();
+  test_sync_all_tty_only_changed_profile_prompts();
+  test_sync_one_tty_missing_state_simple_save();
+  test_sync_one_tty_retry_replaces_typed_secret();
+  test_sync_one_tty_connectivity_success();
+  test_sync_one_tty_connectivity_fail_then_retry();
+  test_sync_one_tty_connectivity_fail_then_save_anyway();
+  test_sync_one_tty_only_target_profile_prompts();
+  test_sync_one_tty_unchanged_but_secret_missing_prompts();
   fprintf(stderr, "test_cred_manager: OK\n");
   return 0;
 }

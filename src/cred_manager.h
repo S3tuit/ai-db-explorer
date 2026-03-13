@@ -10,7 +10,6 @@ typedef enum {
 } CredManagerCommand;
 
 typedef enum {
-  CRED_MAN_RESET_SCOPE_NONE = 0,
   CRED_MAN_RESET_SCOPE_ALL,
   CRED_MAN_RESET_SCOPE_NAMESPACE,
 } CredManagerResetScope;
