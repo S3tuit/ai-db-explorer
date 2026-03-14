@@ -91,6 +91,30 @@ static AdbxStatus credm_set_store_err(char **out_err, SecretStore *store,
   return ERR;
 }
 
+/* Opens the configured secret store and wraps backend-selection errors into one
+ * user-facing message. It writes one caller-owned store into '*out_store'.
+ */
+static AdbxStatus credm_open_secret_store(SecretStore **out_store,
+                                          char **out_err) {
+  if (!out_store)
+    return ERR;
+
+  *out_store = NULL;
+  char *ss_err = NULL;
+  SecretStore *store = secret_store_create(&ss_err);
+  if (!store) {
+    credm_set_err(out_err,
+                  "failed to initialize the configured secret store: %s",
+                  ss_err ? ss_err : "unknown error");
+    free(ss_err);
+    return ERR;
+  }
+
+  free(ss_err);
+  *out_store = store;
+  return OK;
+}
+
 /* Returns YES when two nullable strings are equal, else NO.
  * It borrows both inputs and performs no allocations.
  * Error semantics: returns YES on equality, NO otherwise.
@@ -1508,9 +1532,7 @@ static AdbxStatus credm_execute_sync_all(const char *config_input, ConfDir *app,
     goto cleanup;
   }
 
-  store = secret_store_create();
-  if (!store) {
-    credm_set_err(out_err, "failed to initialize the configured secret store.");
+  if (credm_open_secret_store(&store, out_err) != OK) {
     goto cleanup;
   }
 
@@ -1597,9 +1619,7 @@ static AdbxStatus credm_execute_sync_one(const char *config_input,
     goto cleanup;
   }
 
-  store = secret_store_create();
-  if (!store) {
-    credm_set_err(out_err, "failed to initialize the configured secret store.");
+  if (credm_open_secret_store(&store, out_err) != OK) {
     goto cleanup;
   }
 
@@ -1683,9 +1703,7 @@ static AdbxStatus credm_execute_test(const char *config_input,
   }
 
   // create the secret store
-  store = secret_store_create();
-  if (!store) {
-    credm_set_err(out_err, "failed to initialize the configured secret store.");
+  if (credm_open_secret_store(&store, out_err) != OK) {
     goto cleanup;
   }
 
@@ -1887,9 +1905,8 @@ static AdbxStatus credm_execute_reset_namespace(const char *cred_namespace,
     return ERR;
   }
 
-  SecretStore *store = secret_store_create();
-  if (!store) {
-    credm_set_err(out_err, "failed to initialize the configured secret store.");
+  SecretStore *store = NULL;
+  if (credm_open_secret_store(&store, out_err) != OK) {
     return ERR;
   }
 
@@ -1996,9 +2013,8 @@ static AdbxStatus credm_execute_reset_all(ConfDir *app, char **out_err) {
   }
 
   // create the secret store and wipe everything.
-  SecretStore *store = secret_store_create();
-  if (!store) {
-    credm_set_err(out_err, "failed to initialize the configured secret store.");
+  SecretStore *store = NULL;
+  if (credm_open_secret_store(&store, out_err) != OK) {
     return ERR;
   }
 

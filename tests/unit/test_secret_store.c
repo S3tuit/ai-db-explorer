@@ -14,12 +14,33 @@
   (&(SecretRefInfo){.cred_namespace = TEST_NAMESPACE,                          \
                     .connection_name = (name)})
 
-static char *cred_path_for_tmp(const char *tmp);
+/* Returns one newly allocated credential file path under temp base. It borrows
+ * 'tmp' and returns ownership to caller. Returns NULL on invalid input.
+ */
+static char *cred_path_for_tmp(const char *tmp) {
+  if (!tmp)
+    return NULL;
+  size_t n = strlen(tmp) + strlen("/adbxplorer/credentials.json") + 1;
+  char *p = xmalloc(n);
+  snprintf(p, n, "%s/adbxplorer/credentials.json", tmp);
+  return p;
+}
+
+/* Returns one newly allocated backend-choice file path under temp base. It
+ * borrows 'tmp' and returns ownership to caller. Return NULL on invalid input.
+ */
+static char *backend_cfg_path_for_tmp(const char *tmp) {
+  if (!tmp)
+    return NULL;
+  size_t n = strlen(tmp) + strlen("/adbxplorer/secret_store_backend") + 1;
+  char *p = xmalloc(n);
+  snprintf(p, n, "%s/adbxplorer/secret_store_backend", tmp);
+  return p;
+}
 
 /* Builds a credentials file JSON payload with one entry.
  * It borrows input strings and returns caller-owned JSON text.
- * Side effects: allocates memory.
- * Error semantics: returns NULL on invalid input.
+ * Returns NULL on invalid input.
  */
 static char *build_single_entry_json(const char *cred_namespace,
                                      const char *connection_name,
@@ -38,8 +59,6 @@ static char *build_single_entry_json(const char *cred_namespace,
 
 /* Restores one environment variable to previous value.
  * It borrows all inputs and does not allocate.
- * Side effects: updates process environment.
- * Error semantics: test helper (asserts on set/unset failures).
  */
 static void restore_one_env_value(const char *name, const char *old_val,
                                   int had_old) {
@@ -54,8 +73,6 @@ static void restore_one_env_value(const char *name, const char *old_val,
 
 /* Removes one test directory tree created by make_tmp_dir.
  * It borrows 'tmp' and performs best-effort cleanup.
- * Side effects: unlinks files and removes directories.
- * Error semantics: test helper (ignores cleanup errors).
  */
 static void cleanup_tmp_tree(const char *tmp) {
   if (!tmp)
@@ -64,26 +81,16 @@ static void cleanup_tmp_tree(const char *tmp) {
   char *app = xmalloc(app_n);
   snprintf(app, app_n, "%s/adbxplorer", tmp);
   char *cred = cred_path_for_tmp(tmp);
+  char *backend_cfg = backend_cfg_path_for_tmp(tmp);
   if (cred)
     (void)unlink(cred);
+  if (backend_cfg)
+    (void)unlink(backend_cfg);
   free(cred);
+  free(backend_cfg);
   (void)rmdir(app);
   free(app);
   (void)rmdir(tmp);
-}
-
-/* Returns one newly allocated credential file path under temp base.
- * It borrows 'tmp' and returns ownership to caller.
- * Side effects: allocates memory.
- * Error semantics: returns NULL on allocation failure.
- */
-static char *cred_path_for_tmp(const char *tmp) {
-  if (!tmp)
-    return NULL;
-  size_t n = strlen(tmp) + strlen("/adbxplorer/credentials.json") + 1;
-  char *p = xmalloc(n);
-  snprintf(p, n, "%s/adbxplorer/credentials.json", tmp);
-  return p;
 }
 
 /* Covers file backend CRUD and tri-state get behavior.
@@ -96,7 +103,8 @@ static void test_file_backend_roundtrip(void) {
   old_xdg = old_xdg ? dup_or_null(old_xdg) : NULL;
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
 
-  SecretStore *ss = secret_store_file_backend_create();
+  SecretStore *ss;
+  secret_store_file_backend_probe(&ss);
   ASSERT_TRUE(ss != NULL);
 
   StrBuf out;
@@ -147,7 +155,8 @@ static void test_file_backend_rejects_bad_mode(void) {
   old_xdg = old_xdg ? dup_or_null(old_xdg) : NULL;
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
 
-  SecretStore *ss = secret_store_file_backend_create();
+  SecretStore *ss;
+  secret_store_file_backend_probe(&ss);
   ASSERT_TRUE(ss != NULL);
 
   ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-1") == OK);
@@ -168,8 +177,8 @@ static void test_file_backend_rejects_bad_mode(void) {
   free(tmp);
 }
 
-/* Verifies public factory still yields a usable backend in default build.
- * The test exercises one set/get pair via secret_store_create.
+/* Verifies public factory selects one backend, persists the choice, and can
+ * reopen the persisted choice on later calls.
  */
 static void test_secret_store_factory_usable(void) {
   char *tmp = make_tmp_dir();
@@ -178,8 +187,10 @@ static void test_secret_store_factory_usable(void) {
   old_xdg = old_xdg ? dup_or_null(old_xdg) : NULL;
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
 
-  SecretStore *ss = secret_store_create();
+  char *err = NULL;
+  SecretStore *ss = secret_store_create(&err);
   ASSERT_TRUE(ss != NULL);
+  ASSERT_TRUE(err == NULL);
   ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-xyz") == OK);
 
   StrBuf out;
@@ -187,8 +198,78 @@ static void test_secret_store_factory_usable(void) {
   ASSERT_TRUE(secret_store_get(ss, TEST_REF("MyPostgres"), &out) == YES);
   ASSERT_STREQ(out.data, "pw-xyz");
 
+  char *backend_cfg = backend_cfg_path_for_tmp(tmp);
+  ASSERT_TRUE(backend_cfg != NULL);
+  StrBuf cfg_out;
+  sb_init(&cfg_out);
+  ASSERT_TRUE(fileio_sb_read_limit(backend_cfg, 32, &cfg_out) == OK);
+  char *cfg_txt = sb_to_cstr(&cfg_out);
+  ASSERT_TRUE(cfg_txt != NULL);
+  ASSERT_TRUE(strcmp(cfg_txt, "file\n") == 0 ||
+              strcmp(cfg_txt, "keychain\n") == 0 ||
+              strcmp(cfg_txt, "libsecret\n") == 0);
+
   sb_zero_clean(&out);
   secret_store_destroy(ss);
+
+  SecretStore *ss2 = secret_store_create(&err);
+  ASSERT_TRUE(ss2 != NULL);
+  ASSERT_TRUE(err == NULL);
+  ASSERT_TRUE(secret_store_get(ss2, TEST_REF("MyPostgres"), &out) == YES);
+
+  // secret store file should not change once persisted
+  StrBuf cfg_out2;
+  sb_init(&cfg_out2);
+  ASSERT_TRUE(fileio_sb_read_limit(backend_cfg, 32, &cfg_out2) == OK);
+  char *cfg_txt2 = sb_to_cstr(&cfg_out2);
+  ASSERT_TRUE(strcmp(cfg_txt, cfg_txt2) == 0);
+
+  sb_reset(&cfg_out);
+  ASSERT_TRUE(fileio_sb_read_limit(backend_cfg, 32, &cfg_out) == OK);
+  ASSERT_STREQ(out.data, "pw-xyz");
+  sb_zero_clean(&out);
+  secret_store_destroy(ss2);
+
+  sb_zero_clean(&cfg_out);
+  sb_zero_clean(&cfg_out2);
+  free(backend_cfg);
+  free(err);
+  restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
+  free(old_xdg);
+  cleanup_tmp_tree(tmp);
+  free(tmp);
+}
+
+/* Verifies malformed persisted backend choice fails closed instead of silently
+ * reprobeing a different backend.
+ */
+static void test_secret_store_factory_rejects_malformed_backend_choice(void) {
+  char *tmp = make_tmp_dir();
+  char *old_xdg = getenv("XDG_CONFIG_HOME");
+  int had_xdg = (old_xdg != NULL);
+  old_xdg = old_xdg ? dup_or_null(old_xdg) : NULL;
+  ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
+
+  size_t app_n = strlen(tmp) + strlen("/adbxplorer") + 1;
+  char *app = xmalloc(app_n);
+  snprintf(app, app_n, "%s/adbxplorer", tmp);
+  ASSERT_TRUE(mkdir(app, 0700) == 0);
+
+  char *backend_cfg = backend_cfg_path_for_tmp(tmp);
+  ASSERT_TRUE(backend_cfg != NULL);
+  const char bad_cfg[] = "nonsense\n";
+  ASSERT_TRUE(fileio_write_exact(backend_cfg, (const uint8_t *)bad_cfg,
+                                 sizeof(bad_cfg) - 1, 0600) == OK);
+
+  char *err = NULL;
+  SecretStore *ss = secret_store_create(&err);
+  ASSERT_TRUE(ss == NULL);
+  ASSERT_TRUE(err != NULL);
+  ASSERT_TRUE(strstr(err, "malformed") != NULL);
+
+  free(err);
+  free(backend_cfg);
+  free(app);
   restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
   cleanup_tmp_tree(tmp);
@@ -205,7 +286,8 @@ static void test_file_backend_refreshes_on_disk_change(void) {
   old_xdg = old_xdg ? dup_or_null(old_xdg) : NULL;
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
 
-  SecretStore *ss = secret_store_file_backend_create();
+  SecretStore *ss;
+  secret_store_file_backend_probe(&ss);
   ASSERT_TRUE(ss != NULL);
 
   ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-1") == OK);
@@ -245,7 +327,8 @@ static void test_file_backend_duplicate_ref_is_err(void) {
   old_xdg = old_xdg ? dup_or_null(old_xdg) : NULL;
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmp, 1) == 0);
 
-  SecretStore *ss = secret_store_file_backend_create();
+  SecretStore *ss;
+  secret_store_file_backend_probe(&ss);
   ASSERT_TRUE(ss != NULL);
 
   const char *dup_json =
@@ -291,19 +374,18 @@ static void test_backend_probe_contract(void) {
   secret_store_destroy(store);
   store = NULL;
 
-#if defined(__APPLE__)
-  ASSERT_TRUE(secret_store_keychain_backend_probe(&store) == ERR);
-#else
   ASSERT_TRUE(secret_store_keychain_backend_probe(&store) == NO);
-#endif
   ASSERT_TRUE(store == NULL);
 
-#if defined(HAVE_LIBSECRET)
-  ASSERT_TRUE(secret_store_libsecret_backend_probe(&store) == ERR);
-#else
-  ASSERT_TRUE(secret_store_libsecret_backend_probe(&store) == NO);
-#endif
-  ASSERT_TRUE(store == NULL);
+  AdbxTriStatus ls_rc = secret_store_libsecret_backend_probe(&store);
+  // Valid outcomes: YES (service reachable), NO (library missing), ERR (broken)
+  if (ls_rc == YES) {
+    ASSERT_TRUE(store != NULL);
+    secret_store_destroy(store);
+    store = NULL;
+  } else {
+    ASSERT_TRUE(store == NULL);
+  }
 
   restore_one_env_value("XDG_CONFIG_HOME", old_xdg, had_xdg);
   free(old_xdg);
@@ -315,8 +397,10 @@ int main(void) {
   test_file_backend_roundtrip();
   test_file_backend_rejects_bad_mode();
   test_secret_store_factory_usable();
+  test_secret_store_factory_rejects_malformed_backend_choice();
   test_file_backend_refreshes_on_disk_change();
   test_file_backend_duplicate_ref_is_err();
+
   test_backend_probe_contract();
   fprintf(stderr, "OK: test_secret_store\n");
   return 0;

@@ -69,13 +69,13 @@ struct SecretStore {
   const SecretStoreVTable *vt;
 };
 
-// Create a SecretStore instance.
-// If DUMMY_SECRET_STORE_WARNING is defined, it uses a hard-coded dummy store
-// and emits a warning on creation.
-// Ownership: caller owns the returned store and must destroy it.
-// Side effects: none.
-// Error semantics: returns NULL when no backend can be initialized safely.
-SecretStore *secret_store_create(void);
+/* Creates one SecretStore instance using the backend selected for this machine.
+ * On success, caller owns the returned store and must destroy it.
+ * Returns NULL when no backend can be initialized safely; if 'out_err' is not
+ * NULL, it may receive one heap-allocated diagnostic string that caller must
+ * free.
+ */
+SecretStore *secret_store_create(char **out_err);
 
 /* -------------------------------- HELPERS -------------------------------- */
 
@@ -110,12 +110,6 @@ SecretStoreErrCode secret_store_last_error_code(SecretStore *store);
 
 /* ---------------------------- SUPPORTED STORES --------------------------- */
 
-/* Creates the file-backed SecretStore implementation.
- * Ownership: returned SecretStore owned by caller and must be destroyed.
- * Side effects: may touch filesystem paths and files used by the backend.
- * Error semantics: returns NULL on failure.
- */
-SecretStore *secret_store_file_backend_create(void);
 /* Probes and creates the file-backed SecretStore.
  * Ownership: on YES, caller owns *out_store and must destroy it.
  * Side effects: may touch filesystem paths and files used by the backend.
@@ -124,12 +118,6 @@ SecretStore *secret_store_file_backend_create(void);
  */
 AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store);
 
-/* Creates the macOS Keychain-backed SecretStore implementation.
- * Ownership: returned SecretStore owned by caller and must be destroyed.
- * Side effects: may probe OS Keychain services.
- * Error semantics: returns NULL on failure.
- */
-SecretStore *secret_store_keychain_backend_create(void);
 /* Probes and creates the macOS Keychain-backed SecretStore.
  * Ownership: on YES, caller owns *out_store and must destroy it.
  * Side effects: may probe OS Keychain services.
@@ -138,12 +126,6 @@ SecretStore *secret_store_keychain_backend_create(void);
  */
 AdbxTriStatus secret_store_keychain_backend_probe(SecretStore **out_store);
 
-/* Creates the libsecret-backed SecretStore implementation.
- * Ownership: returned SecretStore owned by caller and must be destroyed.
- * Side effects: may probe D-Bus Secret Service endpoints.
- * Error semantics: returns NULL on failure.
- */
-SecretStore *secret_store_libsecret_backend_create(void);
 /* Probes and creates the libsecret-backed SecretStore.
  * Ownership: on YES, caller owns *out_store and must destroy it.
  * Side effects: may probe D-Bus Secret Service endpoints.

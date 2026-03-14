@@ -1344,7 +1344,7 @@ static const SecretStoreVTable SECRET_STORE_FILE_VT = {
     .last_error_code = secret_store_file_last_error_code,
 };
 
-SecretStore *secret_store_file_backend_create(void) {
+static SecretStore *secret_store_file_backend_create(void) {
   FileSecretStore *store = (FileSecretStore *)xmalloc(sizeof(*store));
   store->base.vt = &SECRET_STORE_FILE_VT;
   store->dir_fd = -1;

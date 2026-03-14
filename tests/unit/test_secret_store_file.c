@@ -306,7 +306,7 @@ static void ctx_open_xdg(FileStoreCtx *ctx) {
   ctx->cred_path = default_cred_path(ctx->tmp);
   ASSERT_TRUE(ctx->cred_path != NULL);
 
-  ctx->ss = secret_store_file_backend_create();
+  secret_store_file_backend_probe(&ctx->ss);
   ASSERT_TRUE(ctx->ss != NULL);
 }
 
@@ -340,7 +340,7 @@ static void test_missing_file_set_creates_nonempty(void) {
   // deletes the secret store while keeping the context
   secret_store_destroy(ctx.ss);
   ctx.ss = NULL;
-  ctx.ss = secret_store_file_backend_create();
+  secret_store_file_backend_probe(&ctx.ss);
   ASSERT_TRUE(ctx.ss != NULL);
 
   StrBuf out;
@@ -421,7 +421,7 @@ static void test_missing_file_wipe_all_is_noop_and_later_set_get_works(void) {
   // deletes the secret store while keeping the context
   secret_store_destroy(ctx.ss);
   ctx.ss = NULL;
-  ctx.ss = secret_store_file_backend_create();
+  secret_store_file_backend_probe(&ctx.ss);
   ASSERT_TRUE(ctx.ss != NULL);
 
   StrBuf out;
@@ -439,8 +439,8 @@ static void test_missing_file_wipe_all_is_noop_and_later_set_get_works(void) {
 /* Verifies missing file + wipe_namespace is a successful no-op and later
  * namespace-scoped set/get still work.
  */
-static void test_missing_file_wipe_namespace_is_noop_and_later_set_get_works(
-    void) {
+static void
+test_missing_file_wipe_namespace_is_noop_and_later_set_get_works(void) {
   FileStoreCtx ctx;
   ctx_open_xdg(&ctx);
 
@@ -451,7 +451,7 @@ static void test_missing_file_wipe_namespace_is_noop_and_later_set_get_works(
 
   secret_store_destroy(ctx.ss);
   ctx.ss = NULL;
-  ctx.ss = secret_store_file_backend_create();
+  secret_store_file_backend_probe(&ctx.ss);
   ASSERT_TRUE(ctx.ss != NULL);
 
   StrBuf out;
@@ -491,7 +491,7 @@ static void test_wipe_namespace_removes_only_target_namespace(void) {
 
   secret_store_destroy(ctx.ss);
   ctx.ss = NULL;
-  ctx.ss = secret_store_file_backend_create();
+  secret_store_file_backend_probe(&ctx.ss);
   ASSERT_TRUE(ctx.ss != NULL);
 
   StrBuf out;
@@ -522,7 +522,7 @@ static void test_wipe_namespace_missing_namespace_is_noop(void) {
 
   secret_store_destroy(ctx.ss);
   ctx.ss = NULL;
-  ctx.ss = secret_store_file_backend_create();
+  secret_store_file_backend_probe(&ctx.ss);
   ASSERT_TRUE(ctx.ss != NULL);
 
   StrBuf out;
@@ -722,7 +722,8 @@ static void test_xdg_absolute_path_used_directly(void) {
   free(home_base);
 #endif
 
-  SecretStore *ss = secret_store_file_backend_create();
+  SecretStore *ss;
+  secret_store_file_backend_probe(&ss);
   ASSERT_TRUE(ss != NULL);
 
 #ifdef __linux__
@@ -769,7 +770,8 @@ static void test_home_fallback_path_used(void) {
   ensure_dir_tree(home_base);
   free(home_base);
 
-  SecretStore *ss = secret_store_file_backend_create();
+  SecretStore *ss;
+  secret_store_file_backend_probe(&ss);
   ASSERT_TRUE(ss != NULL);
   ASSERT_TRUE(secret_store_set(ss, TEST_REF("MyPostgres"), "pw-home") == OK);
 
@@ -796,7 +798,8 @@ static void test_invalid_env_create_and_probe_fail(void) {
   ASSERT_TRUE(setenv("XDG_CONFIG_HOME", "relative/path", 1) == 0);
   ASSERT_TRUE(unsetenv("HOME") == 0);
 
-  SecretStore *ss = secret_store_file_backend_create();
+  SecretStore *ss;
+  secret_store_file_backend_probe(&ss);
   ASSERT_TRUE(ss == NULL);
 
   SecretStore *out = NULL;

@@ -335,7 +335,7 @@ static void seed_secret(const char *cred_namespace, const char *connection_name,
   ASSERT_TRUE(connection_name != NULL);
   ASSERT_TRUE(secret != NULL);
 
-  SecretStore *store = secret_store_create();
+  SecretStore *store = secret_store_create(NULL);
   ASSERT_TRUE(store != NULL);
   ASSERT_TRUE(
       secret_store_set(store,
@@ -352,7 +352,7 @@ static void assert_secret_value(const char *cred_namespace,
   ASSERT_TRUE(connection_name != NULL);
   ASSERT_TRUE(expected_secret != NULL);
 
-  SecretStore *store = secret_store_create();
+  SecretStore *store = secret_store_create(NULL);
   ASSERT_TRUE(store != NULL);
 
   StrBuf out;
@@ -372,7 +372,7 @@ static void assert_secret_missing(const char *cred_namespace,
   ASSERT_TRUE(cred_namespace != NULL);
   ASSERT_TRUE(connection_name != NULL);
 
-  SecretStore *store = secret_store_create();
+  SecretStore *store = secret_store_create(NULL);
   ASSERT_TRUE(store != NULL);
 
   StrBuf out;
