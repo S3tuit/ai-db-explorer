@@ -526,12 +526,6 @@ AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref) {
   return store->vt->delete(store, ref);
 }
 
-AdbxStatus secret_store_list_refs(SecretStore *store, SecretRefList *out) {
-  if (!store || !store->vt || !store->vt->list_refs)
-    return ERR;
-  return store->vt->list_refs(store, out);
-}
-
 AdbxStatus secret_store_wipe_namespace(SecretStore *store,
                                        const char *cred_namespace) {
   if (!store || !store->vt || !store->vt->wipe_namespace)
@@ -543,24 +537,6 @@ AdbxStatus secret_store_wipe_all(SecretStore *store) {
   if (!store || !store->vt || !store->vt->wipe_all)
     return ERR;
   return store->vt->wipe_all(store);
-}
-
-void secret_ref_list_clean(SecretRefList *list) {
-  if (!list)
-    return;
-
-  if (list->items) {
-    for (size_t i = 0; i < list->n_items; i++) {
-      free((char *)list->items[i].cred_namespace);
-      free((char *)list->items[i].connection_name);
-      list->items[i].cred_namespace = NULL;
-      list->items[i].connection_name = NULL;
-    }
-    free(list->items);
-  }
-
-  list->items = NULL;
-  list->n_items = 0;
 }
 
 const char *secret_store_last_error(SecretStore *store) {

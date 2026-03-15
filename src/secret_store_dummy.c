@@ -83,25 +83,14 @@ static AdbxStatus secret_store_dummy_delete(SecretStore *store,
   return ERR;
 }
 
-/* Dummy list-refs is intentionally unsupported.
- * Ownership: borrows inputs.
- * Side effects: none.
- * Error semantics: always ERR.
- */
-static AdbxStatus secret_store_dummy_list_refs(SecretStore *store,
-                                               SecretRefList *out) {
-  (void)store;
-  (void)out;
-  return ERR;
-}
-
 /* Dummy namespace wipe is intentionally unsupported.
  * Ownership: borrows inputs.
  * Side effects: none.
  * Error semantics: always ERR.
  */
-static AdbxStatus secret_store_dummy_wipe_namespace(SecretStore *store,
-                                                    const char *cred_namespace) {
+static AdbxStatus
+secret_store_dummy_wipe_namespace(SecretStore *store,
+                                  const char *cred_namespace) {
   (void)store;
   (void)cred_namespace;
   return ERR;
@@ -138,7 +127,8 @@ static const char *secret_store_dummy_last_error(SecretStore *store) {
  * Side effects: none.
  * Error semantics: returns SSERR_NONE because this backend is test-only.
  */
-static SecretStoreErrCode secret_store_dummy_last_error_code(SecretStore *store) {
+static SecretStoreErrCode
+secret_store_dummy_last_error_code(SecretStore *store) {
   (void)store;
   return SSERR_NONE;
 }
@@ -147,7 +137,6 @@ static const SecretStoreVTable SECRET_STORE_DUMMY_VT = {
     .get = secret_store_dummy_get,
     .set = secret_store_dummy_set,
     .delete = secret_store_dummy_delete,
-    .list_refs = secret_store_dummy_list_refs,
     .wipe_namespace = secret_store_dummy_wipe_namespace,
     .wipe_all = secret_store_dummy_wipe_all,
     .destroy = secret_store_dummy_destroy,

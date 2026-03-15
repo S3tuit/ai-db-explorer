@@ -27,11 +27,6 @@ typedef struct {
   const char *connection_name;
 } SecretRefInfo;
 
-typedef struct {
-  SecretRefInfo *items; // owned array
-  size_t n_items;
-} SecretRefList;
-
 /* SecretStore supports concurrent reads, but mutating operations are not
  * guaranteed to form one multi-process transaction across backends. Current
  * production code relies on a higher-level single-writer discipline: the
@@ -49,8 +44,6 @@ struct SecretStoreVTable {
                     const char *secret);
   // Deletes one stored secret.
   AdbxStatus (*delete)(SecretStore *store, const SecretRefInfo *ref);
-  // Lists all stored references.
-  AdbxStatus (*list_refs)(SecretStore *store, SecretRefList *out);
   // Deletes all stored secrets in one namespace.
   AdbxStatus (*wipe_namespace)(SecretStore *store, const char *cred_namespace);
   // Deletes all stored secrets in this store namespace.
@@ -89,14 +82,10 @@ AdbxStatus secret_store_set(SecretStore *store, const SecretRefInfo *ref,
 
 AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref);
 
-AdbxStatus secret_store_list_refs(SecretStore *store, SecretRefList *out);
-
 AdbxStatus secret_store_wipe_namespace(SecretStore *store,
                                        const char *cred_namespace);
 
 AdbxStatus secret_store_wipe_all(SecretStore *store);
-
-void secret_ref_list_clean(SecretRefList *list);
 
 /* Returns backend-specific last error text.
  * Error semantics: returns empty string when unavailable or no error detail.

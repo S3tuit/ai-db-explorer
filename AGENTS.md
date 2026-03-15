@@ -63,12 +63,12 @@ it is necessary and get confirmation before proceeding.
 
 Every non-trivial function **must** be preceded by a comment that explains:
 
-1. **What** the function does (high-level purpose).
-2. **Ownership**: who allocates and frees memory (omit if no allocation).
-3. **Side effects**: I/O, global state, security-relevant behavior (omit if
-   pure).
-4. **Error semantics**: return conventions (`OK` / `ERR` / `YES` / `NO`) and
-   what each means for this function.
+1. What the function does (high-level purpose).
+2. Who allocates and frees memory (omit if no allocation).
+3. Side effects (if any non obvious) I/O, global state, security-relevant
+   behavior.
+4. Return conventions (`OK` / `ERR` / `YES` / `NO`) and what each means for
+   this function.
 
 Public functions inside .c files should not be preceded by a comment since the
 documentation is already available in the .h file.

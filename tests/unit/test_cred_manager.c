@@ -16,6 +16,7 @@
 
 #include "config_dir.h"
 #include "cred_manager.h"
+#include "db_backend.h"
 #include "file_io.h"
 #include "rapidhash.h"
 #include "secret_store.h"
@@ -271,6 +272,23 @@ static void write_json_file(const char *path, const char *json) {
                                  0600) == OK);
 }
 
+/* Pins the test app dir to the file-backed secret store.
+ * It borrows 'app_dir' and allocates one temporary path string that it frees
+ * before returning.
+ * Writes the backend-selection file used by secret_store_create().
+ * This is security-relevant for tests because it removes host-dependent
+ * backend selection and forces the deterministic file backend.
+ */
+static void write_secret_store_backend_file(const char *app_dir) {
+  ASSERT_TRUE(app_dir != NULL);
+
+  char *path = path_join(app_dir, "secret_store_backend");
+  ASSERT_TRUE(path != NULL);
+  ASSERT_TRUE(fileio_write_exact(path, (const uint8_t *)"file\n",
+                                 strlen("file\n"), 0600) == OK);
+  free(path);
+}
+
 static void sync_test_ctx_init(SyncTestCtx *ctx, const char *cred_namespace,
                                const char *config_json,
                                const char *state_json_or_null) {
@@ -294,6 +312,8 @@ static void sync_test_ctx_init(SyncTestCtx *ctx, const char *cred_namespace,
   ASSERT_TRUE(confdir_default_open(&app, &app_code, &app_err) == OK);
   free(app_err);
 
+  write_secret_store_backend_file(app.path);
+
   ctx->state_name = state_file_name_for_namespace(cred_namespace);
   ctx->state_path = path_join(app.path, ctx->state_name);
   ASSERT_TRUE(ctx->state_path != NULL);
@@ -311,16 +331,20 @@ static void sync_test_ctx_clean(SyncTestCtx *ctx) {
 
   char *cred_path = NULL;
   char *app_dir = NULL;
+  char *backend_path = NULL;
   if (ctx->tmp) {
     app_dir = path_join(ctx->tmp, "adbxplorer");
     cred_path = path_join(app_dir, "credentials.json");
+    backend_path = path_join(app_dir, "secret_store_backend");
   }
   unlink_if_exists(cred_path);
+  unlink_if_exists(backend_path);
   rmdir_if_exists(app_dir);
   rmdir_if_exists(ctx->tmp);
 
   free(cred_path);
   free(app_dir);
+  free(backend_path);
   free(ctx->config_path);
   free(ctx->state_name);
   free(ctx->state_path);

@@ -47,12 +47,6 @@ static AdbxStatus fake_ss_delete(SecretStore *store, const SecretRefInfo *ref) {
   return OK;
 }
 
-static AdbxStatus fake_ss_list_refs(SecretStore *store, SecretRefList *out) {
-  (void)store;
-  (void)out;
-  return OK;
-}
-
 static AdbxStatus fake_ss_wipe_namespace(SecretStore *store,
                                          const char *cred_namespace) {
   (void)store;
@@ -71,7 +65,6 @@ static const SecretStoreVTable FAKE_SS_VT = {
     .get = fake_ss_get,
     .set = fake_ss_set,
     .delete = fake_ss_delete,
-    .list_refs = fake_ss_list_refs,
     .wipe_namespace = fake_ss_wipe_namespace,
     .wipe_all = fake_ss_wipe_all,
     .destroy = fake_ss_destroy,
@@ -246,8 +239,9 @@ done:
  * Side effects: none.
  * Returns OK on success, ERR on invalid input.
  */
-static int make_valid_handshake_req(
-    handshake_req_t *out_req, const uint8_t secret_token[SECRET_TOKEN_LEN]) {
+static int
+make_valid_handshake_req(handshake_req_t *out_req,
+                         const uint8_t secret_token[SECRET_TOKEN_LEN]) {
   if (!out_req || !secret_token)
     return ERR;
   memset(out_req, 0, sizeof(*out_req));
@@ -431,10 +425,10 @@ done:
  * Side effects: performs framed handshake I/O.
  * Error semantics: returns OK on transport/decode success and writes status.
  */
-static int client_handshake_on_fd(
-    int cfd, const uint8_t secret_token[SECRET_TOKEN_LEN],
-    handshake_status *out_status,
-    uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+static int client_handshake_on_fd(int cfd,
+                                  const uint8_t secret_token[SECRET_TOKEN_LEN],
+                                  handshake_status *out_status,
+                                  uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
   if (cfd < 0 || !secret_token || !out_status)
     return ERR;
 
@@ -461,8 +455,8 @@ static int client_handshake_on_fd(
  */
 static int client_resume_handshake_on_fd(
     int cfd, const uint8_t secret_token[SECRET_TOKEN_LEN],
-    const uint8_t resume_token[RESUME_TOKEN_LEN],
-    handshake_status *out_status, uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+    const uint8_t resume_token[RESUME_TOKEN_LEN], handshake_status *out_status,
+    uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
   if (cfd < 0 || !secret_token || !resume_token || !out_status)
     return ERR;
 
@@ -489,9 +483,9 @@ static int client_resume_handshake_on_fd(
  * Side effects: creates socket connection and performs framed handshake I/O.
  * Error semantics: returns fd on HS_OK, -1 on connect/handshake failure.
  */
-static int connect_client_hs_ok(
-    const char *sock_path, const uint8_t secret_token[SECRET_TOKEN_LEN],
-    uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+static int connect_client_hs_ok(const char *sock_path,
+                                const uint8_t secret_token[SECRET_TOKEN_LEN],
+                                uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
   int cfd = connect_client(sock_path);
   if (cfd < 0)
     return -1;
@@ -511,8 +505,7 @@ static int connect_client_hs_ok(
  * Side effects: creates socket and performs framed handshake I/O.
  * Error semantics: returns OK on transport/decode success and writes status.
  */
-static int
-connect_client_resume_status(
+static int connect_client_resume_status(
     const char *sock_path, const uint8_t secret_token[SECRET_TOKEN_LEN],
     const uint8_t resume_token[RESUME_TOKEN_LEN], handshake_status *out_status,
     uint8_t out_new_resume_token[RESUME_TOKEN_LEN]) {
@@ -535,8 +528,9 @@ connect_client_resume_status(
  * Side effects: performs one successful client handshake + disconnect cycle.
  * Error semantics: none (uses ASSERT_TRUE).
  */
-static void assert_broker_accepts_new_client(
-    const char *sock_path, const uint8_t secret_token[SECRET_TOKEN_LEN]) {
+static void
+assert_broker_accepts_new_client(const char *sock_path,
+                                 const uint8_t secret_token[SECRET_TOKEN_LEN]) {
   int probe_fd = connect_client_hs_ok(sock_path, secret_token, NULL);
   ASSERT_TRUE(probe_fd >= 0);
   close(probe_fd);
@@ -770,8 +764,8 @@ static void test_idle_sessions_cap(void) {
 
   /* Oldest token should be evicted once cap is exceeded. */
   handshake_status st = HS_ERR_INTERNAL;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, tokens[0], &st,
-                                           NULL) == OK);
+  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, tokens[0],
+                                           &st, NULL) == OK);
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
 
   /* Most recent token should still be resumable. */
@@ -1085,8 +1079,8 @@ static void test_post_hs_truncated_request_drops_session(void) {
 
   /* Dropped malformed sessions must not remain resumable in idle storage. */
   handshake_status st = HS_OK;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, resume_tok, &st,
-                                           NULL) == OK);
+  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, resume_tok,
+                                           &st, NULL) == OK);
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
   assert_broker_accepts_new_client(pd->sock_path, secret);
   stop_running_broker(b, tid, pd, tmpdir);
@@ -1113,8 +1107,8 @@ static void test_post_hs_oversized_request_drops_session(void) {
 
   close(cfd);
   handshake_status st = HS_OK;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, resume_tok, &st,
-                                           NULL) == OK);
+  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, resume_tok,
+                                           &st, NULL) == OK);
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
   assert_broker_accepts_new_client(pd->sock_path, secret);
   stop_running_broker(b, tid, pd, tmpdir);

@@ -411,41 +411,6 @@ static AdbxStatus ss_list_build_without_namespace(const SecretEntryList *src,
   return OK;
 }
 
-/* Copies cached refs into one heap-owned SecretRefList for callers.
- * It borrows 'src' and writes one owned list into 'out'.
- * Side effects: allocates heap strings and list storage.
- * Error semantics: returns OK on success, ERR on invalid input or allocation
- * failure.
- */
-static AdbxStatus ss_list_copy_refs(const SecretEntryList *src,
-                                    SecretRefList *out) {
-  if (!src || !out)
-    return ERR;
-
-  out->items = NULL;
-  out->n_items = 0;
-  if (src->n_entries == 0)
-    return OK;
-
-  SecretRefInfo *items =
-      (SecretRefInfo *)calloc(src->n_entries, sizeof(*items));
-  if (!items)
-    return ERR;
-
-  out->items = items;
-  out->n_items = src->n_entries;
-  for (size_t i = 0; i < src->n_entries; i++) {
-    items[i].cred_namespace = dup_or_null(src->entries[i].cred_namespace);
-    items[i].connection_name = dup_or_null(src->entries[i].connection_name);
-    if (!items[i].cred_namespace || !items[i].connection_name) {
-      secret_ref_list_clean(out);
-      return ERR;
-    }
-  }
-
-  return OK;
-}
-
 /* Opens the app directory used for file-backed credentials and stores its fd
  * inside 'out_fd'. It borrows 'store' and returns one owned fd to caller.
  * Side effects: may create the default app directory through config_dir and
@@ -1175,44 +1140,6 @@ static AdbxStatus secret_store_file_delete(SecretStore *base,
   return rc;
 }
 
-/* Lists all stored secret references using read-through cache semantics.
- * It borrows 'base' and writes one owned list into 'out'.
- * Side effects: may refresh cache from disk and allocates heap memory for the
- * returned list.
- * Error semantics: returns OK on success, ERR on invalid input, policy, I/O,
- * parse, or allocation failures.
- */
-static AdbxStatus secret_store_file_list_refs(SecretStore *base,
-                                              SecretRefList *out) {
-  if (!base)
-    return ERR;
-
-  FileSecretStore *store = (FileSecretStore *)base;
-  ss_clear_err(store);
-
-  if (!out) {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store list failed: invalid output pointer. This is "
-               "probably a bug, please, report it.");
-    return ERR;
-  }
-
-  out->items = NULL;
-  out->n_items = 0;
-
-  if (ss_refresh_if_changed(store) != OK)
-    return ERR;
-
-  if (ss_list_copy_refs(&store->cache, out) != OK) {
-    ss_set_err(store, SSERR_WRITE,
-               "secret-store list failed: memory allocation error. Please, "
-               "retry.");
-    return ERR;
-  }
-
-  return OK;
-}
-
 /* Deletes all secrets in one namespace and updates cache atomically.
  * It borrows all inputs.
  * Side effects: refreshes cache, writes credential file, and swaps in-memory
@@ -1336,7 +1263,6 @@ static const SecretStoreVTable SECRET_STORE_FILE_VT = {
     .get = secret_store_file_get,
     .set = secret_store_file_set,
     .delete = secret_store_file_delete,
-    .list_refs = secret_store_file_list_refs,
     .wipe_namespace = secret_store_file_wipe_namespace,
     .wipe_all = secret_store_file_wipe_all,
     .destroy = secret_store_file_destroy,

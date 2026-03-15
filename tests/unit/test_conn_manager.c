@@ -48,12 +48,6 @@ static AdbxStatus fake_ss_delete(SecretStore *store, const SecretRefInfo *ref) {
   return OK;
 }
 
-static AdbxStatus fake_ss_list_refs(SecretStore *store, SecretRefList *out) {
-  (void)store;
-  (void)out;
-  return OK;
-}
-
 static AdbxStatus fake_ss_wipe_namespace(SecretStore *store,
                                          const char *cred_namespace) {
   (void)store;
@@ -72,7 +66,6 @@ static const SecretStoreVTable FAKE_SS_VT = {
     .get = fake_ss_get,
     .set = fake_ss_set,
     .delete = fake_ss_delete,
-    .list_refs = fake_ss_list_refs,
     .wipe_namespace = fake_ss_wipe_namespace,
     .wipe_all = fake_ss_wipe_all,
     .destroy = fake_ss_destroy,
@@ -111,9 +104,7 @@ static ConnCatalog *make_catalog(void) {
   return cat;
 }
 
-static void reset_counters(void) {
-  fake_backend_reset_counters();
-}
+static void reset_counters(void) { fake_backend_reset_counters(); }
 
 /* ------------------------------- tests --------------------------------- */
 

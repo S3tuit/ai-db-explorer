@@ -30,7 +30,7 @@ BENCH_CFLAGS := -Wall -Wextra -Werror -std=c11 -O3 -DNDEBUG -flto \
                 -D_POSIX_C_SOURCE=200809L -Isrc
 
 # Test flags
-EXTRA_TCFLAGS ?=
+EXTRA_TCFLAGS ?= -DADBX_TEST_MODE
 TCFLAGS = -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O1 $(INCLUDES) \
           -D_POSIX_C_SOURCE=200809L $(EXTRA_TCFLAGS)
 TSAN    := -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -62,7 +62,7 @@ BENCH_SRC := $(wildcard benchmarks/bench_*.c)
 BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
 BENCH_COMMON_SRC := src/arena.c src/utils.c
 
-.PHONY: all clean run test test-unit test-unit-notty test-integration test-integration-cached test-postgres test-build asan clean-testobj pg-dump-ast bench
+.PHONY: all clean run test test-unit test-unit-notty test-integration test-integration-cached test-postgres test-build compdb asan clean-testobj pg-dump-ast bench
 
 all: $(BIN)
 
@@ -190,6 +190,12 @@ test-postgres: clean-testobj $(INTEGRATION_TEST_BINS) $(ASAN_BIN)
 # Only builds tests, usefull for making the LSP recognize the header files
 # inside tests/
 test-build: $(UNIT_TEST_BINS) $(INTEGRATION_TEST_BINS)
+
+# Rebuild compile_commands.json for this checkout so ccls/clangd see the real
+# compiler flags and include paths used by the project sources.
+compdb:
+	rm -f compile_commands.json
+	bear -- $(MAKE) -j6 -B build/adbxplorer
 
 clean-testobj:
 	# Force rebuild of sanitized objects.
