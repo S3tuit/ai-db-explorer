@@ -84,7 +84,7 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
 ConnCatalog *load_test_catalog(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"columnPolicy\": {"
                      "      \"mode\": \"pseudonymize\","

@@ -318,11 +318,10 @@ static void write_single_entry_json_0600(const char *path,
       strlen(cred_namespace) + strlen(connection_name) + strlen(secret) + 192;
   char *json = xmalloc(n);
   ASSERT_TRUE(json != NULL);
-  ASSERT_TRUE(
-      snprintf(json, n,
-               "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
-               "\"%s\",\"connectionName\":\"%s\",\"secret\":\"%s\"}]}",
-               cred_namespace, connection_name, secret) > 0);
+  ASSERT_TRUE(snprintf(json, n,
+                       "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
+                       "\"%s\",\"connectionName\":\"%s\",\"secret\":\"%s\"}]}",
+                       cred_namespace, connection_name, secret) > 0);
   write_text_0600(path, json);
   free(json);
 }
@@ -526,25 +525,25 @@ static void test_json_schema_violations_are_parse(void) {
       "\"secret\":\"pw\"}]}",
       "missing-namespace");
   run_schema_violation_case(
-      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
       "\"TestNamespace\",\"secret\":\"pw\"}]}",
       "missing-connection-name");
   run_schema_violation_case(
-      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
       "\"TestNamespace\",\"connectionName\":\"x\"}]}",
       "missing-secret");
   run_schema_violation_case(
-      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":\"\","
+      "{\"version\":\"1\",\"entries\":[{\"configNamespace\":\"\","
       "\"connectionName\":\"x\",\"secret\":\"x\"}]}",
       "empty-namespace");
   run_schema_violation_case(
-      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
       "\"TestNamespace\",\"connectionName\":\"\",\"secret\":\"x\"}]}",
       "empty-connection-name");
   run_schema_violation_case("{\"version\":\"1\",\"entries\":[],\"extra\":1}",
                             "unknown-top-key");
   run_schema_violation_case(
-      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
       "\"TestNamespace\",\"connectionName\":\"x\",\"secret\":\"y\",\"k\":1}]}",
       "unknown-entry-key");
 }
@@ -557,7 +556,7 @@ static void test_symlink_credentials_path_fails(void) {
 
   char *target = path_join(ctx.tmp, "symlink_target.json");
   write_text_0600(target,
-                  "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+                  "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
                   "\"TestNamespace\",\"connectionName\":\"MyPostgres\","
                   "\"secret\":\"pw-target\"}]}");
   ASSERT_TRUE(symlink(target, ctx.cred_path) == 0);
@@ -774,7 +773,7 @@ static void test_external_malformed_rewrite_fails_closed(void) {
   assert_parse_error(&ss_err);
 
   write_text_0600(ctx.cred_path,
-                  "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+                  "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
                   "\"TestNamespace\",\"connectionName\":\"MyPostgres\","
                   "\"secret\":\"pw-new\"}]}");
   ASSERT_TRUE(secret_store_get(ctx.ss, TEST_REF("MyPostgres"), &out) == YES);
@@ -790,9 +789,9 @@ static void test_file_backend_duplicate_ref_is_err(void) {
   ctx_open_xdg(&ctx);
 
   const char *dup_json =
-      "{\"version\":\"1\",\"entries\":[{\"credentialNamespace\":"
+      "{\"version\":\"1\",\"entries\":[{\"configNamespace\":"
       "\"TestNamespace\",\"connectionName\":\"MyPostgres\",\"secret\":"
-      "\"pw-a\"},{\"credentialNamespace\":\"TestNamespace\","
+      "\"pw-a\"},{\"configNamespace\":\"TestNamespace\","
       "\"connectionName\":\"MyPostgres\",\"secret\":\"pw-b\"}]}";
 
   write_text_0600(ctx.cred_path, dup_json);

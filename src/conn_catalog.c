@@ -743,19 +743,19 @@ static AdbxStatus parse_credential_namespace(const JsonGetter *jg,
     return ERR;
 
   char *ns = NULL;
-  if (jsget_string_decode_alloc(jg, "credentialNamespace", &ns) != YES) {
-    set_parse_err(err_out, "$.credentialNamespace: expected string.");
+  if (jsget_string_decode_alloc(jg, "configNamespace", &ns) != YES) {
+    set_parse_err(err_out, "$.configNamespace: expected string.");
     return ERR;
   }
   if (ns[0] == '\0') {
     free(ns);
-    set_parse_err(err_out, "$.credentialNamespace: must not be empty.");
+    set_parse_err(err_out, "$.configNamespace: must not be empty.");
     return ERR;
   }
 
   if (strlen(ns) > NAMESPACE_MAX_LEN) {
     free(ns);
-    set_parse_err(err_out, "$.credentialNamespace: must be at most %d bytes.",
+    set_parse_err(err_out, "$.configNamespace: must be at most %d bytes.",
                   NAMESPACE_MAX_LEN);
     return ERR;
   }
@@ -1010,8 +1010,8 @@ static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
   }
 
   // make sure these 2 objects are present in the config file
-  const char *const root_keys[] = {"version", "credentialNamespace",
-                                   "safetyPolicy", "databases"};
+  const char *const root_keys[] = {"version", "configNamespace", "safetyPolicy",
+                                   "databases"};
   JsonStrSpan root_unknown = {0};
   if (jsget_top_level_validation(&jg, NULL, root_keys, ARRLEN(root_keys),
                                  &root_unknown) != YES) {

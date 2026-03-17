@@ -93,7 +93,7 @@ static const SecretSchema ls_schema = {
     .attributes =
         {
             {"app", SECRET_SCHEMA_ATTRIBUTE_STRING},
-            {"credentialNamespace", SECRET_SCHEMA_ATTRIBUTE_STRING},
+            {"configNamespace", SECRET_SCHEMA_ATTRIBUTE_STRING},
             {"connectionName", SECRET_SCHEMA_ATTRIBUTE_STRING},
             {NULL, 0},
         },
@@ -158,9 +158,8 @@ static void ls_load(void) {
 
   if (!ls_api.lookup || !ls_api.store || !ls_api.clear || !ls_api.search ||
       !ls_api.svc_get || !ls_api.pw_wipe || !ls_api.pw_free ||
-      !ls_api.obj_unref || !ls_api.err_free ||
-      !ls_api.retrievable_get_attrs || !ls_api.hash_lookup ||
-      !ls_api.hash_unref || !ls_api.list_free) {
+      !ls_api.obj_unref || !ls_api.err_free || !ls_api.retrievable_get_attrs ||
+      !ls_api.hash_lookup || !ls_api.hash_unref || !ls_api.list_free) {
     ls_state = LS_BROKEN;
     return;
   }
@@ -231,7 +230,7 @@ static AdbxTriStatus ls_get(SecretStore *base, const SecretRefInfo *ref,
 
   GError *err = NULL;
   gchar *pw = ls_api.lookup(&ls_schema, NULL, &err, "app", LS_APP_TAG,
-                            "credentialNamespace", ref->cred_namespace,
+                            "configNamespace", ref->cred_namespace,
                             "connectionName", ref->connection_name, NULL);
   if (err) {
     ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret lookup failed: %s",
@@ -284,7 +283,7 @@ static AdbxStatus ls_set(SecretStore *base, const SecretRefInfo *ref,
   GError *err = NULL;
   gboolean ok = ls_api.store(&ls_schema, ls_store_collection_name(), label,
                              secret, NULL, &err, "app", LS_APP_TAG,
-                             "credentialNamespace", ref->cred_namespace,
+                             "configNamespace", ref->cred_namespace,
                              "connectionName", ref->connection_name, NULL);
   if (err) {
     ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret store failed: %s",
@@ -316,7 +315,7 @@ static AdbxStatus ls_delete(SecretStore *base, const SecretRefInfo *ref,
 
   GError *err = NULL;
   gboolean ok = ls_api.clear(&ls_schema, NULL, &err, "app", LS_APP_TAG,
-                             "credentialNamespace", ref->cred_namespace,
+                             "configNamespace", ref->cred_namespace,
                              "connectionName", ref->connection_name, NULL);
   if (err) {
     ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret delete failed: %s",
@@ -358,7 +357,7 @@ static AdbxStatus ls_wipe_namespace(SecretStore *base,
 
   GError *err = NULL;
   gboolean ok = ls_api.clear(&ls_schema, NULL, &err, "app", LS_APP_TAG,
-                             "credentialNamespace", cred_namespace, NULL);
+                             "configNamespace", cred_namespace, NULL);
   if (err) {
     ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret wipe_namespace failed: %s",
                   err->message);

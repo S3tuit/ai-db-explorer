@@ -12,7 +12,7 @@
 static void test_missing_policy_defaults(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"
@@ -46,7 +46,7 @@ static void test_missing_policy_defaults(void) {
   free(path);
 }
 
-/* Ensures credentialNamespace is required at the top level. */
+/* Ensures configNamespace is required at the top level. */
 static void test_missing_credential_namespace_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
@@ -68,7 +68,7 @@ static void test_missing_credential_namespace_fails(void) {
   ConnCatalog *cat = catalog_load_from_file(path, &err);
   ASSERT_TRUE(cat == NULL);
   ASSERT_TRUE(err != NULL);
-  ASSERT_TRUE(strstr(err, "$.credentialNamespace") != NULL);
+  ASSERT_TRUE(strstr(err, "$.configNamespace") != NULL);
 
   free(err);
   unlink(path);
@@ -94,7 +94,7 @@ static ConnProfile *catalog_get_by_name(ConnCatalog *cat,
 static void test_policy_missing_fields_defaults(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"No UnSafe\""
                      "  },"
@@ -133,7 +133,7 @@ static void test_policy_missing_fields_defaults(void) {
 static void test_policy_kilobytes(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"statementTimeoutMs\": 5000,"
@@ -170,7 +170,7 @@ static void test_policy_kilobytes(void) {
 static void test_policy_unknown_key_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"unknown\": 1"
@@ -202,7 +202,7 @@ static void test_policy_unknown_key_fails(void) {
 static void test_policy_overflow_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"maxPayloadKiloBytes\": 4294967295"
@@ -234,7 +234,7 @@ static void test_policy_overflow_fails(void) {
 static void test_policy_legacy_payload_key_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"maxQueryKiloBytes\": 64"
@@ -268,7 +268,7 @@ static void test_policy_legacy_payload_key_fails(void) {
 static void test_empty_databases_ok(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"statementTimeoutMs\": 5000,"
@@ -292,7 +292,7 @@ static void test_empty_databases_ok(void) {
 static void test_db_entry_unknown_key_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"yes\","
                      "    \"statementTimeoutMs\": 5000,"
@@ -328,7 +328,7 @@ static void test_db_entry_unknown_key_fails(void) {
 static void test_db_connection_name_duplicate_case_insensitive_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"
@@ -365,7 +365,7 @@ static void test_db_connection_name_duplicate_case_insensitive_fails(void) {
 static void test_db_safety_policy_unknown_key_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"
@@ -399,7 +399,7 @@ static void test_db_safety_policy_unknown_key_fails(void) {
 static void test_valid_config_maps_fields(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"readOnly\": \"no unsafe\","
                      "    \"statementTimeoutMs\": 1234,"
@@ -452,7 +452,7 @@ static void test_valid_config_maps_fields(void) {
 static void test_policies_lowercase(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"
@@ -503,7 +503,7 @@ static void test_policies_dedup(void) {
   const char *json =
       "{"
       "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+      "  \"configNamespace\": \"TestNamespace\","
       "  \"safetyPolicy\": {},"
       "  \"databases\": ["
       "    {"
@@ -552,7 +552,7 @@ static void test_policies_dedup(void) {
 static void test_policies_global_and_schema(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"
@@ -597,7 +597,7 @@ static void test_policies_global_and_schema(void) {
 static void test_column_policy_malformed_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"
@@ -629,7 +629,7 @@ static void test_column_policy_malformed_fails(void) {
 static void test_safe_functions_malformed_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"
@@ -662,7 +662,7 @@ static void test_safe_functions_malformed_fails(void) {
 static void test_column_policy_randomized_fails(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"columnPolicy\": {"
                      "      \"mode\": \"pseudonymize\","
@@ -700,7 +700,7 @@ static void test_column_policy_randomized_fails(void) {
 static void test_connp_is_sensitive(void) {
   const char *json = "{"
                      "  \"version\": \"1.0\","
-                     "  \"credentialNamespace\": \"TestNamespace\","
+                     "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {},"
                      "  \"databases\": ["
                      "    {"

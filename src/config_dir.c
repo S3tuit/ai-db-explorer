@@ -17,7 +17,7 @@
 static const char CFG_DEFAULT_JSON[] =
     "{\n"
     "  \"version\": \"1.0\",\n"
-    "  \"credentialNamespace\": \"DummyNamespace\",\n"
+    "  \"configNamespace\": \"DummyNamespace\",\n"
     "  \"safetyPolicy\": {},\n"
     "  \"databases\": [\n"
     "    {\n"

@@ -566,7 +566,7 @@ static AdbxStatus ss_serialize_entries(const SecretEntryList *entries,
   for (size_t i = 0; i < entries->n_entries; i++) {
     if (json_obj_begin(out_json) != OK)
       goto error;
-    if (json_kv_str(out_json, "credentialNamespace",
+    if (json_kv_str(out_json, "configNamespace",
                     entries->entries[i].cred_namespace) != OK)
       goto error;
     if (json_kv_str(out_json, "connectionName",
@@ -685,14 +685,14 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
       goto parse_error;
     }
 
-    const char *const entry_keys[] = {"credentialNamespace", "connectionName",
+    const char *const entry_keys[] = {"configNamespace", "connectionName",
                                       "secret"};
     JsonStrSpan entry_unknown = {0};
     if (jsget_top_level_validation(&entry, NULL, entry_keys, ARRLEN(entry_keys),
                                    &entry_unknown) != YES) {
       ADBX_ERR_SETF(out_err, SSERR_PARSE,
                     "credentials file schema invalid: each entry must contain "
-                    "only 'credentialNamespace', 'connectionName', and "
+                    "only 'configNamespace', 'connectionName', and "
                     "'secret'. Fix credentials.json format or delete it to "
                     "reset.");
       goto parse_error;
@@ -701,11 +701,11 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
     char *cred_namespace = NULL;
     char *connection_name = NULL;
     char *secret = NULL;
-    if (jsget_string_decode_alloc(&entry, "credentialNamespace",
-                                  &cred_namespace) != YES) {
+    if (jsget_string_decode_alloc(&entry, "configNamespace", &cred_namespace) !=
+        YES) {
       ADBX_ERR_SETF(out_err, SSERR_PARSE,
                     "credentials file schema invalid: entry."
-                    "credentialNamespace must be a string. Fix "
+                    "configNamespace must be a string. Fix "
                     "credentials.json format or delete it to reset.");
       goto parse_error;
     }
@@ -732,7 +732,7 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
         connection_name[0] == '\0') {
       ADBX_ERR_SETF(out_err, SSERR_PARSE,
                     "credentials file schema invalid: entry."
-                    "credentialNamespace and entry.connectionName must be "
+                    "configNamespace and entry.connectionName must be "
                     "non-empty. Fix credentials.json format or delete it to "
                     "reset.");
       free(cred_namespace);
