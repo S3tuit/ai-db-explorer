@@ -509,6 +509,9 @@ static void test_validator_from_notes(void) {
                   "u.status = true GROUP BY fc LIMIT 10;",
                   0, VERR_NO_COLUMN_ALIAS);
   ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT u.id FROM users u WHERE $1 = $2 LIMIT 10;", 0,
+                  VERR_PARAM_NON_SENSITIVE);
+  ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.id FROM users u WHERE u.status = $1 LIMIT 10;", 0,
                   VERR_PARAM_NON_SENSITIVE);
   ASSERT_VALIDATE(db, cp, policy,

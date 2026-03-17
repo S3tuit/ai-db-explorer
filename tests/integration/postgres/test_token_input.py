@@ -5,7 +5,12 @@ import sys
 
 from test_broker_mcp_handshake import do_full_handshake
 from test_mcp_run_sql import send_tools_call
-from test_user_mcp_handshake import read_frame, stop_proc, write_frame
+from test_user_mcp_handshake import (
+    read_frame,
+    read_proc_stderr,
+    stop_proc,
+    write_frame,
+)
 
 
 def send_tokens_tools_call(server, req_id, connection_name, query, parameters):
@@ -50,6 +55,11 @@ def _extract_one_token(server, req_id, connection_name, query):
     assert isinstance(tok, str)
     assert tok.startswith("tok_")
     return tok
+
+
+def _assert_secret_not_leaked(resp, secret, broker_stderr):
+    assert secret not in json.dumps(resp)
+    assert secret not in broker_stderr
 
 
 def test_token_input_happy_path_one_param():
@@ -286,6 +296,45 @@ def test_token_input_cross_connection_token_fails():
             shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+def test_token_input_runtime_error_does_not_leak_bound_secret():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    broker_stderr = ""
+    resp = None
+    try:
+        broker, server, privdir, runtime_dir, _ = do_full_handshake(
+            req_id=270, capture_broker_stderr=True
+        )
+
+        tok = _extract_one_token(
+            server,
+            "tok-runtime-src",
+            "AnotherPostgres",
+            "SELECT g.real_name FROM gym_bros g WHERE g.id = 2 LIMIT 1;",
+        )
+
+        resp = send_tokens_tools_call(
+            server,
+            "tok-runtime-run",
+            "AnotherPostgres",
+            "SELECT $1::integer AS v;",
+            [tok],
+        )
+        _assert_tools_call_failed(resp, "tok-runtime-run")
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        broker_stderr = read_proc_stderr(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+    
+    _assert_secret_not_leaked(resp, "Angelo", broker_stderr)
+
+
 def main():
     test_token_input_happy_path_one_param()
     test_token_input_happy_path_two_params_from_two_queries()
@@ -294,6 +343,7 @@ def main():
     test_token_input_more_tokens_than_params_fails()
     test_token_input_no_tokens_no_params_fails()
     test_token_input_cross_connection_token_fails()
+    test_token_input_runtime_error_does_not_leak_bound_secret()
     print("OK: test_token_input")
 
 

@@ -89,7 +89,12 @@ def read_frame(proc):
     return payload
 
 
-def start_broker(privdir=DEFAULT_PRIVDIR, env=None, config_path=None):
+def start_broker(
+    privdir=DEFAULT_PRIVDIR,
+    env=None,
+    config_path=None,
+    capture_stderr=False,
+):
     ensure_privdir_base(privdir)
     sock = broker_sock_path(privdir)
     if os.path.exists(sock):
@@ -104,8 +109,10 @@ def start_broker(privdir=DEFAULT_PRIVDIR, env=None, config_path=None):
         cmd,
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
-        # Forward broker logs to the test runner so failures aren't silent.
-        stderr=None,
+        # Most integration tests want broker logs on the runner. Secret-leak
+        # regression tests opt into PIPE so they can assert on the exact text.
+        stderr=subprocess.PIPE if capture_stderr else None,
+        text=capture_stderr,
         env=proc_env,
     )
 
@@ -140,6 +147,13 @@ def stop_proc(proc):
         proc.wait(timeout=2)
     except Exception:
         proc.kill()
+
+
+def read_proc_stderr(proc):
+    if proc is None or proc.stderr is None:
+        return ""
+    data = proc.stderr.read()
+    return data if data is not None else ""
 
 
 def do_user_handshake(server, req_id, protocol_version):

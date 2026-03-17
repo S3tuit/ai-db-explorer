@@ -242,6 +242,7 @@ def do_full_handshake(
     privdir=None,
     broker_env=None,
     server_env=None,
+    capture_broker_stderr=False,
 ):
     created_privdir = False
     created_runtime = False
@@ -259,7 +260,9 @@ def do_full_handshake(
     broker = None
     server = None
     try:
-        broker = start_broker(privdir, env=broker_env)
+        broker = start_broker(
+            privdir, env=broker_env, capture_stderr=capture_broker_stderr
+        )
         server = start_server(privdir, env=merged_server_env)
         resp = do_user_handshake(server, req_id, protocol_version)
         return broker, server, privdir, runtime_dir, resp

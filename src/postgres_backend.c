@@ -29,7 +29,6 @@ typedef struct PgImpl {
   SafetyPolicy policy;
   uint8_t policy_applied; // 1 if the policy has already been enforced
                           // at session level, else 0
-  char last_err[1024];
 } PgImpl;
 
 // --------------------------- QueryIR helpers (Postgres) --------------------
@@ -1941,17 +1940,24 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
 
 /* Creates a QueryIR for a SQL string using libpg_query JSON AST.
  * Ownership: out handle owns all allocations; caller must destroy it.
- * Side effects: allocates arena memory.
+ * Side effects: allocates arena memory and may write one typed diagnostic into
+ * 'out_err' when returning ERR.
  * Returns OK on success (including parse/unsupported), ERR on allocation
- * failure. */
+ * failure or invalid input. */
 static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
-                                   QirQueryHandle *out) {
+                                   QirQueryHandle *out, DbErr *out_err) {
   (void)db;
-  if (!sql || !out)
+  if (!sql || !out) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "postgres query-ir creation failed: invalid input.");
     return ERR;
+  }
 
-  if (qir_handle_init(out) != OK)
+  if (qir_handle_init(out) != OK) {
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                  "postgres query-ir creation failed: qir_handle_init failed.");
     return ERR;
+  }
   QirQuery *q = out->q;
 
   PgQueryParseResult res = pg_query_parse(sql);
@@ -2005,6 +2011,9 @@ static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
   JsonGetter seljg = {0};
   if (jsget_object(&stg, "SelectStmt", &seljg) == YES) {
     if (pg_parse_select_stmt(&seljg, &out->arena, q) != OK) {
+      ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                    "postgres query-ir creation failed while building the "
+                    "QueryIR tree.");
       qir_handle_destroy(out);
       jsget_destroy(&root);
       pg_query_free_parse_result(res);
@@ -2021,38 +2030,40 @@ free_pg_parse_result:
   return OK;
 }
 
-/* Copyies 'msg' inside the last_err of 'p'. 'msg' may be NULL. */
-static void pg_set_err(PgImpl *p, const char *msg) {
-  if (!p)
-    return;
-  if (!msg)
-    msg = "unknown error";
-  snprintf(p->last_err, sizeof(p->last_err), "%s", msg);
-}
-
-/* Copyies 'prefix' + the last error that happened at 'conn' to 'p'. */
-static void pg_set_err_pg(PgImpl *p, PGconn *conn, const char *prefix) {
+/* Stores one libpq-derived diagnostic into 'out_err'.
+ * It borrows 'conn'/'prefix' and does not allocate. Side effects: reads libpq
+ * connection error state and overwrites the caller-owned error snapshot.
+ * Returns void; NULL 'out_err' is accepted and becomes a no-op.
+ */
+static void pg_set_pg_err(DbErr *out_err, PGconn *conn, const char *prefix) {
   const char *e = conn ? PQerrorMessage(conn) : "no connection";
-  if (!prefix)
+  if (!prefix || prefix[0] == '\0')
     prefix = "postgres error";
-  snprintf(p->last_err, sizeof(p->last_err), "%s: %s", prefix, e ? e : "");
+  ADBX_ERR_SETF(out_err, DBERR_GENERIC, "%s: %s", prefix, e ? e : "");
 }
 
 /* Executes one or more SQL commands (separated by ';') and requires COMMAND_OK.
- * Use this to send sql statements that don't return tuples. Returns ERR on bad
- * input or if the query produced an error. Stores error inside 'p'. */
-static AdbxStatus pg_exec_command(PgImpl *p, const char *sql) {
-  if (!p || !sql)
+ * Use this to send sql statements that don't return tuples.
+ * Ownership: borrows all inputs and writes diagnostics into caller-owned
+ * 'out_err'. Side effects: sends one query through libpq.
+ * Returns OK on command success, ERR on bad input or if the query failed.
+ */
+static AdbxStatus pg_exec_command(PgImpl *p, const char *sql, DbErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, DBERR_NONE);
+  if (!p || !sql) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "postgres command execution failed: invalid input.");
     return ERR;
+  }
 
   if (!p->conn) {
-    pg_set_err_pg(p, p->conn, NULL);
+    pg_set_pg_err(out_err, p->conn, NULL);
     return ERR;
   }
 
   PGresult *res = PQexec(p->conn, sql);
   if (!res) {
-    pg_set_err_pg(p, p->conn, "PQexec failed");
+    pg_set_pg_err(out_err, p->conn, "PQexec failed");
     return ERR;
   }
 
@@ -2060,7 +2071,7 @@ static AdbxStatus pg_exec_command(PgImpl *p, const char *sql) {
   if (st != PGRES_COMMAND_OK) {
     // Could be error, or could be tuples.
     // caller should use pg_exec() for tuples
-    pg_set_err_pg(p, p->conn, sql);
+    pg_set_pg_err(out_err, p->conn, sql);
     PQclear(res);
     return ERR;
   }
@@ -2080,14 +2091,24 @@ static void pg_exec_command_ignore(PgImpl *p, const char *sql) {
 }
 
 /* Best-effort rollback, ignore errors. */
-static void pg_rollback(PgImpl *p) { pg_exec_command(p, "ROLLBACK"); }
+static void pg_rollback(PgImpl *p) { pg_exec_command_ignore(p, "ROLLBACK"); }
 
 /* Executes commands so the current session of 'p' complies with 'p->policy'.
  * Must be called before running any query and the caller must checks this
- * returned one before sending any query. Stores error inside 'p'. */
-static AdbxStatus pg_apply_policy(PgImpl *p) {
-  if (!p || !p->conn)
+ * returned one before sending any query.
+ * Ownership: borrows 'p'; writes diagnostics into caller-owned 'out_err'.
+ * Side effects: mutates backend session state and flips 'p->policy_applied' on
+ * success.
+ * Returns OK when the policy was applied, ERR on bad input or SQL/libpq
+ * failure.
+ */
+static AdbxStatus pg_apply_policy(PgImpl *p, DbErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, DBERR_NONE);
+  if (!p || !p->conn) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "postgres policy application failed: invalid backend state.");
     return ERR;
+  }
   // bad things can happen if we let the max bytes to be low like 1/2...
   // this is a safe bound
   // ignore failure, this is not strictly necessary
@@ -2108,7 +2129,7 @@ static AdbxStatus pg_apply_policy(PgImpl *p) {
   if (policy.statement_timeout_ms > 0) {
     snprintf(buf, sizeof(buf), "SET statement_timeout = %u",
              policy.statement_timeout_ms);
-    if (pg_exec_command(p, buf) != OK)
+    if (pg_exec_command(p, buf, out_err) != OK)
       return ERR;
   }
 
@@ -2117,12 +2138,20 @@ static AdbxStatus pg_apply_policy(PgImpl *p) {
 }
 
 /* Executes 'sql' and returns the result inside 'out_res'. It verify the result
- * is just one. If there are more results it doesn't store anything and returns
- * ERR (single statement policy). */
+ * is just one.
+ * Ownership: borrows all inputs; caller owns '*out_res' on success and owns
+ * 'out_err'. Side effects: sends one query via libpq.
+ * Returns OK when exactly one result is produced, ERR on bad input/libpq
+ * failure/multiple results.
+ */
 static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
-                                        PGresult **out_res) {
-  if (!p || !p->conn || !sql || !out_res)
+                                        PGresult **out_res, DbErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, DBERR_NONE);
+  if (!p || !p->conn || !sql || !out_res) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "postgres single-result execution failed: invalid input.");
     return ERR;
+  }
   assert(p);
   assert(p->conn);
   assert(sql);
@@ -2131,7 +2160,7 @@ static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
   *out_res = NULL;
 
   if (PQsendQuery(p->conn, sql) != 1) {
-    pg_set_err_pg(p, p->conn, "PQsendQuery failed");
+    pg_set_pg_err(out_err, p->conn, "PQsendQuery failed");
     return ERR;
   }
 
@@ -2157,7 +2186,8 @@ static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
   }
 
   if (extra) {
-    pg_set_err(p, "multiple statements/results are not allowed");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                  "multiple statements/results are not allowed");
     PQclear(extra);
     if (first)
       PQclear(first);
@@ -2165,7 +2195,7 @@ static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
   }
 
   if (!first) {
-    pg_set_err(p, "no result returned");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC, "no result returned");
     return ERR;
   }
 
@@ -2175,24 +2205,30 @@ static AdbxStatus pg_exec_single_result(PgImpl *p, const char *sql,
 
 /* Executes one parameterized SQL statement and returns exactly one PGresult.
  * Ownership: borrows all inputs; caller owns '*out_res' on success.
- * Side effects: sends one query over libpq and stores backend errors into 'p'.
+ * Side effects: sends one query over libpq and writes diagnostics into
+ * caller-owned 'out_err'.
  * Error semantics: returns OK when exactly one result is produced, ERR on bad
  * input/libpq failure/multiple results.
  */
 static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
                                               const DbExecParam *params,
                                               uint32_t nparams,
-                                              PGresult **out_res) {
+                                              PGresult **out_res,
+                                              DbErr *out_err) {
   assert(p);
   assert(p->conn);
   assert(sql);
   assert(out_res);
   assert(!(nparams > 0 && !params));
 
-  if (!p || !p->conn || !sql || !out_res)
+  ADBX_ERR_CLEAR(out_err, DBERR_NONE);
+  if (!p || !p->conn || !sql || !out_res) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "postgres bound execution failed: invalid input.");
     return ERR;
+  }
   if ((nparams > 0 && !params) || nparams > MAX_TOKEN_PARAMS) {
-    pg_set_err(p, "invalid bound execution input");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC, "invalid bound execution input");
     return ERR;
   }
 
@@ -2203,7 +2239,7 @@ static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
   for (uint32_t i = 0; i < nparams; i++) {
     const DbExecParam *in = &params[i];
     if (!in->value) {
-      pg_set_err(p, "invalid bound parameter payload");
+      ADBX_ERR_SETF(out_err, DBERR_GENERIC, "invalid bound parameter payload");
       return ERR;
     }
     // libpq text binds require NUL-terminated strings.
@@ -2217,7 +2253,7 @@ static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
   // since PQsendQueryParams do not dereference them if nparams is 0.
   if (PQsendQueryParams(p->conn, sql, (int)nparams, param_types, param_values,
                         NULL, NULL, 0) != 1) {
-    pg_set_err_pg(p, p->conn, "PQsendQueryParams failed");
+    pg_set_pg_err(out_err, p->conn, "PQsendQueryParams failed");
     return ERR;
   }
 
@@ -2243,7 +2279,8 @@ static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
   }
 
   if (extra) {
-    pg_set_err(p, "multiple statements/results are not allowed");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                  "multiple statements/results are not allowed");
     PQclear(extra);
     if (first)
       PQclear(first);
@@ -2251,7 +2288,7 @@ static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
   }
 
   if (!first) {
-    pg_set_err(p, "no result returned");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC, "no result returned");
     return ERR;
   }
 
@@ -2266,11 +2303,14 @@ static AdbxStatus pg_exec_single_result_bound(PgImpl *p, const char *sql,
  *
  * Side effects:
  * - Executes one SQL statement on the active connection.
- * - Stores human-readable error into PgImpl on failure.
+ * - Stores human-readable error into 'out_err' on failure.
  */
-static AdbxStatus pg_check_safe_read_only_role(PgImpl *p) {
-  if (!p || !p->conn)
+static AdbxStatus pg_check_safe_read_only_role(PgImpl *p, DbErr *out_err) {
+  if (!p || !p->conn) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "read-only role check failed: invalid backend state.");
     return ERR;
+  }
 
   static const char *kSql = "SELECT "
                             "  NOT r.rolsuper "
@@ -2293,22 +2333,31 @@ static AdbxStatus pg_check_safe_read_only_role(PgImpl *p) {
                             "WHERE r.rolname = current_user";
 
   PGresult *res = NULL;
-  if (pg_exec_single_result(p, kSql, &res) != OK)
+  DbErr db_err;
+  ADBX_ERR_CLEAR(&db_err, DBERR_NONE);
+  if (pg_exec_single_result(p, kSql, &res, &db_err) != OK) {
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC, "%s",
+                  db_err.msg[0] != '\0' ? db_err.msg
+                                        : "read-only role check failed");
     return ERR;
+  }
 
   int ok = ERR;
   if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-    pg_set_err_pg(p, p->conn, "read-only role check failed");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC, "read-only role check failed: %s",
+                  PQerrorMessage(p->conn));
     goto done;
   }
   if (PQntuples(res) != 1 || PQnfields(res) < 1 || PQgetisnull(res, 0, 0)) {
-    pg_set_err(p, "read-only role check returned unexpected result");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                  "read-only role check returned unexpected result");
     goto done;
   }
 
   const char *v = PQgetvalue(res, 0, 0);
   if (!v || (strcmp(v, "t") != 0 && strcmp(v, "true") != 0)) {
-    pg_set_err(p, "connected role is not safe for read-only mode");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                  "connected role is not safe for read-only mode");
     goto done;
   }
 
@@ -2321,9 +2370,13 @@ done:
 /* --------------------------- DbBackend vtable --------------------------- */
 
 static AdbxStatus pg_connect(DbBackend *db, const ConnProfile *profile,
-                             const SafetyPolicy *policy, const char *pwd) {
-  if (!db || !db->impl || !profile || !policy)
+                             const SafetyPolicy *policy, const char *pwd,
+                             DbErr *out_err) {
+  if (!db || !db->impl || !profile || !policy) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "postgres connect failed: invalid input pointers.");
     return ERR;
+  }
   PgImpl *p = (PgImpl *)db->impl;
 
   // when created, NULL is assigned to p->conn. If it's not NULL, there's
@@ -2348,12 +2401,13 @@ static AdbxStatus pg_connect(DbBackend *db, const ConnProfile *profile,
 
   p->conn = PQconnectdbParams(keys, vals, 0);
   if (!p->conn) {
-    pg_set_err(p, "PQconnectdb returned NULL");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC, "PQconnectdb returned NULL");
     return ERR;
   }
 
   if (PQstatus(p->conn) != CONNECTION_OK) {
-    pg_set_err_pg(p, p->conn, "connection failed");
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC, "connection failed: %s",
+                  PQerrorMessage(p->conn));
     PQfinish(p->conn);
     p->conn = NULL;
     return ERR;
@@ -2362,7 +2416,7 @@ static AdbxStatus pg_connect(DbBackend *db, const ConnProfile *profile,
   /* Enforce a one-time role audit at connection time and fail closed on
    * mismatch. */
   if (policy->read_only) {
-    if (pg_check_safe_read_only_role(p) != OK) {
+    if (pg_check_safe_read_only_role(p, out_err) != OK) {
       PQfinish(p->conn);
       p->conn = NULL;
       return ERR;
@@ -2404,46 +2458,46 @@ static void pg_destroy(DbBackend *db) {
 }
 
 /* Executes one SQL statement (optionally with bound positional params) and
- * materializes one QueryResult.
- * Ownership: borrows db/sql/params/qb_policy; allocates '*out_qr' on success.
- * Side effects: executes SQL, enforces policy/transactions, and mutates PgImpl
- * error buffer.
- * Error semantics: returns OK if a QueryResult object is produced, ERR only on
- * catastrophic allocation/input failures.
+ * materializes one QueryResult. Allocates '*out_qr' on success.
+ * Side effects: executes SQL, enforces policy/transactions, and writes
+ * diagnostics into one local transient buffer.
+ * Returns OK if a QueryResult object is produced, ERR only on catastrophic
+ * allocation/input failures.
  */
 static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
                                const DbExecParam *params, uint32_t nparams,
                                const QueryResultBuildPolicy *qb_policy,
                                QueryResult **out_qr) {
-
-  const char *err_msg;
+  DbErr db_err;
+  const char *safe_msg;
   QueryResult *qr = NULL;
   PGresult *res = NULL;
 
-  // Error logging logic, if we called a function that sets the error like
-  // pg_exec_command(), we use that error... else, we create the message.
+  ADBX_ERR_CLEAR(&db_err, DBERR_NONE);
 
   if (!db || !db->impl || !sql || !out_qr || (nparams > 0 && params == NULL)) {
-    err_msg = "unexpected input before executing the query";
+    ADBX_ERR_SETF(&db_err, DBERR_INPUT,
+                  "unexpected input before executing the query");
     goto fail_bad_input;
   };
   *out_qr = NULL;
 
   PgImpl *p = (PgImpl *)db->impl;
   if (!p->conn) {
-    pg_set_err(p, "not connected");
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "not connected");
     goto fail;
   }
 
   // even if this limit is version-dependent, it's a defensive check
   if (strlen(sql) > PG_QUERY_MAX_BYTES) {
-    pg_set_err(p, "SQL exceeds 8192 bytes (libpq query buffer limit)");
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                  "SQL exceeds 8192 bytes (libpq query buffer limit)");
     goto fail;
   }
 
   // apply safety policy
   if (!(p->policy_applied)) {
-    if (pg_apply_policy(p) != OK) {
+    if (pg_apply_policy(p, &db_err) != OK) {
       goto fail;
     }
   }
@@ -2453,20 +2507,21 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
 
   // start a read-only transaction for every query
   if (p->policy.read_only) {
-    if (pg_exec_command(p, "BEGIN READ ONLY") != OK) {
+    if (pg_exec_command(p, "BEGIN READ ONLY", &db_err) != OK) {
       goto fail;
     }
   } else {
-    if (pg_exec_command(p, "BEGIN") != OK) {
+    if (pg_exec_command(p, "BEGIN", &db_err) != OK) {
       goto fail;
     }
   }
 
   if (nparams > 0) {
-    if (pg_exec_single_result_bound(p, sql, params, nparams, &res) != OK)
+    if (pg_exec_single_result_bound(p, sql, params, nparams, &res, &db_err) !=
+        OK)
       goto fail;
   } else {
-    if (pg_exec_single_result(p, sql, &res) != OK)
+    if (pg_exec_single_result(p, sql, &res, &db_err) != OK)
       goto fail;
   }
 
@@ -2480,7 +2535,7 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
     if (!msg || !*msg)
       msg = PQerrorMessage(p->conn);
 
-    pg_set_err(p, msg ? msg : "query failed");
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "%s", msg ? msg : "query failed");
 
     goto fail;
   }
@@ -2508,12 +2563,12 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
     qr = qr_create_ok(NULL, (uint32_t)ncols, out_rows, result_truncated,
                       p->policy.max_payload_bytes);
     if (!qr) {
-      pg_set_err(p, "qr_create_ok error");
+      ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "qr_create_ok error");
       goto fail;
     }
     QueryResultBuilder qb = {0};
     if (qb_init(&qb, qr, qb_policy) != OK) {
-      pg_set_err(p, "qb_init failed");
+      ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "qb_init failed");
       goto fail;
     }
 
@@ -2530,7 +2585,7 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
       snprintf(typebuf, sizeof(typebuf), "%u", (unsigned)oid);
 
       if (qb_set_col(&qb, c, name, typebuf, (uint32_t)oid) != OK) {
-        pg_set_err(p, "qb_set_col failed");
+        ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "qb_set_col failed");
         goto fail;
       }
     }
@@ -2557,7 +2612,7 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
           break;
         }
         if (src == ERR) {
-          pg_set_err(p, "qb_set_cell failed");
+          ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "qb_set_cell failed");
           goto fail;
         }
       }
@@ -2567,7 +2622,8 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
   } else {
     // Error status
     const char *msg = PQresStatus(st);
-    pg_set_err(p, msg ? msg : "unexpected PGresult status");
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "%s",
+                  msg ? msg : "unexpected PGresult status");
     goto fail;
   }
 
@@ -2575,10 +2631,17 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
   res = NULL;
 
   // commit transaction
-  if (pg_exec_command(p, "COMMIT") != OK) {
+  if (pg_exec_command(p, "COMMIT", &db_err) != OK) {
     // If commit fails, try rollback
     pg_rollback(p);
-    pg_set_err(p, "COMMIT failure");
+    if (db_err.msg[0] != '\0') {
+      char commit_detail[ADBX_ERRMSG_MAX];
+      snprintf(commit_detail, sizeof(commit_detail), "%s", db_err.msg);
+      ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "COMMIT failure: %.200s",
+                    commit_detail);
+    } else {
+      ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "COMMIT failure");
+    }
     goto fail;
   }
 
@@ -2592,8 +2655,8 @@ fail:
   if (!out_qr)
     return ERR; // catastrophic
 
-  err_msg = p->last_err;
-  TLOG("ERROR - pg_exec failed: %s", err_msg ? err_msg : "unknown");
+  TLOG("ERROR - pg_exec failed: %s",
+       db_err.msg[0] != '\0' ? db_err.msg : "unknown");
   // rollback is safe even if we haven't executed anything
   pg_rollback(p);
   if (res)
@@ -2601,11 +2664,8 @@ fail:
   if (qr)
     qr_destroy(qr);
 fail_bad_input:
-  // if bad input, we can't rely on the buffer for the error of PgImpl
-  const char *safe_msg =
-      (err_msg && err_msg[0] != '\0') ? err_msg : "Unknown backend error.";
-  // TODO: relying on the internal state of the entity to log the error is bad,
-  // we should use a sort of context.
+  safe_msg =
+      (db_err.msg[0] != '\0') ? db_err.msg : "Unknown backend error.";
   *out_qr =
       qr_create_tool_err(NULL, "PostgreSQL execution failed: %s", safe_msg);
   return (*out_qr ? OK : ERR);
@@ -2852,7 +2912,6 @@ DbBackend *postgres_backend_create(void) {
   PgImpl *impl = (PgImpl *)xcalloc(1, sizeof(PgImpl));
 
   impl->conn = NULL;
-  impl->last_err[0] = '\0';
 
   db->vt = &PG_VT;
   db->impl = impl;

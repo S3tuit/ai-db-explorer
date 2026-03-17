@@ -202,7 +202,6 @@ def test_my_postgres_run_sql_query_tokens_still_masks_sensitive_output():
             "WHERE i.scouter_serial = $1 LIMIT 1;",
             [tok],
         )
-        print(resp)
         data = _assert_tools_call_ok(resp, "my-bind-mask-run")
         row = data["rows"][0]
         assert row[0] == "Kakarot"

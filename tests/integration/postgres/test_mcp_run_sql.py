@@ -8,6 +8,7 @@ from test_broker_mcp_handshake import (
 )
 from test_user_mcp_handshake import (
     read_frame,
+    read_proc_stderr,
     stop_proc,
     write_frame,
 )
@@ -28,6 +29,11 @@ def send_tools_call(server, req_id, connection_name, query):
     }
     write_frame(server, json.dumps(req).encode("utf-8"))
     return json.loads(read_frame(server).decode("utf-8"))
+
+
+def _assert_secret_not_leaked(resp, secret, broker_stderr):
+    assert secret not in json.dumps(resp)
+    assert secret not in broker_stderr
 
 
 def test_run_sql_my_db():
@@ -235,6 +241,41 @@ def test_run_sql_sensitive():
             shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+def test_run_sql_runtime_error_does_not_log_sensitive_column_value():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    broker_stderr = ""
+    resp = None
+    try:
+        broker, server, privdir, runtime_dir, resp = do_full_handshake(
+            req_id=10, capture_broker_stderr=True
+        )
+        assert resp["jsonrpc"] == "2.0"
+
+        resp = send_tools_call(
+            server,
+            "req-runtime-sensitive",
+            "MyPostgres",
+            "SELECT i.scouter_serial::int "
+            "FROM zfighter_intel i WHERE i.fighter_id = 1 LIMIT 1;",
+        )
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "req-runtime-sensitive"
+        assert resp["result"]["isError"] == True
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        broker_stderr = read_proc_stderr(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+    
+    _assert_secret_not_leaked(resp, "SCT-9001-A", broker_stderr)
+
+
 def main():
     test_run_sql_my_db()
     test_run_sql_another_db()
@@ -242,6 +283,7 @@ def main():
     test_run_sql_unknown_db()
     test_run_sql_unsafe_role()
     test_run_sql_sensitive()
+    test_run_sql_runtime_error_does_not_log_sensitive_column_value()
     print("OK: test_mcp_run_sql")
 
 

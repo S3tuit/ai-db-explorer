@@ -1,6 +1,7 @@
 #ifndef DB_BACKEND_H
 #define DB_BACKEND_H
 
+#include "adbx_err.h"
 #include "conn_catalog.h"
 #include "query_ir.h"
 #include "query_result.h"
@@ -19,6 +20,17 @@ typedef struct DbSafeFuncList {
   uint32_t count;
 } DbSafeFuncList;
 
+typedef enum {
+  DBERR_NONE = 0,
+  DBERR_INPUT,
+  DBERR_GENERIC,
+} DbErrCode;
+
+typedef struct {
+  DbErrCode code;
+  char msg[ADBX_ERRMSG_MAX];
+} DbErr;
+
 /* DB-facing bind parameter used by bound execution APIs.
  * Ownership: all pointers are borrowed for the duration of one db_exec_bound().
  * v1 uses Postgres OID metadata; other backends may ignore pg_oid.
@@ -31,10 +43,12 @@ typedef struct DbExecParam {
 
 typedef struct DbBackendVTable {
   // Establishes a connection described by 'profile' using 'pwd' when needed.
-  // The SafetyPolicy is borrowed and copied inside the backend.
+  // The SafetyPolicy is borrowed and copied inside the backend. 'out_err' is
+  // optional and receives one typed diagnostic on failure.
   // Returns ok/err.
   AdbxStatus (*connect)(DbBackend *db, const ConnProfile *profile,
-                        const SafetyPolicy *policy, const char *pwd);
+                        const SafetyPolicy *policy, const char *pwd,
+                        DbErr *out_err);
 
   // Returns YES if connected, NO if not, ERR on bad input. This should be a
   // cheap check that doesn't perform networking.
@@ -66,16 +80,13 @@ typedef struct DbBackendVTable {
 
   // Creates a QirQueryHandle starting from 'sql'. The backend owns and
   // populates the handle, and the caller must destroy it via
-  // qir_handle_destroy().
+  // qir_handle_destroy(). 'out_err' is optional and receives one typed
+  // diagnostic only when the function returns ERR.
   AdbxStatus (*make_query_ir)(DbBackend *db, const char *sql,
-                              QirQueryHandle *out);
+                              QirQueryHandle *out, DbErr *out_err);
 
   // Returns a list of functions that are safe to execute (v1 uses name only).
   const DbSafeFuncList *(*safe_functions)(DbBackend *db);
-
-  // Returns the latest error detected by db. The returned string is owned by
-  // 'db'
-  const char *(*last_error)(DbBackend *db);
 } DbBackendVTable;
 
 struct DbBackend {
@@ -90,10 +101,20 @@ DbBackend *db_backend_create(DbKind kind);
 /* Small helpers */
 static inline AdbxStatus db_connect(DbBackend *db, const ConnProfile *profile,
                                     const SafetyPolicy *policy,
-                                    const char *pwd) {
-  if (!db || !db->vt || !db->vt->connect)
+                                    const char *pwd, DbErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, DBERR_NONE);
+  if (!db || !db->vt || !db->vt->connect) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "db_connect failed: invalid backend input. This is probably "
+                  "a bug, please report it.");
     return ERR;
-  return db->vt->connect(db, profile, policy, pwd);
+  }
+  AdbxStatus rc = db->vt->connect(db, profile, policy, pwd, out_err);
+  if (rc == ERR && out_err && out_err->code == DBERR_NONE) {
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                  "db_connect failed without backend diagnostics.");
+  }
+  return rc;
 }
 static inline AdbxTriStatus db_is_connected(DbBackend *db) {
   if (!db || !db->vt || !db->vt->is_connected)
@@ -129,22 +150,27 @@ static inline AdbxStatus db_exec_bound(DbBackend *db, const char *sql,
 }
 
 static inline AdbxStatus db_make_query_ir(DbBackend *db, const char *sql,
-                                          QirQueryHandle *out) {
-  if (!db || !db->vt || !db->vt->make_query_ir)
+                                          QirQueryHandle *out,
+                                          DbErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, DBERR_NONE);
+  if (!db || !db->vt || !db->vt->make_query_ir) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "db_make_query_ir failed: invalid backend input. This is "
+                  "probably a bug, please report it.");
     return ERR;
-  return db->vt->make_query_ir(db, sql, out);
+  }
+  AdbxStatus rc = db->vt->make_query_ir(db, sql, out, out_err);
+  if (rc == ERR && out_err && out_err->code == DBERR_NONE) {
+    ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                  "db_make_query_ir failed without backend diagnostics.");
+  }
+  return rc;
 }
 
 static inline const DbSafeFuncList *db_safe_functions(DbBackend *db) {
   if (!db || !db->vt || !db->vt->safe_functions)
     return NULL;
   return db->vt->safe_functions(db);
-}
-
-static inline const char *db_last_error(DbBackend *db) {
-  if (!db || !db->vt || !db->vt->last_error)
-    return NULL;
-  return db->vt->last_error(db);
 }
 /* ------------------------------- for tests --------------------------------*/
 

@@ -165,7 +165,6 @@ int get_validate_query_out(ValidateQueryOut *out, char *sql) {
 
 typedef struct {
   int connected;
-  const char *last_error;
 } FakeDbImpl;
 
 static int g_fake_connect_calls = 0;
@@ -174,28 +173,31 @@ static int g_fake_destroy_calls = 0;
 
 /* Implements a deterministic auth rule for unit tests.
  * It borrows all inputs and updates only the fake backend state.
- * Side effects: marks the backend connected on success, stores a static
- * diagnostic string on failure, and bumps the shared connect counter.
+ * Side effects: marks the backend connected on success, writes one per-call
+ * diagnostic into 'out_err' on failure, and bumps the shared connect counter.
  * Error semantics: returns OK only when 'pwd' equals
  * 'profile->connection_name'; returns ERR otherwise or on invalid input.
  */
 static int fake_connect(DbBackend *db, const ConnProfile *profile,
-                        const SafetyPolicy *policy, const char *pwd) {
+                        const SafetyPolicy *policy, const char *pwd,
+                        DbErr *out_err) {
   (void)policy;
-  if (!db || !db->impl || !profile || !profile->connection_name || !pwd)
+  if (!db || !db->impl || !profile || !profile->connection_name || !pwd) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "fake backend connect failed: invalid input.");
     return ERR;
+  }
 
   FakeDbImpl *impl = (FakeDbImpl *)db->impl;
   g_fake_connect_calls++;
 
   if (strcmp(pwd, profile->connection_name) == 0) {
     impl->connected = 1;
-    impl->last_error = NULL;
     return OK;
   }
 
   impl->connected = 0;
-  impl->last_error = "fake auth failed";
+  ADBX_ERR_SETF(out_err, DBERR_GENERIC, "fake auth failed");
   return ERR;
 }
 
@@ -264,19 +266,6 @@ static const DbSafeFuncList *fake_safe_functions(DbBackend *db) {
   return &list;
 }
 
-/* Returns the latest fake backend error string.
- * It borrows 'db' and returns a static string owned by the fake backend
- * implementation.
- * Error semantics: returns NULL when there is no stored fake error or the
- * backend input is invalid.
- */
-static const char *fake_last_error(DbBackend *db) {
-  if (!db || !db->impl)
-    return NULL;
-  FakeDbImpl *impl = (FakeDbImpl *)db->impl;
-  return impl->last_error;
-}
-
 static const DbBackendVTable FAKE_VT = {
     .connect = fake_connect,
     .is_connected = fake_is_connected,
@@ -284,7 +273,6 @@ static const DbBackendVTable FAKE_VT = {
     .destroy = fake_destroy,
     .exec = fake_exec,
     .safe_functions = fake_safe_functions,
-    .last_error = fake_last_error,
 };
 
 DbBackend *fake_backend_create(DbKind kind) {
@@ -292,7 +280,6 @@ DbBackend *fake_backend_create(DbKind kind) {
   DbBackend *db = (DbBackend *)xmalloc(sizeof(*db));
   FakeDbImpl *impl = (FakeDbImpl *)xmalloc(sizeof(*impl));
   impl->connected = 0;
-  impl->last_error = NULL;
   db->vt = &FAKE_VT;
   db->impl = impl;
   return db;

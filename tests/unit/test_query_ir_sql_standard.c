@@ -81,8 +81,7 @@ static void parse_sql_postgres(const char *sql, QirQueryHandle *out_h) {
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
   ASSERT_TRUE(db->vt && db->vt->make_query_ir);
-
-  ASSERT_TRUE(db->vt->make_query_ir(db, sql, out_h) == OK);
+  ASSERT_TRUE(db_make_query_ir(db, sql, out_h, NULL) == OK);
   db_destroy(db);
 }
 

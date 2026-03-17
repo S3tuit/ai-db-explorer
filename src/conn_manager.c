@@ -81,10 +81,13 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
   }
 
   // Connect
+  DbErr db_err;
   AdbxStatus rc =
-      db_connect(e->backend, e->profile, &e->profile->safe_policy, pw.data);
+      db_connect(e->backend, e->profile, &e->profile->safe_policy, pw.data,
+                 &db_err);
   if (rc != OK) {
-    TLOG("ERROR - db_connect failed for %s", e->profile->connection_name);
+    TLOG("ERROR - db_connect failed for %s: %s", e->profile->connection_name,
+         db_err.msg[0] != '\0' ? db_err.msg : "no backend error detail");
   }
   sb_zero_clean(&pw);
 

@@ -1669,8 +1669,10 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
   sb_init(&ctx.scratch);
 
   QirQueryHandle h = {0};
-  if (db_make_query_ir(req->db, req->sql, &h) != OK) {
-    set_err(&ctx, VERR_PARSE_FAIL, "Failed to parse query.");
+  DbErr db_err;
+  if (db_make_query_ir(req->db, req->sql, &h, &db_err) != OK) {
+    set_err(&ctx, VERR_PARSE_FAIL, "%s",
+            db_err.msg[0] != '\0' ? db_err.msg : "Failed to parse query.");
     free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;

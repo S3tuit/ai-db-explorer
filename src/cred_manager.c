@@ -502,8 +502,9 @@ static AdbxStatus credm_tty_test_connectivity(CredmPromptSession *sess,
     return OK;
   }
 
+  DbErr db_err;
   AdbxStatus crc =
-      db_connect(db_backend, profile, &profile->safe_policy, secret);
+      db_connect(db_backend, profile, &profile->safe_policy, secret, &db_err);
   if (crc == OK) {
     int n = snprintf(res, sizeof(res),
                      use_color ? "\033[32m OK \033[0m %s\n" : " OK  %s\n",
@@ -523,11 +524,11 @@ static AdbxStatus credm_tty_test_connectivity(CredmPromptSession *sess,
     return OK;
   }
 
-  const char *be_err = db_last_error(db_backend);
   int n =
       snprintf(res, sizeof(res),
                use_color ? "\033[31mFAIL\033[0m %s: %s\n" : "FAIL %s: %s\n",
-               profile->connection_name, be_err ? be_err : "connection failed");
+               profile->connection_name,
+               db_err.msg[0] != '\0' ? db_err.msg : "connection failed");
   db_destroy(db_backend);
   if (n < 0 || (size_t)n >= sizeof(res)) {
     credm_set_err(out_err, "failed to format the connectivity test result.");
@@ -1775,23 +1776,22 @@ static AdbxStatus credm_execute_test(const char *config_input,
       continue;
     }
 
+    DbErr db_err;
     AdbxStatus crc =
-        db_connect(backend, profile, &profile->safe_policy, pw.data);
+        db_connect(backend, profile, &profile->safe_policy, pw.data, &db_err);
     if (crc == OK) {
       if (use_color)
         fprintf(stdout, "\033[32m OK \033[0m %s\n", profile->connection_name);
       else
         fprintf(stdout, " OK  %s\n", profile->connection_name);
     } else {
-      const char *be_err =
-          backend->vt->last_error ? backend->vt->last_error(backend) : NULL;
       if (use_color)
         fprintf(stdout, "\033[31mFAIL\033[0m %s: %s\n",
                 profile->connection_name,
-                be_err ? be_err : "connection failed");
+                db_err.msg[0] != '\0' ? db_err.msg : "connection failed");
       else
         fprintf(stdout, "FAIL %s: %s\n", profile->connection_name,
-                be_err ? be_err : "connection failed");
+                db_err.msg[0] != '\0' ? db_err.msg : "connection failed");
       any_failed = 1;
     }
 

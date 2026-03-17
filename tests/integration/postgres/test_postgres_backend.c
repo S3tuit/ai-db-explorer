@@ -60,7 +60,7 @@ static DbBackend *pg_connect_impl(const SafetyPolicy *policy, const char *file,
   if (!profile.db_name)
     profile.db_name = "postgres";
   const char *pwd = env_or_null("PGPASSWORD");
-  int rc = db_connect(pg, &profile, policy, pwd);
+  int rc = db_connect(pg, &profile, policy, pwd, NULL);
   if (rc != OK) {
     // Avoid leaking pg/impl in assertion-fail paths.
     db_destroy(pg);
@@ -273,7 +273,7 @@ static void test_conn_options_applied(void) {
     profile.db_name = "postgres";
   profile.options = "-c search_path=pg_catalog";
   const char *pwd = env_or_null("PGPASSWORD");
-  int rc = db_connect(pg, &profile, &p, pwd);
+  int rc = db_connect(pg, &profile, &p, pwd, NULL);
   ASSERT_TRUE(rc == OK);
 
   QueryResult *qr = PG_EXEC(pg, "SHOW search_path");
