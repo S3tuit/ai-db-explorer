@@ -5,7 +5,9 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        libglib2.0-dev \
         libpq-dev \
+        libsecret-1-dev \
         pkg-config \
         ca-certificates \
         python3 \

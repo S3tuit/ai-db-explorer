@@ -27,29 +27,25 @@ typedef enum {
 #define SSTORE_LOCK_FILENAME "secret_store_backend.lock"
 #define SSTORE_CFG_MAX_BYTES 32u
 
-/* Writes one formatted error into '*out_err' once. Leaves '*out_err' unchanged
- * on allocation failure or when it already contains a message.
+/* Stores one formatted secret-store selection error.
+ * It borrows 'out_err' and writes no heap allocations.
+ * Side effects: updates one caller-owned typed error snapshot.
+ * Error semantics: none; best effort when 'out_err' is NULL.
  */
-static void sstore_set_err(char **out_err, const char *fmt, ...) {
-  if (!out_err || !fmt || *out_err)
+static void sstore_set_err(SecretStoreErr *out_err, SecretStoreErrCode code,
+                           const char *fmt, ...) {
+  if (!out_err)
     return;
 
-  char tmp[512];
+  out_err->code = code;
+  out_err->msg[0] = '\0';
+  if (!fmt)
+    return;
+
   va_list ap;
   va_start(ap, fmt);
-  int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+  (void)vsnprintf(out_err->msg, sizeof(out_err->msg), fmt, ap);
   va_end(ap);
-  if (n < 0)
-    return;
-
-  size_t len = (size_t)n;
-  if (len >= sizeof(tmp))
-    len = sizeof(tmp) - 1;
-
-  char *msg = (char *)xmalloc(len + 1);
-  memcpy(msg, tmp, len);
-  msg[len] = '\0';
-  *out_err = msg;
 }
 
 /* Returns the persisted token associated to one backend kind.
@@ -95,9 +91,10 @@ static AdbxStatus sstore_str_to_kind(const char *s, SstoreKind *out_kind) {
  * must later call sstore_release_lock().
  * Returns OK on success, else, ERR and modifies 'out_err' if not NULL.
  */
-static AdbxStatus sstore_acquire_lock(SstoreLock *out_lock, char **out_err) {
+static AdbxStatus sstore_acquire_lock(SstoreLock *out_lock,
+                                      SecretStoreErr *out_err) {
   if (!out_lock) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_INPUT,
                    "secret store hit an unsafe state during backend selection "
                    "lock acquisition. This is probably a bug, please, report "
                    "it.");
@@ -109,7 +106,7 @@ static AdbxStatus sstore_acquire_lock(SstoreLock *out_lock, char **out_err) {
 
   char *app_err = NULL;
   if (confdir_default_open(&app, NULL, &app_err) != OK) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_DIR,
                    "secret store failed to open the default app directory: %s",
                    app_err ? app_err : "unknown error");
     free(app_err);
@@ -126,7 +123,7 @@ static AdbxStatus sstore_acquire_lock(SstoreLock *out_lock, char **out_err) {
 
   l_fd = openat(app.fd, SSTORE_LOCK_FILENAME, flags, 0600);
   if (l_fd < 0) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_DIR,
                    "failed to open secret-store backend lock file at %s/%s: %s",
                    app.path, SSTORE_LOCK_FILENAME, strerror(errno));
     goto err;
@@ -136,10 +133,11 @@ static AdbxStatus sstore_acquire_lock(SstoreLock *out_lock, char **out_err) {
       .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
   if (fcntl(l_fd, F_SETLK, &exclusive_lock) < 0) {
     if (errno == EACCES || errno == EAGAIN) {
-      sstore_set_err(out_err, "another process is selecting the secret-store "
-                              "backend. Please, retry.");
+      sstore_set_err(out_err, SSERR_ENV,
+                     "another process is selecting the secret-store "
+                     "backend. Please, retry.");
     } else {
-      sstore_set_err(out_err,
+      sstore_set_err(out_err, SSERR_ENV,
                      "failed to acquire secret-store backend lock at %s/%s: %s",
                      app.path, SSTORE_LOCK_FILENAME, strerror(errno));
     }
@@ -172,13 +170,64 @@ static void sstore_release_lock(SstoreLock *lock) {
   confdir_clean(&lock->app);
 }
 
+/* Validates one opened file descriptor. Returns OK when file is a valid
+ * user-owned regular file with mode 0600, ERR otherwise. We do not try to chmod
+ * to repair permissions. In case of failure, modifies 'out_err' with an error
+ * message.
+ */
+static AdbxStatus sstore_validate_fd(int file_fd, SecretStoreErr *out_err) {
+  if (file_fd < 0) {
+    ADBX_ERR_SETF(out_err, SSERR_DIR,
+                  "secret-store read failed: invalid state while validating "
+                  "configuration file: "
+                  "<config-dir>/adbxplorer/%s.",
+                  SSTORE_CFG_FILENAME);
+    return ERR;
+  }
+
+  struct stat st = {0};
+  if (fstat(file_fd, &st) != 0) {
+    ADBX_ERR_SETF(out_err, SSERR_DIR,
+                  "secret-store read failed: cannot stat configuration file: "
+                  "<config-dir>/adbxplorer/%s. %s.",
+                  SSTORE_CFG_FILENAME, strerror(errno));
+    return ERR;
+  }
+
+  if (!S_ISREG(st.st_mode)) {
+    ADBX_ERR_SETF(out_err, SSERR_DIR,
+                  "secret-store read failed: configuration file must be a "
+                  "regular file: <config-dir>/adbxplorer/%s.",
+                  SSTORE_CFG_FILENAME);
+    return ERR;
+  }
+  if (st.st_uid != getuid()) {
+    ADBX_ERR_SETF(
+        out_err, SSERR_DIR,
+        "secret-store read failed: configuration file owner mismatch: "
+        "<config-dir>/adbxplorer/%s.",
+        SSTORE_CFG_FILENAME);
+    return ERR;
+  }
+  if ((st.st_mode & 0777) != 0600) {
+    ADBX_ERR_SETF(out_err, SSERR_DIR,
+                  "secret-store read failed: configuration file mode is %03o, "
+                  "expected 600. Fix with: chmod 600 "
+                  "<config-dir>/adbxplorer/%s.",
+                  (unsigned)(st.st_mode & 0777), SSTORE_CFG_FILENAME);
+    return ERR;
+  }
+
+  return OK;
+}
+
 /* Reads one persisted backend choice from 'dir' and writes the parsed enum into
  * '*out_kind'. Returns YES when the persisted file exists and is valid, NO when
  * it is missing, ERR on invalid input, file-policy failures, I/O errors, or
  * malformed contents.
  */
 static AdbxTriStatus sstore_read_pinned_kind(ConfDir *dir, SstoreKind *out_kind,
-                                             char **out_err) {
+                                             SecretStoreErr *out_err) {
   if (!dir || dir->fd < 0 || !dir->path || !out_kind)
     return ERR;
 
@@ -194,7 +243,7 @@ static AdbxTriStatus sstore_read_pinned_kind(ConfDir *dir, SstoreKind *out_kind,
   if (fd < 0) {
     if (errno == ENOENT)
       return NO;
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_DIR,
                    "failed to open the secret-store backend configuration at "
                    "%s/%s: %s",
                    dir->path, SSTORE_CFG_FILENAME, strerror(errno));
@@ -205,16 +254,12 @@ static AdbxTriStatus sstore_read_pinned_kind(ConfDir *dir, SstoreKind *out_kind,
   StrBuf sb;
   sb_init(&sb);
 
-  if (validate_uown_file(fd, 0600) != OK) {
-    sstore_set_err(out_err,
-                   "secret-store backend configuration at %s/%s violates the "
-                   "expected owner/permission policy.",
-                   dir->path, SSTORE_CFG_FILENAME);
+  if (sstore_validate_fd(fd, out_err) != OK) {
     goto cleanup;
   }
 
   if (fileio_sb_read_limit_fd(fd, SSTORE_CFG_MAX_BYTES, &sb) != OK) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_WRITE,
                    "failed to read the secret-store backend configuration at "
                    "%s/%s: %s",
                    dir->path, SSTORE_CFG_FILENAME, strerror(errno));
@@ -229,7 +274,7 @@ static AdbxTriStatus sstore_read_pinned_kind(ConfDir *dir, SstoreKind *out_kind,
   }
 
   if (sstore_str_to_kind(kind_txt, out_kind) != OK) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_PARSE,
                    "secret-store backend configuration at %s/%s is malformed. "
                    "Expected one of: file, keychain, libsecret.",
                    dir->path, SSTORE_CFG_FILENAME);
@@ -249,9 +294,9 @@ cleanup:
  * returned storage.
  */
 static AdbxStatus sstore_write_pinned_kind(ConfDir *dir, SstoreKind kind,
-                                           char **out_err) {
+                                           SecretStoreErr *out_err) {
   if (!dir || dir->fd < 0 || !dir->path) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_INPUT,
                    "secret store hit an unsafe state while persisting the "
                    "selected backend. This is probably a bug, please, report "
                    "it.");
@@ -260,7 +305,7 @@ static AdbxStatus sstore_write_pinned_kind(ConfDir *dir, SstoreKind kind,
 
   const char *kind_name = sstore_kind_name(kind);
   if (!kind_name) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_INPUT,
                    "secret store hit an unsupported backend selection. This is "
                    "probably a bug, please, report it.");
     return ERR;
@@ -270,7 +315,7 @@ static AdbxStatus sstore_write_pinned_kind(ConfDir *dir, SstoreKind kind,
   // mimic linux, append a new line at the end
   int n = snprintf(buf, sizeof(buf), "%s\n", kind_name);
   if (n <= 0 || (size_t)n >= sizeof(buf)) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_WRITE,
                    "secret store failed to serialize the selected backend. "
                    "This is probably a bug, please, report it.");
     return ERR;
@@ -280,7 +325,7 @@ static AdbxStatus sstore_write_pinned_kind(ConfDir *dir, SstoreKind kind,
                                    (const uint8_t *)buf, (size_t)n, NULL);
   if (wrc != YES) {
     sstore_set_err(
-        out_err,
+        out_err, SSERR_WRITE,
         "failed to persist the selected secret-store backend at %s/%s: %s",
         dir->path, SSTORE_CFG_FILENAME,
         (wrc == NO) ? "lock contention" : strerror(errno));
@@ -297,9 +342,9 @@ static AdbxStatus sstore_write_pinned_kind(ConfDir *dir, SstoreKind kind,
  */
 static AdbxStatus sstore_open_selected_kind(SstoreKind kind,
                                             SecretStore **out_store,
-                                            char **out_err) {
+                                            SecretStoreErr *out_err) {
   if (!out_store) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_INPUT,
                    "secret store hit an unsafe state while opening the "
                    "selected backend. This is probably a bug, please, report "
                    "it.");
@@ -312,16 +357,16 @@ static AdbxStatus sstore_open_selected_kind(SstoreKind kind,
   const char *kind_name = sstore_kind_name(kind);
   switch (kind) {
   case SSTORE_KIND_LIBSECRET:
-    rc = secret_store_libsecret_backend_probe(out_store);
+    rc = secret_store_libsecret_backend_probe(out_store, out_err);
     break;
   case SSTORE_KIND_KEYCHAIN:
-    rc = secret_store_keychain_backend_probe(out_store);
+    rc = secret_store_keychain_backend_probe(out_store, out_err);
     break;
   case SSTORE_KIND_FILE:
-    rc = secret_store_file_backend_probe(out_store);
+    rc = secret_store_file_backend_probe(out_store, out_err);
     break;
   default:
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_INPUT,
                    "secret store hit an unsupported persisted backend. This is "
                    "probably a bug, please, report it.");
     return ERR;
@@ -330,17 +375,19 @@ static AdbxStatus sstore_open_selected_kind(SstoreKind kind,
   if (rc == YES)
     return OK;
   if (rc == NO) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_ENV,
                    "the configured secret-store backend '%s' is unavailable in "
                    "this environment.",
                    kind_name ? kind_name : "unknown");
     return ERR;
   }
 
-  sstore_set_err(out_err,
-                 "the configured secret-store backend '%s' failed to "
-                 "initialize.",
-                 kind_name ? kind_name : "unknown");
+  if (out_err && out_err->code == SSERR_NONE) {
+    sstore_set_err(out_err, SSERR_ENV,
+                   "the configured secret-store backend '%s' failed to "
+                   "initialize.",
+                   kind_name ? kind_name : "unknown");
+  }
   return ERR;
 }
 
@@ -351,9 +398,9 @@ static AdbxStatus sstore_open_selected_kind(SstoreKind kind,
  */
 static AdbxStatus sstore_choose_initial_store(SstoreKind *out_kind,
                                               SecretStore **out_store,
-                                              char **out_err) {
+                                              SecretStoreErr *out_err) {
   if (!out_kind || !out_store) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_INPUT,
                    "secret store hit an unsafe state while choosing the first "
                    "backend. This is probably a bug, please, report it.");
     return ERR;
@@ -377,13 +424,13 @@ static AdbxStatus sstore_choose_initial_store(SstoreKind *out_kind,
 
     switch (kind) {
     case SSTORE_KIND_LIBSECRET:
-      rc = secret_store_libsecret_backend_probe(&store);
+      rc = secret_store_libsecret_backend_probe(&store, out_err);
       break;
     case SSTORE_KIND_KEYCHAIN:
-      rc = secret_store_keychain_backend_probe(&store);
+      rc = secret_store_keychain_backend_probe(&store, out_err);
       break;
     case SSTORE_KIND_FILE:
-      rc = secret_store_file_backend_probe(&store);
+      rc = secret_store_file_backend_probe(&store, out_err);
       break;
     default:
       rc = ERR;
@@ -396,16 +443,18 @@ static AdbxStatus sstore_choose_initial_store(SstoreKind *out_kind,
       return OK;
     }
     if (rc == ERR) {
-      sstore_set_err(
-          out_err,
-          "preferred secret-store backend '%s' failed to initialize; refusing "
-          "to silently fall back to a different backend.",
-          sstore_kind_name(kind));
+      if (out_err && out_err->code == SSERR_NONE) {
+        sstore_set_err(out_err, SSERR_ENV,
+                       "preferred secret-store backend '%s' failed to "
+                       "initialize; refusing "
+                       "to silently fall back to a different backend.",
+                       sstore_kind_name(kind));
+      }
       return ERR;
     }
   }
 
-  sstore_set_err(out_err,
+  sstore_set_err(out_err, SSERR_ENV,
                  "no supported secret-store backend is available in this "
                  "environment.");
   return ERR;
@@ -421,9 +470,9 @@ static AdbxStatus sstore_choose_initial_store(SstoreKind *out_kind,
  */
 static AdbxStatus sstore_resolve_backend(SstoreKind *out_kind,
                                          SecretStore **out_store,
-                                         char **out_err) {
+                                         SecretStoreErr *out_err) {
   if (!out_kind || !out_store) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_INPUT,
                    "secret store hit an unsafe state while resolving the "
                    "backend. This is probably a bug, please, report it.");
     return ERR;
@@ -436,7 +485,7 @@ static AdbxStatus sstore_resolve_backend(SstoreKind *out_kind,
   ConfDir app = {.fd = -1, .path = NULL};
   char *app_err = NULL;
   if (confdir_default_open(&app, NULL, &app_err) != OK) {
-    sstore_set_err(out_err,
+    sstore_set_err(out_err, SSERR_DIR,
                    "secret store failed to open the default app directory: %s",
                    app_err ? app_err : "unknown error");
     free(app_err);
@@ -480,11 +529,8 @@ cleanup:
   return rc;
 }
 
-SecretStore *secret_store_create(char **out_err) {
-#ifdef DUMMY_SECRET_STORE_WARNING
-  (void)out_err;
-  return secret_store_dummy_backend_create();
-#endif
+SecretStore *secret_store_create(SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
 
   SecretStore *store = NULL;
   SstoreKind kind = SSTORE_KIND_NONE;
@@ -507,47 +553,87 @@ void secret_store_destroy(SecretStore *store) {
 }
 
 AdbxTriStatus secret_store_get(SecretStore *store, const SecretRefInfo *ref,
-                               StrBuf *out) {
-  if (!store || !store->vt || !store->vt->get)
+                               StrBuf *out, SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!store || !store->vt || !store->vt->get) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store get failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
-  return store->vt->get(store, ref, out);
+  }
+  AdbxTriStatus rc = store->vt->get(store, ref, out, out_err);
+  if (rc == ERR && out_err && out_err->code == SSERR_NONE) {
+    ADBX_ERR_SETF(out_err, SSERR_ENV,
+                  "secret-store get failed without backend diagnostics.");
+  }
+  return rc;
 }
 
 AdbxStatus secret_store_set(SecretStore *store, const SecretRefInfo *ref,
-                            const char *secret) {
-  if (!store || !store->vt || !store->vt->set)
+                            const char *secret, SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!store || !store->vt || !store->vt->set) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store set failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
-  return store->vt->set(store, ref, secret);
+  }
+  AdbxStatus rc = store->vt->set(store, ref, secret, out_err);
+  if (rc == ERR && out_err && out_err->code == SSERR_NONE) {
+    ADBX_ERR_SETF(out_err, SSERR_ENV,
+                  "secret-store set failed without backend diagnostics.");
+  }
+  return rc;
 }
 
-AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref) {
-  if (!store || !store->vt || !store->vt->delete)
+AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref,
+                               SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!store || !store->vt || !store->vt->delete) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store delete failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
-  return store->vt->delete(store, ref);
+  }
+  AdbxStatus rc = store->vt->delete(store, ref, out_err);
+  if (rc == ERR && out_err && out_err->code == SSERR_NONE) {
+    ADBX_ERR_SETF(out_err, SSERR_ENV,
+                  "secret-store delete failed without backend diagnostics.");
+  }
+  return rc;
 }
 
 AdbxStatus secret_store_wipe_namespace(SecretStore *store,
-                                       const char *cred_namespace) {
-  if (!store || !store->vt || !store->vt->wipe_namespace)
+                                       const char *cred_namespace,
+                                       SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!store || !store->vt || !store->vt->wipe_namespace) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store namespace wipe failed: invalid input pointers. "
+                  "This is probably a bug, please, report it.");
     return ERR;
-  return store->vt->wipe_namespace(store, cred_namespace);
+  }
+  AdbxStatus rc = store->vt->wipe_namespace(store, cred_namespace, out_err);
+  if (rc == ERR && out_err && out_err->code == SSERR_NONE) {
+    ADBX_ERR_SETF(
+        out_err, SSERR_ENV,
+        "secret-store namespace wipe failed without backend diagnostics.");
+  }
+  return rc;
 }
 
-AdbxStatus secret_store_wipe_all(SecretStore *store) {
-  if (!store || !store->vt || !store->vt->wipe_all)
+AdbxStatus secret_store_wipe_all(SecretStore *store, SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!store || !store->vt || !store->vt->wipe_all) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store wipe_all failed: invalid input pointers. This "
+                  "is probably a bug, please, report it.");
     return ERR;
-  return store->vt->wipe_all(store);
-}
-
-const char *secret_store_last_error(SecretStore *store) {
-  if (!store || !store->vt || !store->vt->last_error)
-    return "";
-  const char *msg = store->vt->last_error(store);
-  return msg ? msg : "";
-}
-
-SecretStoreErrCode secret_store_last_error_code(SecretStore *store) {
-  if (!store || !store->vt || !store->vt->last_error_code)
-    return SSERR_NONE;
-  return store->vt->last_error_code(store);
+  }
+  AdbxStatus rc = store->vt->wipe_all(store, out_err);
+  if (rc == ERR && out_err && out_err->code == SSERR_NONE) {
+    ADBX_ERR_SETF(out_err, SSERR_ENV,
+                  "secret-store wipe_all failed without backend diagnostics.");
+  }
+  return rc;
 }

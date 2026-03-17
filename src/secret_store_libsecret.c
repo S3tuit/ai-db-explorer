@@ -2,7 +2,9 @@
 
 #ifndef __linux__
 
-AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store) {
+AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store,
+                                                   SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
   if (!out_store)
     return ERR;
   *out_store = NULL;
@@ -15,7 +17,6 @@ AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store) {
 #include <glib.h>
 #include <libsecret/secret.h>
 #include <pthread.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@ typedef GList *(*fn_password_search_sync)(const SecretSchema *,
 typedef SecretService *(*fn_service_get_sync)(SecretServiceFlags,
                                               GCancellable *, GError **);
 typedef void (*fn_password_wipe)(gchar *);
+typedef void (*fn_password_free)(gchar *);
 typedef void (*fn_object_unref)(gpointer);
 typedef void (*fn_error_free)(GError *);
 typedef GHashTable *(*fn_retrievable_get_attributes)(SecretRetrievable *);
@@ -53,6 +55,7 @@ typedef struct {
   fn_password_search_sync search;
   fn_service_get_sync svc_get;
   fn_password_wipe pw_wipe;
+  fn_password_free pw_free;
   fn_object_unref obj_unref;
   fn_error_free err_free;
   fn_retrievable_get_attributes retrievable_get_attrs;
@@ -77,7 +80,12 @@ static pthread_once_t ls_once = PTHREAD_ONCE_INIT;
 
 /* ------------------------------- schema --------------------------------- */
 
+#ifdef ADBX_TEST_MODE
+// we don't wanna mess our local when running unit tests
+#define LS_APP_TAG "adbxplorer-test"
+#else
 #define LS_APP_TAG "adbxplorer"
+#endif
 
 static const SecretSchema ls_schema = {
     .name = "com.adbxplorer.secret-store.v1",
@@ -91,12 +99,26 @@ static const SecretSchema ls_schema = {
         },
 };
 
+/* Selects which libsecret collection should receive stored secrets.
+ * It allocates no memory and returns one borrowed libsecret collection name.
+ * Side effects: reads one optional test-only environment variable.
+ * Return semantics: returns SECRET_COLLECTION_DEFAULT in normal builds and on
+ * unset input; in ADBX_TEST_MODE it returns SECRET_COLLECTION_SESSION when
+ * ADBX_LIBSECRET_COLLECTION=session is set.
+ */
+static const gchar *ls_store_collection_name(void) {
+#ifdef ADBX_TEST_MODE
+  const char *name = getenv("ADBX_LIBSECRET_COLLECTION");
+  if (name && strcmp(name, "session") == 0)
+    return SECRET_COLLECTION_SESSION;
+#endif
+  return SECRET_COLLECTION_DEFAULT;
+}
+
 /* ----------------------------- backend store ---------------------------- */
 
 typedef struct {
   SecretStore base;
-  SecretStoreErrCode last_err_code;
-  char last_err_msg[256];
 } LibsecretStore;
 
 /* Loads libsecret and every required symbol exactly once for the process.
@@ -125,6 +147,7 @@ static void ls_load(void) {
       (fn_password_search_sync)dlsym(h, "secret_password_search_sync");
   ls_api.svc_get = (fn_service_get_sync)dlsym(h, "secret_service_get_sync");
   ls_api.pw_wipe = (fn_password_wipe)dlsym(h, "secret_password_wipe");
+  ls_api.pw_free = (fn_password_free)dlsym(h, "secret_password_free");
   ls_api.obj_unref = (fn_object_unref)dlsym(h, "g_object_unref");
   ls_api.err_free = (fn_error_free)dlsym(h, "g_error_free");
   ls_api.retrievable_get_attrs = (fn_retrievable_get_attributes)dlsym(
@@ -134,9 +157,10 @@ static void ls_load(void) {
   ls_api.list_free = (fn_list_free)dlsym(h, "g_list_free");
 
   if (!ls_api.lookup || !ls_api.store || !ls_api.clear || !ls_api.search ||
-      !ls_api.svc_get || !ls_api.pw_wipe || !ls_api.obj_unref ||
-      !ls_api.err_free || !ls_api.retrievable_get_attrs ||
-      !ls_api.hash_lookup || !ls_api.hash_unref || !ls_api.list_free) {
+      !ls_api.svc_get || !ls_api.pw_wipe || !ls_api.pw_free ||
+      !ls_api.obj_unref || !ls_api.err_free ||
+      !ls_api.retrievable_get_attrs || !ls_api.hash_lookup ||
+      !ls_api.hash_unref || !ls_api.list_free) {
     ls_state = LS_BROKEN;
     return;
   }
@@ -157,54 +181,26 @@ static void ls_load(void) {
   ls_state = LS_AVAILABLE;
 }
 
-/* Clears one backend error snapshot before a new operation.
- */
-static void ls_clear_err(LibsecretStore *s) {
-  if (!s)
-    return;
-  s->last_err_code = SSERR_NONE;
-  s->last_err_msg[0] = '\0';
-}
-
-/* Stores one formatted backend error snapshot for diagnostics.
- * It borrows 's' and 'fmt'; it allocates no returned memory.
- */
-static void ls_set_err(LibsecretStore *s, SecretStoreErrCode code,
-                       const char *fmt, ...) {
-  if (!s)
-    return;
-
-  s->last_err_code = code;
-  s->last_err_msg[0] = '\0';
-  if (!fmt)
-    return;
-
-  va_list ap;
-  va_start(ap, fmt);
-  (void)vsnprintf(s->last_err_msg, sizeof(s->last_err_msg), fmt, ap);
-  va_end(ap);
-}
-
 /* Validates one typed secret reference before a backend operation.
- * It borrows 's', 'ref', and 'op_name'; it allocates no memory.
- * Side effects: updates the backend error snapshot on invalid input.
+ * It borrows 'ref' and 'op_name'; it allocates no memory.
+ * Side effects: writes one caller-owned typed error on invalid input.
  * Returns OK on valid namespace+connection-name pairs, ERR on invalid input.
  */
-static AdbxStatus ls_validate_ref(LibsecretStore *s, const SecretRefInfo *ref,
-                                  const char *op_name) {
-  if (!s || !op_name || !ref || !ref->cred_namespace || !ref->connection_name) {
-    ls_set_err(s, SSERR_INPUT,
-               "libsecret %s failed: invalid input pointers. This is probably "
-               "a bug, please, report it.",
-               op_name ? op_name : "operation");
+static AdbxStatus ls_validate_ref(const SecretRefInfo *ref, const char *op_name,
+                                  SecretStoreErr *out_err) {
+  if (!op_name || !ref || !ref->cred_namespace || !ref->connection_name) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret %s failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.",
+                  op_name ? op_name : "operation");
     return ERR;
   }
 
   if (ref->cred_namespace[0] == '\0' || ref->connection_name[0] == '\0') {
-    ls_set_err(s, SSERR_INPUT,
-               "libsecret %s failed: secret reference fields cannot be empty. "
-               "This is probably a bug, please, report it.",
-               op_name);
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret %s failed: secret reference fields cannot be "
+                  "empty. This is probably a bug, please, report it.",
+                  op_name);
     return ERR;
   }
 
@@ -212,21 +208,22 @@ static AdbxStatus ls_validate_ref(LibsecretStore *s, const SecretRefInfo *ref,
 }
 
 /* Appends one looked-up password into 'out' using the SecretStore get
- * contract. Clears the error of 'base' before execution.
+ * contract.
  * It borrows 'base' and 'ref'; 'out' remains caller-owned and is reset by this
  * function before use.
  * Returns YES when the secret exists, NO when it is missing, ERR on failure.
  * failures.
  */
 static AdbxTriStatus ls_get(SecretStore *base, const SecretRefInfo *ref,
-                            StrBuf *out) {
-  if (!base || !out)
+                            StrBuf *out, SecretStoreErr *out_err) {
+  if (!base || !out) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret get failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
+  }
 
-  LibsecretStore *s = (LibsecretStore *)base;
-  ls_clear_err(s);
-
-  if (ls_validate_ref(s, ref, "get") != OK)
+  if (ls_validate_ref(ref, "get", out_err) != OK)
     return ERR;
 
   sb_zero_clean(out);
@@ -237,7 +234,8 @@ static AdbxTriStatus ls_get(SecretStore *base, const SecretRefInfo *ref,
                             "credentialNamespace", ref->cred_namespace,
                             "connectionName", ref->connection_name, NULL);
   if (err) {
-    ls_set_err(s, SSERR_ENV, "libsecret lookup failed: %s", err->message);
+    ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret lookup failed: %s",
+                  err->message);
     ls_api.err_free(err);
     return ERR;
   }
@@ -247,33 +245,35 @@ static AdbxTriStatus ls_get(SecretStore *base, const SecretRefInfo *ref,
   size_t n = strlen(pw);
   AdbxStatus rc = sb_append_bytes(out, pw, n + 1);
   ls_api.pw_wipe(pw);
+  ls_api.pw_free(pw);
 
   if (rc != OK) {
-    ls_set_err(s, SSERR_WRITE,
-               "libsecret get failed: unable to allocate the output buffer. "
-               "Please, retry.");
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "libsecret get failed: unable to allocate the output buffer. "
+                  "Please, retry.");
     return ERR;
   }
 
   return YES;
 }
 
-/* Stores or replaces one secret in the default libsecret collection.
+/* Stores or replaces one secret in the selected libsecret collection.
  */
 static AdbxStatus ls_set(SecretStore *base, const SecretRefInfo *ref,
-                         const char *secret) {
-  if (!base)
+                         const char *secret, SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret set failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
+  }
 
-  LibsecretStore *s = (LibsecretStore *)base;
-  ls_clear_err(s);
-
-  if (ls_validate_ref(s, ref, "set") != OK)
+  if (ls_validate_ref(ref, "set", out_err) != OK)
     return ERR;
   if (!secret) {
-    ls_set_err(s, SSERR_INPUT,
-               "libsecret set failed: NULL secret. This is probably a bug, "
-               "please, report it.");
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret set failed: NULL secret. This is probably a bug, "
+                  "please, report it.");
     return ERR;
   }
 
@@ -282,17 +282,18 @@ static AdbxStatus ls_set(SecretStore *base, const SecretRefInfo *ref,
                  ref->connection_name);
 
   GError *err = NULL;
-  gboolean ok = ls_api.store(&ls_schema, SECRET_COLLECTION_DEFAULT, label,
+  gboolean ok = ls_api.store(&ls_schema, ls_store_collection_name(), label,
                              secret, NULL, &err, "app", LS_APP_TAG,
                              "credentialNamespace", ref->cred_namespace,
                              "connectionName", ref->connection_name, NULL);
   if (err) {
-    ls_set_err(s, SSERR_ENV, "libsecret store failed: %s", err->message);
+    ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret store failed: %s",
+                  err->message);
     ls_api.err_free(err);
     return ERR;
   }
   if (!ok) {
-    ls_set_err(s, SSERR_ENV, "libsecret store returned failure.");
+    ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret store returned failure.");
     return ERR;
   }
 
@@ -301,14 +302,16 @@ static AdbxStatus ls_set(SecretStore *base, const SecretRefInfo *ref,
 
 /* Deletes one secret inside 'base' identified by 'ref'.
  */
-static AdbxStatus ls_delete(SecretStore *base, const SecretRefInfo *ref) {
-  if (!base)
+static AdbxStatus ls_delete(SecretStore *base, const SecretRefInfo *ref,
+                            SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret delete failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
+  }
 
-  LibsecretStore *s = (LibsecretStore *)base;
-  ls_clear_err(s);
-
-  if (ls_validate_ref(s, ref, "delete") != OK)
+  if (ls_validate_ref(ref, "delete", out_err) != OK)
     return ERR;
 
   GError *err = NULL;
@@ -316,14 +319,17 @@ static AdbxStatus ls_delete(SecretStore *base, const SecretRefInfo *ref) {
                              "credentialNamespace", ref->cred_namespace,
                              "connectionName", ref->connection_name, NULL);
   if (err) {
-    ls_set_err(s, SSERR_ENV, "libsecret delete failed: %s", err->message);
+    ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret delete failed: %s",
+                  err->message);
     ls_api.err_free(err);
     return ERR;
   }
-  if (!ok) {
-    ls_set_err(s, SSERR_ENV, "libsecret delete returned failure.");
-    return ERR;
-  }
+
+  /* libsecret reports whether any matching item was removed, not whether the
+   * clear operation itself was valid. The SecretStore contract treats missing
+   * refs as a successful no-op, so FALSE without GError maps to OK here.
+   */
+  (void)ok;
 
   return OK;
 }
@@ -333,17 +339,20 @@ static AdbxStatus ls_delete(SecretStore *base, const SecretRefInfo *ref) {
  * failures.
  */
 static AdbxStatus ls_wipe_namespace(SecretStore *base,
-                                    const char *cred_namespace) {
-  if (!base)
+                                    const char *cred_namespace,
+                                    SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(
+        out_err, SSERR_INPUT,
+        "libsecret namespace wipe failed: invalid input pointers. This is "
+        "probably a bug, please, report it.");
     return ERR;
-
-  LibsecretStore *s = (LibsecretStore *)base;
-  ls_clear_err(s);
+  }
 
   if (!cred_namespace || cred_namespace[0] == '\0') {
-    ls_set_err(s, SSERR_INPUT,
-               "libsecret namespace wipe failed: invalid namespace. This is "
-               "probably a bug, please, report it.");
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret namespace wipe failed: invalid namespace. This "
+                  "is probably a bug, please, report it.");
     return ERR;
   }
 
@@ -351,15 +360,17 @@ static AdbxStatus ls_wipe_namespace(SecretStore *base,
   gboolean ok = ls_api.clear(&ls_schema, NULL, &err, "app", LS_APP_TAG,
                              "credentialNamespace", cred_namespace, NULL);
   if (err) {
-    ls_set_err(s, SSERR_ENV, "libsecret wipe_namespace failed: %s",
-               err->message);
+    ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret wipe_namespace failed: %s",
+                  err->message);
     ls_api.err_free(err);
     return ERR;
   }
-  if (!ok) {
-    ls_set_err(s, SSERR_ENV, "libsecret wipe_namespace returned failure.");
-    return ERR;
-  }
+
+  /* libsecret returns FALSE when no matching item was removed. Namespace
+   * wipes in SecretStore are defined as successful no-ops on empty/missing
+   * namespaces, so FALSE without GError maps to OK here.
+   */
+  (void)ok;
 
   return OK;
 }
@@ -367,24 +378,27 @@ static AdbxStatus ls_wipe_namespace(SecretStore *base,
 /* Deletes every adbxplorer-owned secret across all namespaces.
  * Returns OK on success, ERR on invalid input or libsecret failures.
  */
-static AdbxStatus ls_wipe_all(SecretStore *base) {
-  if (!base)
+static AdbxStatus ls_wipe_all(SecretStore *base, SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret wipe_all failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
-
-  LibsecretStore *s = (LibsecretStore *)base;
-  ls_clear_err(s);
+  }
 
   GError *err = NULL;
   gboolean ok = ls_api.clear(&ls_schema, NULL, &err, "app", LS_APP_TAG, NULL);
   if (err) {
-    ls_set_err(s, SSERR_ENV, "libsecret wipe_all failed: %s", err->message);
+    ADBX_ERR_SETF(out_err, SSERR_ENV, "libsecret wipe_all failed: %s",
+                  err->message);
     ls_api.err_free(err);
     return ERR;
   }
-  if (!ok) {
-    ls_set_err(s, SSERR_ENV, "libsecret wipe_all returned failure.");
-    return ERR;
-  }
+
+  /* libsecret returns FALSE when no matching item was removed. The
+   * SecretStore wipe_all contract treats an already-empty store as OK.
+   */
+  (void)ok;
 
   return OK;
 }
@@ -395,24 +409,6 @@ static AdbxStatus ls_wipe_all(SecretStore *base) {
  */
 static void ls_destroy(SecretStore *base) { free(base); }
 
-/* Returns the last backend error message.
- * It borrows 'base' and returns a pointer owned by the backend wrapper.
- * Returns an empty string on invalid input.
- */
-static const char *ls_last_error(SecretStore *base) {
-  if (!base)
-    return "";
-  return ((LibsecretStore *)base)->last_err_msg;
-}
-
-/* Returns the last backend error category.
- */
-static SecretStoreErrCode ls_last_error_code(SecretStore *base) {
-  if (!base)
-    return SSERR_NONE;
-  return ((LibsecretStore *)base)->last_err_code;
-}
-
 static const SecretStoreVTable LS_VTABLE = {
     .get = ls_get,
     .set = ls_set,
@@ -420,29 +416,47 @@ static const SecretStoreVTable LS_VTABLE = {
     .wipe_namespace = ls_wipe_namespace,
     .wipe_all = ls_wipe_all,
     .destroy = ls_destroy,
-    .last_error = ls_last_error,
-    .last_error_code = ls_last_error_code,
 };
 
-AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store) {
-  if (!out_store)
+AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store,
+                                                   SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!out_store) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "libsecret backend probe failed: invalid output pointer. "
+                  "This is probably a bug, please, report it.");
     return ERR;
+  }
   *out_store = NULL;
 
-  if (pthread_once(&ls_once, ls_load) != 0)
+  if (pthread_once(&ls_once, ls_load) != 0) {
+    ADBX_ERR_SETF(out_err, SSERR_ENV,
+                  "libsecret backend probe failed while loading runtime "
+                  "symbols.");
     return ERR;
+  }
 
   switch (ls_state) {
   case LS_MISSING:
+    ADBX_ERR_SETF(out_err, SSERR_ENV,
+                  "libsecret backend is unavailable in this environment.");
     return NO;
   case LS_BROKEN:
   case LS_UNTRIED:
+    ADBX_ERR_SETF(out_err, SSERR_ENV,
+                  "libsecret backend failed to initialize safely.");
     return ERR;
   case LS_AVAILABLE:
     break;
   }
 
   LibsecretStore *s = (LibsecretStore *)xcalloc(1, sizeof(*s));
+  if (!s) {
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "libsecret backend probe failed: memory allocation error. "
+                  "Please, retry.");
+    return ERR;
+  }
   s->base.vt = &LS_VTABLE;
   *out_store = &s->base;
   return YES;

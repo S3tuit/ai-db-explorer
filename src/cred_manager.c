@@ -80,14 +80,16 @@ static void credm_set_err(char **out_err, const char *fmt, ...) {
   *out_err = msg;
 }
 
-/* Formats one backend failure using the SecretStore diagnostic snapshot.
- * It borrows 'store' and writes one heap message into '*out_err'.
+/* Formats one backend failure using one per-call SecretStore error snapshot.
+ * It borrows 'ss_err' and writes one heap message into '*out_err'.
  * Error semantics: best effort; always returns ERR so callers can tail-return.
  */
-static AdbxStatus credm_set_store_err(char **out_err, SecretStore *store,
+static AdbxStatus credm_set_store_err(char **out_err,
+                                      const SecretStoreErr *ss_err,
                                       const char *op_name) {
   credm_set_err(out_err, "credential %s failed: %s", op_name,
-                secret_store_last_error(store));
+                (ss_err && ss_err->msg[0] != '\0') ? ss_err->msg
+                                                   : "unknown error");
   return ERR;
 }
 
@@ -100,17 +102,15 @@ static AdbxStatus credm_open_secret_store(SecretStore **out_store,
     return ERR;
 
   *out_store = NULL;
-  char *ss_err = NULL;
+  SecretStoreErr ss_err;
   SecretStore *store = secret_store_create(&ss_err);
   if (!store) {
     credm_set_err(out_err,
                   "failed to initialize the configured secret store: %s",
-                  ss_err ? ss_err : "unknown error");
-    free(ss_err);
+                  ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
     return ERR;
   }
 
-  free(ss_err);
   *out_store = store;
   return OK;
 }
@@ -979,10 +979,12 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
     // fields unchanged — only KEEP if the secret actually exists in the store
     StrBuf secret;
     sb_init(&secret);
-    AdbxTriStatus grc = secret_store_get(store, &conf_p->secret_ref, &secret);
+    SecretStoreErr ss_err;
+    AdbxTriStatus grc =
+        secret_store_get(store, &conf_p->secret_ref, &secret, &ss_err);
     sb_zero_clean(&secret);
     if (grc == ERR)
-      return credm_set_store_err(out_err, store, "lookup");
+      return credm_set_store_err(out_err, &ss_err, "lookup");
 
     out_act->kind = (grc == YES) ? CREDM_SYNC_ACT_KEEP : CREDM_SYNC_ACT_PROMPT;
     return OK;
@@ -1031,11 +1033,13 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
 
     StrBuf secret;
     sb_init(&secret);
-    AdbxTriStatus grc = secret_store_get(
-        store, &state_cat->profiles[tuple_match_idx].secret_ref, &secret);
+    SecretStoreErr ss_err;
+    AdbxTriStatus grc =
+        secret_store_get(store, &state_cat->profiles[tuple_match_idx].secret_ref,
+                         &secret, &ss_err);
     sb_zero_clean(&secret);
     if (grc == ERR)
-      return credm_set_store_err(out_err, store, "lookup");
+      return credm_set_store_err(out_err, &ss_err, "lookup");
 
     out_act->kind =
         (grc == YES) ? CREDM_SYNC_ACT_RENAME : CREDM_SYNC_ACT_PROMPT;
@@ -1069,10 +1073,12 @@ static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
     const ConnProfile *old_p = &state_cat->profiles[act->state_idx];
     StrBuf secret;
     sb_init(&secret);
-    AdbxTriStatus grc = secret_store_get(store, &old_p->secret_ref, &secret);
+    SecretStoreErr ss_err;
+    AdbxTriStatus grc =
+        secret_store_get(store, &old_p->secret_ref, &secret, &ss_err);
     if (grc == ERR) {
       sb_zero_clean(&secret);
-      return credm_set_store_err(out_err, store,
+      return credm_set_store_err(out_err, &ss_err,
                                  "lookup failure during sync. Please, retry.");
     }
     if (grc == NO) {
@@ -1088,15 +1094,16 @@ static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
             "Reusing stored password for renamed connection '%s' -> "
             "'%s'\n",
             old_p->connection_name, conf_p->connection_name);
-    if (secret_store_set(store, &conf_p->secret_ref, secret.data) != OK) {
+    if (secret_store_set(store, &conf_p->secret_ref, secret.data, &ss_err) !=
+        OK) {
       sb_zero_clean(&secret);
       return credm_set_store_err(
-          out_err, store, "secret write failure during sync. Please, retry.");
+          out_err, &ss_err, "secret write failure during sync. Please, retry.");
     }
-    if (secret_store_delete(store, &old_p->secret_ref) != OK) {
+    if (secret_store_delete(store, &old_p->secret_ref, &ss_err) != OK) {
       sb_zero_clean(&secret);
       return credm_set_store_err(
-          out_err, store, "secret delete failure during sync. Please, retry.");
+          out_err, &ss_err, "secret delete failure during sync. Please, retry.");
     }
     sb_zero_clean(&secret);
     return OK;
@@ -1110,11 +1117,14 @@ static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
     AdbxStatus rc = OK;
     if (credm_prompt_password(sess, conf_p, &secret, out_err) != OK) {
       rc = ERR;
-    } else if (secret_store_set(store, &conf_p->secret_ref, secret.data) !=
-               OK) {
+    } else {
+      SecretStoreErr ss_err;
+      if (secret_store_set(store, &conf_p->secret_ref, secret.data, &ss_err) !=
+          OK) {
       rc = credm_set_store_err(
-          out_err, store,
+          out_err, &ss_err,
           "secret store write failure during sync. Please, retry.");
+      }
     }
     sb_zero_clean(&secret);
     return rc;
@@ -1271,9 +1281,10 @@ credm_plan_sync_all(const ConnCatalog *conf_cat, const ConnCatalog *state_cat,
     if (mrc == ERR) {
       free(actions);
       free(state_seen);
-      return credm_set_store_err(out_err, store,
-                                 "invalid values during sync. This is probably "
-                                 "a bug, please, report it.");
+      credm_set_err(out_err,
+                    "credential sync hit an internal bug while matching "
+                    "current config names against saved state.");
+      return ERR;
     }
     if (mrc == NO)
       continue; // no name match — leave UNKNOWN for phase 2
@@ -1288,9 +1299,10 @@ credm_plan_sync_all(const ConnCatalog *conf_cat, const ConnCatalog *state_cat,
     if (same == ERR) {
       free(actions);
       free(state_seen);
-      return credm_set_store_err(out_err, store,
-                                 "invalid values during sync. This is probably "
-                                 "a bug, please, report it.");
+      credm_set_err(out_err,
+                    "credential sync hit an internal bug while comparing "
+                    "current config entries against saved state.");
+      return ERR;
     }
     if (same == NO) {
       // fields changed: the old password is no longer valid
@@ -1301,12 +1313,14 @@ credm_plan_sync_all(const ConnCatalog *conf_cat, const ConnCatalog *state_cat,
     // fields unchanged — only KEEP if the secret actually exists in the store
     StrBuf secret;
     sb_init(&secret);
-    AdbxTriStatus src = secret_store_get(store, &conf_p->secret_ref, &secret);
+    SecretStoreErr ss_err;
+    AdbxTriStatus src =
+        secret_store_get(store, &conf_p->secret_ref, &secret, &ss_err);
     sb_zero_clean(&secret);
     if (src == ERR) {
       free(actions);
       free(state_seen);
-      return credm_set_store_err(out_err, store,
+      return credm_set_store_err(out_err, &ss_err,
                                  "invalid state during lookup. This is "
                                  "probably a bug, please, report it.");
     }
@@ -1331,10 +1345,10 @@ credm_plan_sync_all(const ConnCatalog *conf_cat, const ConnCatalog *state_cat,
       if (same == ERR) {
         free(actions);
         free(state_seen);
-        return credm_set_store_err(
-            out_err, store,
-            "invalid values during sync. This is probably "
-            "a bug, please, report it.");
+        credm_set_err(out_err,
+                      "credential sync hit an internal bug while comparing "
+                      "connection tuples during rename detection.");
+        return ERR;
       }
       if (same == YES) {
         match_idx = j;
@@ -1350,13 +1364,15 @@ credm_plan_sync_all(const ConnCatalog *conf_cat, const ConnCatalog *state_cat,
       // we can only reuse the credential if the old secret still exists
       StrBuf secret;
       sb_init(&secret);
-      AdbxTriStatus src = secret_store_get(
-          store, &state_cat->profiles[match_idx].secret_ref, &secret);
+      SecretStoreErr ss_err;
+      AdbxTriStatus src =
+          secret_store_get(store, &state_cat->profiles[match_idx].secret_ref,
+                           &secret, &ss_err);
       sb_zero_clean(&secret);
       if (src == ERR) {
         free(actions);
         free(state_seen);
-        return credm_set_store_err(out_err, store, "lookup");
+        return credm_set_store_err(out_err, &ss_err, "lookup");
       }
       if (src == YES) {
         actions[i].kind = CREDM_SYNC_ACT_RENAME;
@@ -1417,9 +1433,10 @@ static AdbxStatus credm_apply_sync_all(const ConnCatalog *conf_cat,
     for (size_t i = 0; i < state_cat->n_profiles; i++) {
       if (state_seen[i])
         continue;
-      if (secret_store_delete(store, &state_cat->profiles[i].secret_ref) !=
-          OK) {
-        rc = credm_set_store_err(out_err, store, "delete");
+      SecretStoreErr ss_err;
+      if (secret_store_delete(store, &state_cat->profiles[i].secret_ref,
+                              &ss_err) != OK) {
+        rc = credm_set_store_err(out_err, &ss_err, "delete");
         break;
       }
     }
@@ -1716,7 +1733,9 @@ static AdbxStatus credm_execute_test(const char *config_input,
 
     StrBuf pw;
     sb_init(&pw);
-    AdbxTriStatus grc = secret_store_get(store, &profile->secret_ref, &pw);
+    SecretStoreErr ss_err;
+    AdbxTriStatus grc =
+        secret_store_get(store, &profile->secret_ref, &pw, &ss_err);
 
     if (grc == NO) {
       if (use_color)
@@ -1732,10 +1751,11 @@ static AdbxStatus credm_execute_test(const char *config_input,
     if (grc == ERR) {
       if (use_color)
         fprintf(stdout, "\033[31mFAIL\033[0m %s: %s\n",
-                profile->connection_name, secret_store_last_error(store));
+                profile->connection_name,
+                ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
       else
         fprintf(stdout, "FAIL %s: %s\n", profile->connection_name,
-                secret_store_last_error(store));
+                ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
       sb_zero_clean(&pw);
       any_failed = 1;
       continue;
@@ -1910,9 +1930,11 @@ static AdbxStatus credm_execute_reset_namespace(const char *cred_namespace,
     return ERR;
   }
 
-  if (secret_store_wipe_namespace(store, cred_namespace) != OK) {
+  SecretStoreErr ss_err;
+  if (secret_store_wipe_namespace(store, cred_namespace, &ss_err) != OK) {
     credm_set_err(out_err, "failed to wipe secrets for namespace '%s': %s",
-                  cred_namespace, secret_store_last_error(store));
+                  cred_namespace,
+                  ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
     secret_store_destroy(store);
     return ERR;
   }
@@ -2019,9 +2041,10 @@ static AdbxStatus credm_execute_reset_all(ConfDir *app, char **out_err) {
   }
 
   // wipe all secrets.
-  if (secret_store_wipe_all(store) != OK) {
+  SecretStoreErr ss_err;
+  if (secret_store_wipe_all(store, &ss_err) != OK) {
     credm_set_err(out_err, "failed to wipe all stored secrets: %s",
-                  secret_store_last_error(store));
+                  ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
     secret_store_destroy(store);
     return ERR;
   }

@@ -25,13 +25,14 @@
  *      + All functions are safe to call.
  *      + No SELECT * / alias.* (rejects q->has_star).
  *
- *  - Pass B. This runs only if sensitive mode is on and only if the Vault is
- *    open. It applies the same rules recursively to all nested queries (CTEs
+ *  - Pass B. This runs only if sensitive mode is on.
+ *    It applies the same rules recursively to all nested queries (CTEs
  *    and subqueries) and checks that:
  *      + Sensitive columns are not referenced by casts or functions.
  *      + Sensitive columns appear only in SELECT (as simple colref) or WHERE.
  *      + Sensitive columns can only be compared using = or IN() and only to
  *        parameters.
+ *      + Parameters can be compared only to sensitive columns.
  *      + WHERE must be a conjunction of predicates: `pred (AND pred)`. No
  *        `NOT`, no `OR`.
  *      + All JOINs must be INNER and use only = and AND; JOIN ON cannot
@@ -137,12 +138,10 @@ static AdbxStatus vq_out_reset(ValidateQueryOut *out) {
  * and may set validator errors. Error semantics: returns OK on success, ERR on
  * invalid input/alloc failures.
  */
-static AdbxStatus validator_make_sensitive_col_id(ValidatorCtx *ctx,
-                                                  const QirQuery *q,
-                                                  const QirColRef *cr,
-                                                  ValidatorPlan *plan,
-                                                  const char **out_id,
-                                                  uint32_t *out_id_len) {
+static AdbxStatus
+validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
+                                const QirColRef *cr, ValidatorPlan *plan,
+                                const char **out_id, uint32_t *out_id_len) {
   assert(ctx != NULL);
   assert(q != NULL);
   assert(cr != NULL);
@@ -353,9 +352,10 @@ static AdbxTriStatus validator_colref_scope_matches(const QirQuery *q,
  * Error semantics: returns YES on success, NO on policy mismatch, ERR on bad
  * input/internal inconsistency.
  */
-static AdbxTriStatus validator_validate_param_scope_for_col(
-    ValidatorCtx *ctx, const QirQuery *q, const QirColRef *sensitive_cr,
-    int param_idx) {
+static AdbxTriStatus
+validator_validate_param_scope_for_col(ValidatorCtx *ctx, const QirQuery *q,
+                                       const QirColRef *sensitive_cr,
+                                       int param_idx) {
   assert(ctx);
   assert(q);
   assert(sensitive_cr);
@@ -471,8 +471,9 @@ typedef AdbxTriStatus (*ValidateQueryFn)(ValidatorCtx *, const QirQuery *);
 /* Walks an expression tree and validates all nested subqueries via the
  * callback provided by the caller. The callback controls the policy (Pass A
  * vs Pass B). */
-static AdbxTriStatus validate_expr_subqueries(
-    ValidatorCtx *ctx, const QirExpr *e, ValidateQueryFn validate_query_fn) {
+static AdbxTriStatus
+validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
+                         ValidateQueryFn validate_query_fn) {
   if (!e)
     return YES;
 
@@ -811,9 +812,8 @@ static AdbxTriStatus validate_expr_functions(ValidatorCtx *ctx,
 /* Returns YES if the expression tree contains a sensitive column reference.
  * Subqueries are treated as separate scopes and do not contribute to this
  * check. */
-static AdbxTriStatus expr_has_sensitive(const QirQuery *q,
-                                        const ConnProfile *cp,
-                                        const QirExpr *e) {
+static AdbxTriStatus
+expr_has_sensitive(const QirQuery *q, const ConnProfile *cp, const QirExpr *e) {
   if (!q || !cp || !e)
     return ERR;
 
@@ -1011,8 +1011,7 @@ static AdbxTriStatus expr_has_param(const QirExpr *e) {
 
 /* Validates that parameters are only used inside WHERE and only compared to
  * sensitive columns. This is enforced in Pass A to avoid data exfiltration. */
-static AdbxTriStatus validate_params_where(ValidatorCtx *ctx,
-                                           const QirQuery *q,
+static AdbxTriStatus validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
                                            const QirExpr *e) {
   if (!q || !ctx || !e)
     return ERR;

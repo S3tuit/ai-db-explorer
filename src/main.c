@@ -143,17 +143,15 @@ int main(int argc, char **argv) {
   }
 
   SecretStore *secrets = NULL;
-  char *ss_err = NULL;
+  SecretStoreErr ss_err;
   secrets = secret_store_create(&ss_err);
   if (!secrets) {
     catalog_destroy(cat);
     fprintf(stderr, "ERROR: secret store init failed: %s\n",
-            ss_err ? ss_err : "unknown error");
-    free(ss_err);
+            ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
     privdir_clean(pd);
     return 1;
   }
-  free(ss_err);
 
   ConnManager *cm = NULL;
   cm = connm_create(cat, secrets);

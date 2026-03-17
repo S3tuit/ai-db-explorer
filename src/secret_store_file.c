@@ -10,9 +10,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,39 +46,7 @@ typedef struct {
   SecretEntryList cache;
   FileMeta cache_meta;
   int cache_loaded;
-  SecretStoreErrCode last_err_code;
-  char last_err_msg[256];
 } FileSecretStore;
-
-/* Clears one backend error snapshot.
- */
-static void ss_clear_err(FileSecretStore *store) {
-  if (!store)
-    return;
-  store->last_err_code = SSERR_NONE;
-  store->last_err_msg[0] = '\0';
-}
-
-/* Stores one formatted backend error snapshot for diagnostics.
- * It borrows 'store' and 'fmt'; no allocations.
- * Side effects: updates store error code/message.
- * Error semantics: none.
- */
-static void ss_set_err(FileSecretStore *store, SecretStoreErrCode code,
-                       const char *fmt, ...) {
-  if (!store)
-    return;
-
-  store->last_err_code = code;
-  store->last_err_msg[0] = '\0';
-  if (!fmt)
-    return;
-
-  va_list ap;
-  va_start(ap, fmt);
-  (void)vsnprintf(store->last_err_msg, sizeof(store->last_err_msg), fmt, ap);
-  va_end(ap);
-}
 
 /* Zeroes and frees one heap-allocated secret string.
  * It consumes '*s'.
@@ -138,30 +104,29 @@ static int ss_entry_cmp(const void *a, const void *b) {
 }
 
 /* Validates one typed secret reference for backend operations.
- * It borrows inputs and writes backend error state on failure.
- * Side effects: updates backend error state when invalid.
+ * It borrows inputs and writes one caller-owned typed error on failure.
+ * Side effects: none beyond diagnostic formatting into 'out_err'.
  * Error semantics: returns OK on valid namespace+connection name, ERR
  * otherwise.
  */
-static AdbxStatus ss_validate_ref(FileSecretStore *store,
-                                  const SecretRefInfo *ref,
-                                  const char *op_name) {
-  if (!store || !op_name)
+static AdbxStatus ss_validate_ref(const SecretRefInfo *ref, const char *op_name,
+                                  SecretStoreErr *out_err) {
+  if (!op_name)
     return ERR;
 
   if (!ref || !ref->cred_namespace || !ref->connection_name) {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store %s failed: invalid input pointers. This is "
-               "probably a bug, please, report it.",
-               op_name);
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store %s failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.",
+                  op_name);
     return ERR;
   }
 
   if (ref->cred_namespace[0] == '\0' || ref->connection_name[0] == '\0') {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store %s failed: secret reference fields cannot be "
-               "empty. This is probably a bug, please, report it.",
-               op_name);
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store %s failed: secret reference fields cannot be "
+                  "empty. This is probably a bug, please, report it.",
+                  op_name);
     return ERR;
   }
 
@@ -414,11 +379,12 @@ static AdbxStatus ss_list_build_without_namespace(const SecretEntryList *src,
 /* Opens the app directory used for file-backed credentials and stores its fd
  * inside 'out_fd'. It borrows 'store' and returns one owned fd to caller.
  * Side effects: may create the default app directory through config_dir and
- * updates backend error state on failure.
+ * writes one caller-owned typed error on failure.
  * Error semantics: returns OK on success, ERR on invalid environment,
  * config-dir resolution failure, or input.
  */
-static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd) {
+static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd,
+                                     SecretStoreErr *out_err) {
   if (!store || !out_fd)
     return ERR;
   *out_fd = -1;
@@ -429,8 +395,8 @@ static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd) {
   if (confdir_default_open(&app, &cfg_code, &cfg_err) != OK) {
     SecretStoreErrCode code =
         (cfg_code == CONFDIR_ERR_ENV) ? SSERR_ENV : SSERR_DIR;
-    ss_set_err(store, code, "secret-store init failed: %s",
-               cfg_err ? cfg_err : "unable to resolve config base path");
+    ADBX_ERR_SETF(out_err, code, "secret-store init failed: %s",
+                  cfg_err ? cfg_err : "unable to resolve config base path");
     free(cfg_err);
     confdir_clean(&app);
     return ERR;
@@ -443,45 +409,14 @@ static AdbxStatus ss_open_config_dir(FileSecretStore *store, int *out_fd) {
   return OK;
 }
 
-/* Resolves a best-effort filesystem path for one open file descriptor.
- * It borrows 'fd' and writes into caller-owned 'buf' when successful.
- * Side effects: reads symlink metadata from procfs/devfs.
- * Error semantics: returns 'buf' on success, otherwise returns "<unknown>".
- */
-static const char *ss_fd_path_or_unknown(int fd, char *buf, size_t cap) {
-  if (fd < 0 || !buf || cap == 0)
-    return "<unknown>";
-  buf[0] = '\0';
-
-  char link_path[64];
-
-  int n = snprintf(link_path, sizeof(link_path), "/proc/self/fd/%d", fd);
-  if (n > 0 && (size_t)n < sizeof(link_path)) {
-    ssize_t got = readlink(link_path, buf, cap - 1);
-    if (got >= 0) {
-      buf[(size_t)got] = '\0';
-      return buf;
-    }
-  }
-
-  n = snprintf(link_path, sizeof(link_path), "/dev/fd/%d", fd);
-  if (n > 0 && (size_t)n < sizeof(link_path)) {
-    ssize_t got = readlink(link_path, buf, cap - 1);
-    if (got >= 0) {
-      buf[(size_t)got] = '\0';
-      return buf;
-    }
-  }
-
-  return "<unknown>";
-}
-
 /* Returns the file descriptor of the directory where FileSecretStore stores its
- * files. Returns -1 on error. Side effects: may create the directory. Error
- * semantics: returns OK on success, ERR on invalid environment or policy
- * mismatch.
+ * files. It borrows 'store' and writes one caller-owned typed error on failure.
+ * Side effects: may create the directory.
+ * Error semantics: returns fd >= 0 on success, -1 on invalid environment or
+ * policy mismatch.
  */
-static inline int ss_get_dir_fd(FileSecretStore *store) {
+static inline int ss_get_dir_fd(FileSecretStore *store,
+                                SecretStoreErr *out_err) {
   if (!store)
     return -1;
 
@@ -492,17 +427,15 @@ static inline int ss_get_dir_fd(FileSecretStore *store) {
       return dir_fd;
   }
 
-  if (ss_open_config_dir(store, &dir_fd) != OK || dir_fd < 0) {
+  if (ss_open_config_dir(store, &dir_fd, out_err) != OK || dir_fd < 0) {
     store->dir_fd = -1;
     return -1;
   }
 
   if (validate_uown_dir(dir_fd, 0700) != OK) {
-    char dir_path[PATH_MAX];
-    ss_set_err(store, SSERR_DIR,
-               "secret-store init failed: config dir must be owned by current "
-               "user and have mode 0700. Dir: %s.",
-               ss_fd_path_or_unknown(dir_fd, dir_path, sizeof(dir_path)));
+    ADBX_ERR_SETF(out_err, SSERR_DIR,
+                  "secret-store init failed: config dir must be owned by "
+                  "current user and have mode 0700.");
     store->dir_fd = -1;
     close(dir_fd);
     return -1;
@@ -518,46 +451,46 @@ static inline int ss_get_dir_fd(FileSecretStore *store) {
  * Error semantics: returns OK when file is a valid user-owned regular file
  * with mode 0600, ERR otherwise.
  */
-static AdbxStatus ss_validate_credfile_fd(FileSecretStore *store, int file_fd,
-                                          FileMeta *out_meta) {
-  if (!store || file_fd < 0 || !out_meta)
+static AdbxStatus ss_validate_credfile_fd(int file_fd, FileMeta *out_meta,
+                                          SecretStoreErr *out_err) {
+  if (file_fd < 0 || !out_meta)
     return ERR;
 
   struct stat st = {0};
   if (fstat(file_fd, &st) != 0) {
     int saved_errno = errno;
-    ss_set_err(store, SSERR_CRED_FILE,
-               "secret-store read failed: cannot stat credentials file: "
-               "<config-dir>/adbxplorer/credentials.json. %s.",
-               strerror(saved_errno));
+    ADBX_ERR_SETF(out_err, SSERR_CRED_FILE,
+                  "secret-store read failed: cannot stat credentials file: "
+                  "<config-dir>/adbxplorer/credentials.json. %s.",
+                  strerror(saved_errno));
     return ERR;
   }
 
   if (!S_ISREG(st.st_mode)) {
-    ss_set_err(store, SSERR_CRED_FILE,
-               "secret-store read failed: credentials file must be a regular "
-               "file: <config-dir>/adbxplorer/credentials.json.");
+    ADBX_ERR_SETF(out_err, SSERR_CRED_FILE,
+                  "secret-store read failed: credentials file must be a "
+                  "regular file: <config-dir>/adbxplorer/credentials.json.");
     return ERR;
   }
   if (st.st_uid != getuid()) {
-    ss_set_err(store, SSERR_CRED_FILE,
-               "secret-store read failed: credentials file owner mismatch: "
-               "<config-dir>/adbxplorer/credentials.json.");
+    ADBX_ERR_SETF(out_err, SSERR_CRED_FILE,
+                  "secret-store read failed: credentials file owner mismatch: "
+                  "<config-dir>/adbxplorer/credentials.json.");
     return ERR;
   }
   if ((st.st_mode & 0777) != 0600) {
-    ss_set_err(store, SSERR_CRED_FILE,
-               "secret-store read failed: credentials file mode is %03o, "
-               "expected 600. Fix with: chmod 600 "
-               "<config-dir>/adbxplorer/credentials.json",
-               (unsigned)(st.st_mode & 0777));
+    ADBX_ERR_SETF(out_err, SSERR_CRED_FILE,
+                  "secret-store read failed: credentials file mode is %03o, "
+                  "expected 600. Fix with: chmod 600 "
+                  "<config-dir>/adbxplorer/credentials.json",
+                  (unsigned)(st.st_mode & 0777));
     return ERR;
   }
 
   if (fileio_meta_from_stat(&st, out_meta) != OK) {
-    ss_set_err(store, SSERR_CRED_FILE,
-               "secret-store read failed: unable to snapshot credentials file "
-               "metadata: <config-dir>/adbxplorer/credentials.json.");
+    ADBX_ERR_SETF(out_err, SSERR_CRED_FILE,
+                  "secret-store read failed: unable to snapshot credentials "
+                  "file metadata: <config-dir>/adbxplorer/credentials.json.");
     return ERR;
   }
   return OK;
@@ -570,19 +503,19 @@ static AdbxStatus ss_validate_credfile_fd(FileSecretStore *store, int file_fd,
  * invalid input or filesystem/policy failures.
  */
 static AdbxTriStatus ss_open_credfile_read(FileSecretStore *store, int *out_fd,
-                                           FileMeta *out_meta) {
+                                           FileMeta *out_meta,
+                                           SecretStoreErr *out_err) {
   if (!store || !out_fd || !out_meta) {
-    if (store) {
-      ss_set_err(store, SSERR_INPUT,
-                 "secret-store internal error: invalid read-credentials input. "
-                 "This is probably an internal bug, please, report it.");
-    }
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store internal error: invalid read-credentials "
+                  "input. This is probably an internal bug, please, report "
+                  "it.");
     return ERR;
   }
   *out_fd = -1;
   memset(out_meta, 0, sizeof(*out_meta));
 
-  int dir_fd = ss_get_dir_fd(store);
+  int dir_fd = ss_get_dir_fd(store, out_err);
   if (dir_fd < 0)
     return ERR;
 
@@ -595,13 +528,13 @@ static AdbxTriStatus ss_open_credfile_read(FileSecretStore *store, int *out_fd,
     if (errno == ENOENT)
       return NO;
     int saved_errno = errno;
-    ss_set_err(store, SSERR_CRED_FILE,
-               "secret-store read failed: cannot open '%s': %s.", SS_CRED_FILE,
-               strerror(saved_errno));
+    ADBX_ERR_SETF(out_err, SSERR_CRED_FILE,
+                  "secret-store read failed: cannot open '%s': %s.",
+                  SS_CRED_FILE, strerror(saved_errno));
     return ERR;
   }
 
-  if (ss_validate_credfile_fd(store, file_fd, out_meta) != OK) {
+  if (ss_validate_credfile_fd(file_fd, out_meta, out_err) != OK) {
     close(file_fd);
     return ERR;
   }
@@ -665,7 +598,8 @@ error:
  */
 static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
                                         const char *json, size_t json_len,
-                                        SecretEntryList *out_list) {
+                                        SecretEntryList *out_list,
+                                        SecretStoreErr *out_err) {
   if (!store || !json || !out_list)
     return ERR;
 
@@ -676,9 +610,10 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
   JsonGetter jg = {0};
   JsonTokBuf tok_buf = {0};
   if (jsget_init(&jg, json, json_len, &tok_buf) != OK) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file is malformed JSON (or token limit exceeded). "
-               "Fix credentials.json format or delete it to reset.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file is malformed JSON (or token limit "
+                  "exceeded). Fix credentials.json format or delete it to "
+                  "reset.");
     return ERR;
   }
 
@@ -686,51 +621,53 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
   JsonStrSpan top_unknown = {0};
   if (jsget_top_level_validation(&jg, NULL, top_keys, ARRLEN(top_keys),
                                  &top_unknown) != YES) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file schema invalid: expected top-level keys "
-               "'version' and 'entries'. Fix credentials.json format or delete "
-               "it to reset.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file schema invalid: expected top-level keys "
+                  "'version' and 'entries'. Fix credentials.json format or "
+                  "delete it to reset.");
     return ERR;
   }
 
   char *version = NULL;
   if (jsget_string_decode_alloc(&jg, "version", &version) != YES) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file schema invalid: missing string 'version'. Fix "
-               "credentials.json format or delete it to reset.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file schema invalid: missing string "
+                  "'version'. Fix credentials.json format or delete it to "
+                  "reset.");
     return ERR;
   }
   int ver_ok = (strcmp(version, SS_FILE_VERSION) == 0);
   free(version);
   if (!ver_ok) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file version is unsupported; expected version "
-               "'%s'. Fix credentials.json format or delete it to reset.",
-               SS_FILE_VERSION);
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file version is unsupported; expected version "
+                  "'%s'. Fix credentials.json format or delete it to reset.",
+                  SS_FILE_VERSION);
     return ERR;
   }
 
   JsonArrIter it = {0};
   if (jsget_array_objects_begin(&jg, "entries", &it) != YES) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file schema invalid: 'entries' must be an array of "
-               "objects. Fix credentials.json format or delete it to reset.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file schema invalid: 'entries' must be an "
+                  "array of objects. Fix credentials.json format or delete it "
+                  "to reset.");
     return ERR;
   }
 
   // first, we allocate all the entries, unordered, at the beginning of the
   // arena
   if (it.count < 0) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file schema invalid: invalid 'entries' count. Fix "
-               "credentials.json format or delete it to reset.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file schema invalid: invalid 'entries' count. "
+                  "Fix credentials.json format or delete it to reset.");
     return ERR;
   }
   size_t n_entries = (size_t)it.count;
   if (ss_list_init_with_n_entries(out_list, n_entries) != OK) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file parse failed: memory allocation error. "
-               "Please, retry.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file parse failed: memory allocation error. "
+                  "Please, retry.");
     return ERR;
   }
 
@@ -741,9 +678,10 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
     if (nrc == NO)
       break;
     if (nrc != YES) {
-      ss_set_err(store, SSERR_PARSE,
-                 "credentials file schema invalid: entries must be objects. "
-                 "Fix credentials.json format or delete it to reset.");
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file schema invalid: entries must be "
+                    "objects. Fix credentials.json format or delete it to "
+                    "reset.");
       goto parse_error;
     }
 
@@ -752,11 +690,11 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
     JsonStrSpan entry_unknown = {0};
     if (jsget_top_level_validation(&entry, NULL, entry_keys, ARRLEN(entry_keys),
                                    &entry_unknown) != YES) {
-      ss_set_err(
-          store, SSERR_PARSE,
-          "credentials file schema invalid: each entry must contain only "
-          "'credentialNamespace', 'connectionName', and 'secret'. Fix "
-          "credentials.json format or delete it to reset.");
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file schema invalid: each entry must contain "
+                    "only 'credentialNamespace', 'connectionName', and "
+                    "'secret'. Fix credentials.json format or delete it to "
+                    "reset.");
       goto parse_error;
     }
 
@@ -765,25 +703,26 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
     char *secret = NULL;
     if (jsget_string_decode_alloc(&entry, "credentialNamespace",
                                   &cred_namespace) != YES) {
-      ss_set_err(store, SSERR_PARSE,
-                 "credentials file schema invalid: entry.credentialNamespace "
-                 "must be a string. Fix credentials.json format or delete it "
-                 "to reset.");
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file schema invalid: entry."
+                    "credentialNamespace must be a string. Fix "
+                    "credentials.json format or delete it to reset.");
       goto parse_error;
     }
     if (jsget_string_decode_alloc(&entry, "connectionName", &connection_name) !=
         YES) {
-      ss_set_err(store, SSERR_PARSE,
-                 "credentials file schema invalid: entry.connectionName must "
-                 "be a string. Fix credentials.json format or delete it to "
-                 "reset.");
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file schema invalid: entry.connectionName "
+                    "must be a string. Fix credentials.json format or delete "
+                    "it to reset.");
       free(cred_namespace);
       goto parse_error;
     }
     if (jsget_string_decode_alloc(&entry, "secret", &secret) != YES) {
-      ss_set_err(store, SSERR_PARSE,
-                 "credentials file schema invalid: entry.secret must be a "
-                 "string. Fix credentials.json format or delete it to reset.");
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file schema invalid: entry.secret must be a "
+                    "string. Fix credentials.json format or delete it to "
+                    "reset.");
       free(cred_namespace);
       free(connection_name);
       goto parse_error;
@@ -791,11 +730,11 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
 
     if (fill_i >= out_list->n_entries || cred_namespace[0] == '\0' ||
         connection_name[0] == '\0') {
-      ss_set_err(
-          store, SSERR_PARSE,
-          "credentials file schema invalid: entry.credentialNamespace and "
-          "entry.connectionName must be non-empty. Fix credentials.json "
-          "format or delete it to reset.");
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file schema invalid: entry."
+                    "credentialNamespace and entry.connectionName must be "
+                    "non-empty. Fix credentials.json format or delete it to "
+                    "reset.");
       free(cred_namespace);
       free(connection_name);
       ss_secret_free(&secret);
@@ -810,9 +749,9 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
     SecretRefInfo ref = {.cred_namespace = cred_namespace,
                          .connection_name = connection_name};
     if (ss_list_set_entry_copy(out_list, fill_i, &ref, secret) != OK) {
-      ss_set_err(store, SSERR_PARSE,
-                 "credentials file parse failed: memory allocation error. Fix "
-                 "credentials.json format or delete it to reset.");
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file parse failed: memory allocation error. "
+                    "Fix credentials.json format or delete it to reset.");
       free(cred_namespace);
       free(connection_name);
       ss_secret_free(&secret);
@@ -826,10 +765,10 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
 
   // defensive check, we should've filled exactly n_entries
   if (fill_i != out_list->n_entries) {
-    ss_set_err(
-        store, SSERR_PARSE,
-        "credentials file schema invalid: entries array is inconsistent. Fix "
-        "credentials.json format or delete it to reset.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file schema invalid: entries array is "
+                  "inconsistent. Fix credentials.json format or delete it to "
+                  "reset.");
     goto parse_error;
   }
 
@@ -843,12 +782,12 @@ static AdbxStatus ss_parse_entries_json(FileSecretStore *store,
                          out_list->entries[i - 1].connection_name,
                          out_list->entries[i].cred_namespace,
                          out_list->entries[i].connection_name) == 0) {
-      ss_set_err(
-          store, SSERR_PARSE,
-          "credentials file schema invalid: duplicate connection reference "
-          "'%s/%s'. Fix credentials.json format or delete it to reset.",
-          out_list->entries[i].cred_namespace,
-          out_list->entries[i].connection_name);
+      ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                    "credentials file schema invalid: duplicate connection "
+                    "reference '%s/%s'. Fix credentials.json format or "
+                    "delete it to reset.",
+                    out_list->entries[i].cred_namespace,
+                    out_list->entries[i].connection_name);
       goto parse_error;
     }
   }
@@ -862,10 +801,13 @@ parse_error:
 
 /* Loads credentials at the already opened 'file_fd' and stores them into list.
  * It borrows file_fd and writes an owned list to out_list.
+ * Side effects: reads file contents and writes one caller-owned typed error on
+ * failure.
  * Error semantics: returns OK on success, ERR on I/O/parsing failures.
  */
 static AdbxStatus ss_load_list_from_fd(FileSecretStore *store, int file_fd,
-                                       SecretEntryList *out_list) {
+                                       SecretEntryList *out_list,
+                                       SecretStoreErr *out_err) {
   if (!store || file_fd < 0 || !out_list)
     return ERR;
 
@@ -873,38 +815,44 @@ static AdbxStatus ss_load_list_from_fd(FileSecretStore *store, int file_fd,
   sb_init(&sb);
 
   if (fileio_sb_read_limit_fd(file_fd, SS_FILE_MAX_BYTES, &sb) != OK) {
-    ss_set_err(store, SSERR_CRED_FILE,
-               "secret-store read failed: unable to read credentials file "
-               "(size limit %u bytes).",
-               (unsigned)SS_FILE_MAX_BYTES);
+    ADBX_ERR_SETF(out_err, SSERR_CRED_FILE,
+                  "secret-store read failed: unable to read credentials file "
+                  "(size limit %u bytes).",
+                  (unsigned)SS_FILE_MAX_BYTES);
     sb_clean(&sb);
     return ERR;
   }
 
   if (sb.len == 0) {
-    ss_set_err(store, SSERR_PARSE,
-               "credentials file is empty. Fix credentials.json with valid "
-               "JSON: {\"version\":\"1\",\"entries\":[]}.");
+    ADBX_ERR_SETF(out_err, SSERR_PARSE,
+                  "credentials file is empty. Fix credentials.json with valid "
+                  "JSON: {\"version\":\"1\",\"entries\":[]}.");
     sb_clean(&sb);
     return ERR;
   }
 
-  AdbxStatus rc = ss_parse_entries_json(store, sb.data, sb.len, out_list);
+  AdbxStatus rc =
+      ss_parse_entries_json(store, sb.data, sb.len, out_list, out_err);
   sb_zero_clean(&sb);
   return rc;
 }
 
 /* Refreshes secret entries if the file that contains them is changed from the
- * latest cached version by 'store'. Error semantics: returns OK on success, ERR
- * on invalid input, I/O or parse failures.
+ * latest cached version by 'store'.
+ * Side effects: may open/read the credentials file, replace the in-memory
+ * cache, and write one caller-owned typed error on failure.
+ * Error semantics: returns OK on success, ERR on invalid input, I/O or parse
+ * failures.
  */
-static AdbxStatus ss_refresh_if_changed(FileSecretStore *store) {
+static AdbxStatus ss_refresh_if_changed(FileSecretStore *store,
+                                        SecretStoreErr *out_err) {
   if (!store)
     return ERR;
 
   FileMeta new_meta = {0};
   int file_fd = -1;
-  AdbxTriStatus frc = ss_open_credfile_read(store, &file_fd, &new_meta);
+  AdbxTriStatus frc =
+      ss_open_credfile_read(store, &file_fd, &new_meta, out_err);
   if (frc == ERR)
     return ERR;
   if (frc == NO) {
@@ -930,7 +878,7 @@ static AdbxStatus ss_refresh_if_changed(FileSecretStore *store) {
   }
 
   SecretEntryList next = {0};
-  if (ss_load_list_from_fd(store, file_fd, &next) != OK) {
+  if (ss_load_list_from_fd(store, file_fd, &next, out_err) != OK) {
     close(file_fd);
     return ERR;
   }
@@ -948,26 +896,27 @@ static AdbxStatus ss_refresh_if_changed(FileSecretStore *store) {
 /* Persists new list 'next' at SS_CRED_FILE inside 'store'->dir_fd
  * and swaps it into 'store' cache. It borrows all the input. Side effects:
  * writes credential file, stats metadata, and replaces in-memory cache with
- * zeroized cleanup of old cache. Error semantics: returns OK on success, ERR on
- * write/stat failures.
+ * zeroized cleanup of old cache, and writes one caller-owned typed error on
+ * failure. Error semantics: returns OK on success, ERR on write/stat failures.
  */
 static AdbxStatus ss_persist_and_swap(FileSecretStore *store,
-                                      SecretEntryList *next) {
+                                      SecretEntryList *next,
+                                      SecretStoreErr *out_err) {
   if (!store || !next)
     return ERR;
 
   StrBuf sb;
   sb_init(&sb);
   if (ss_serialize_entries(next, &sb) != OK) {
-    ss_set_err(store, SSERR_WRITE,
-               "secret-store write failed: unable to serialize credentials. "
-               "Please, retry.");
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "secret-store write failed: unable to serialize "
+                  "credentials. Please, retry.");
     sb_zero_clean(&sb);
     return ERR;
   }
 
   FileMeta meta_new = {0};
-  int dir_fd = ss_get_dir_fd(store);
+  int dir_fd = ss_get_dir_fd(store, out_err);
   if (dir_fd < 0) {
     sb_zero_clean(&sb);
     return ERR;
@@ -976,18 +925,19 @@ static AdbxStatus ss_persist_and_swap(FileSecretStore *store,
                                   (const uint8_t *)sb.data, sb.len, &meta_new);
   sb_zero_clean(&sb);
   if (rc == NO) {
-    ss_set_err(store, SSERR_WRITE,
-               "secret-store write blocked: another process is writing '%s'. "
-               "Please, retry.",
-               SS_CRED_FILE);
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "secret-store write blocked: another process is writing "
+                  "'%s'. Please, retry.",
+                  SS_CRED_FILE);
     return ERR;
   }
   if (rc != YES) {
     int saved_errno = errno;
-    ss_set_err(store, SSERR_WRITE,
-               "secret-store write failed: cannot atomically persist '%s': %s.",
-               SS_CRED_FILE,
-               (saved_errno != 0) ? strerror(saved_errno) : "unknown error");
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "secret-store write failed: cannot atomically persist "
+                  "'%s': %s.",
+                  SS_CRED_FILE,
+                  (saved_errno != 0) ? strerror(saved_errno) : "unknown error");
     return ERR;
   }
 
@@ -1013,23 +963,24 @@ static AdbxStatus ss_persist_and_swap(FileSecretStore *store,
  */
 static AdbxTriStatus secret_store_file_get(SecretStore *base,
                                            const SecretRefInfo *ref,
-                                           StrBuf *out) {
-  if (!base)
+                                           StrBuf *out,
+                                           SecretStoreErr *out_err) {
+  if (!base || !out) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store get failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
+  }
 
   FileSecretStore *store = (FileSecretStore *)base;
-  ss_clear_err(store);
 
-  if (!out)
-    return ERR;
-
-  if (ss_validate_ref(store, ref, "get") != OK)
+  if (ss_validate_ref(ref, "get", out_err) != OK)
     return ERR;
 
   sb_zero_clean(out);
   sb_init(out);
 
-  if (ss_refresh_if_changed(store) != OK)
+  if (ss_refresh_if_changed(store, out_err) != OK)
     return ERR;
 
   SecretEntry key = {.cred_namespace = ref->cred_namespace,
@@ -1045,9 +996,9 @@ static AdbxTriStatus secret_store_file_get(SecretStore *base,
 
   size_t n = strlen(e->secret);
   if (sb_append_bytes(out, e->secret, n + 1) != OK) {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store get failed: unable to allocate output buffer. "
-               "Please, retry.");
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store get failed: unable to allocate output buffer. "
+                  "Please, retry.");
     return ERR;
   }
   return YES;
@@ -1062,36 +1013,39 @@ static AdbxTriStatus secret_store_file_get(SecretStore *base,
  */
 static AdbxStatus secret_store_file_set(SecretStore *base,
                                         const SecretRefInfo *ref,
-                                        const char *secret) {
-  if (!base)
+                                        const char *secret,
+                                        SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store set failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
+  }
 
   FileSecretStore *store = (FileSecretStore *)base;
-  ss_clear_err(store);
 
   if (!secret) {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store set failed: invalid input pointers. This is "
-               "probably a bug, please, report it.");
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store set failed: invalid input pointers. This is "
+                  "probably a bug, please, report it.");
     return ERR;
   }
 
-  if (ss_validate_ref(store, ref, "set") != OK)
+  if (ss_validate_ref(ref, "set", out_err) != OK)
     return ERR;
 
-  if (ss_refresh_if_changed(store) != OK) {
+  if (ss_refresh_if_changed(store, out_err) != OK)
     return ERR;
-  }
 
   SecretEntryList next = {0};
   if (ss_list_build_with_upsert(&store->cache, ref, secret, &next) != OK) {
-    ss_set_err(
-        store, SSERR_WRITE,
-        "secret-store set failed: memory allocation error. Please, retry.");
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "secret-store set failed: memory allocation error. Please, "
+                  "retry.");
     return ERR;
   }
 
-  AdbxStatus prc = ss_persist_and_swap(store, &next);
+  AdbxStatus prc = ss_persist_and_swap(store, &next, out_err);
   if (prc != OK)
     ss_entries_clean(&next);
   return prc;
@@ -1105,17 +1059,21 @@ static AdbxStatus secret_store_file_set(SecretStore *base,
  * I/O, parse, or allocation failures.
  */
 static AdbxStatus secret_store_file_delete(SecretStore *base,
-                                           const SecretRefInfo *ref) {
-  if (!base)
+                                           const SecretRefInfo *ref,
+                                           SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store delete failed: invalid input pointers. This "
+                  "is probably a bug, please, report it.");
     return ERR;
+  }
 
   FileSecretStore *store = (FileSecretStore *)base;
-  ss_clear_err(store);
 
-  if (ss_validate_ref(store, ref, "delete") != OK)
+  if (ss_validate_ref(ref, "delete", out_err) != OK)
     return ERR;
 
-  if (ss_refresh_if_changed(store) != OK)
+  if (ss_refresh_if_changed(store, out_err) != OK)
     return ERR;
 
   size_t pos = 0;
@@ -1128,13 +1086,13 @@ static AdbxStatus secret_store_file_delete(SecretStore *base,
   SecretEntryList next = {0};
   AdbxStatus rc = ss_list_build_without_index(&store->cache, pos, &next);
   if (rc != OK) {
-    ss_set_err(
-        store, SSERR_WRITE,
-        "secret-store delete failed: memory allocation error. Please, retry.");
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "secret-store delete failed: memory allocation error. "
+                  "Please, retry.");
     return ERR;
   }
 
-  rc = ss_persist_and_swap(store, &next);
+  rc = ss_persist_and_swap(store, &next, out_err);
   if (rc != OK)
     ss_entries_clean(&next);
   return rc;
@@ -1148,21 +1106,26 @@ static AdbxStatus secret_store_file_delete(SecretStore *base,
  * parse, or allocation failures.
  */
 static AdbxStatus secret_store_file_wipe_namespace(SecretStore *base,
-                                                   const char *cred_namespace) {
-  if (!base)
-    return ERR;
-
-  FileSecretStore *store = (FileSecretStore *)base;
-  ss_clear_err(store);
-
-  if (!cred_namespace || cred_namespace[0] == '\0') {
-    ss_set_err(store, SSERR_INPUT,
-               "secret-store namespace wipe failed: invalid namespace. This "
-               "is probably a bug, please, report it.");
+                                                   const char *cred_namespace,
+                                                   SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(
+        out_err, SSERR_INPUT,
+        "secret-store namespace wipe failed: invalid input pointers. This is "
+        "probably a bug, please, report it.");
     return ERR;
   }
 
-  if (ss_refresh_if_changed(store) != OK)
+  FileSecretStore *store = (FileSecretStore *)base;
+
+  if (!cred_namespace || cred_namespace[0] == '\0') {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store namespace wipe failed: invalid namespace. "
+                  "This is probably a bug, please, report it.");
+    return ERR;
+  }
+
+  if (ss_refresh_if_changed(store, out_err) != OK)
     return ERR;
 
   SecretEntryList *list = &store->cache;
@@ -1176,13 +1139,13 @@ static AdbxStatus secret_store_file_wipe_namespace(SecretStore *base,
 
   SecretEntryList next = {0};
   if (ss_list_build_without_namespace(list, cred_namespace, &next) != OK) {
-    ss_set_err(store, SSERR_WRITE,
-               "secret-store namespace wipe failed: memory allocation error. "
-               "Please, retry.");
+    ADBX_ERR_SETF(out_err, SSERR_WRITE,
+                  "secret-store namespace wipe failed: memory allocation "
+                  "error. Please, retry.");
     return ERR;
   }
 
-  AdbxStatus rc = ss_persist_and_swap(store, &next);
+  AdbxStatus rc = ss_persist_and_swap(store, &next, out_err);
   if (rc != OK)
     ss_entries_clean(&next);
   return rc;
@@ -1196,21 +1159,25 @@ static AdbxStatus secret_store_file_wipe_namespace(SecretStore *base,
  * Error semantics: returns OK on success, ERR on invalid input, policy,
  * I/O, or allocation failures.
  */
-static AdbxStatus secret_store_file_wipe_all(SecretStore *base) {
-  if (!base)
+static AdbxStatus secret_store_file_wipe_all(SecretStore *base,
+                                             SecretStoreErr *out_err) {
+  if (!base) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store wipe_all failed: invalid input pointers. This "
+                  "is probably a bug, please, report it.");
     return ERR;
+  }
 
   FileSecretStore *store = (FileSecretStore *)base;
-  ss_clear_err(store);
 
-  if (ss_refresh_if_changed(store) != OK)
+  if (ss_refresh_if_changed(store, out_err) != OK)
     return ERR;
 
   if (store->cache.n_entries == 0)
     return OK;
 
   SecretEntryList next = {0};
-  AdbxStatus rc = ss_persist_and_swap(store, &next);
+  AdbxStatus rc = ss_persist_and_swap(store, &next, out_err);
   if (rc != OK)
     ss_entries_clean(&next);
   return rc;
@@ -1233,32 +1200,6 @@ static void secret_store_file_destroy(SecretStore *base) {
   free(store);
 }
 
-/* Returns backend-specific error details for the file-backed secret store.
- * It borrows 'base' and returns an internal pointer.
- * Side effects: none.
- * Error semantics: returns empty string on invalid input or when no error is
- * available.
- */
-static const char *secret_store_file_last_error(SecretStore *base) {
-  if (!base)
-    return "";
-  FileSecretStore *store = (FileSecretStore *)base;
-  return (store->last_err_msg[0] != '\0') ? store->last_err_msg : "";
-}
-
-/* Returns backend-specific error category for the file-backed secret store.
- * It borrows 'base' and performs no allocations.
- * Side effects: none.
- * Error semantics: returns SSERR_NONE on invalid input or when no error is
- * available.
- */
-static SecretStoreErrCode secret_store_file_last_error_code(SecretStore *base) {
-  if (!base)
-    return SSERR_NONE;
-  FileSecretStore *store = (FileSecretStore *)base;
-  return store->last_err_code;
-}
-
 static const SecretStoreVTable SECRET_STORE_FILE_VT = {
     .get = secret_store_file_get,
     .set = secret_store_file_set,
@@ -1266,21 +1207,18 @@ static const SecretStoreVTable SECRET_STORE_FILE_VT = {
     .wipe_namespace = secret_store_file_wipe_namespace,
     .wipe_all = secret_store_file_wipe_all,
     .destroy = secret_store_file_destroy,
-    .last_error = secret_store_file_last_error,
-    .last_error_code = secret_store_file_last_error_code,
 };
 
-static SecretStore *secret_store_file_backend_create(void) {
+static SecretStore *secret_store_file_backend_create(SecretStoreErr *out_err) {
   FileSecretStore *store = (FileSecretStore *)xmalloc(sizeof(*store));
   store->base.vt = &SECRET_STORE_FILE_VT;
   store->dir_fd = -1;
   store->cache_loaded = 0;
   memset(&store->cache_meta, 0, sizeof(store->cache_meta));
   memset(&store->cache, 0, sizeof(store->cache));
-  ss_clear_err(store);
 
   // Fail close: backend creation succeeds only when storage directory is ready.
-  if (ss_get_dir_fd(store) < 0) {
+  if (ss_get_dir_fd(store, out_err) < 0) {
     secret_store_file_destroy((SecretStore *)store);
     return NULL;
   }
@@ -1288,11 +1226,17 @@ static SecretStore *secret_store_file_backend_create(void) {
   return (SecretStore *)store;
 }
 
-AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store) {
-  if (!out_store)
+AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store,
+                                              SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!out_store) {
+    ADBX_ERR_SETF(out_err, SSERR_INPUT,
+                  "secret-store file backend probe failed: invalid output "
+                  "pointer. This is probably a bug, please, report it.");
     return ERR;
+  }
   *out_store = NULL;
 
-  *out_store = secret_store_file_backend_create();
+  *out_store = secret_store_file_backend_create(out_err);
   return *out_store ? YES : ERR;
 }

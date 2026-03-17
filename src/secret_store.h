@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "adbx_err.h"
 #include "string_op.h"
 #include "utils.h"
 
@@ -27,6 +28,11 @@ typedef struct {
   const char *connection_name;
 } SecretRefInfo;
 
+typedef struct {
+  SecretStoreErrCode code;
+  char msg[ADBX_ERRMSG_MAX];
+} SecretStoreErr;
+
 /* SecretStore supports concurrent reads, but mutating operations are not
  * guaranteed to form one multi-process transaction across backends. Current
  * production code relies on a higher-level single-writer discipline: the
@@ -38,24 +44,20 @@ struct SecretStoreVTable {
   // Writes a NUL-terminated secret into 'out'.
   // Returns YES when found, NO when missing, ERR on failure.
   AdbxTriStatus (*get)(SecretStore *store, const SecretRefInfo *ref,
-                       StrBuf *out);
+                       StrBuf *out, SecretStoreErr *out_err);
   // Stores/replace one NUL-terminated secret.
   AdbxStatus (*set)(SecretStore *store, const SecretRefInfo *ref,
-                    const char *secret);
+                    const char *secret, SecretStoreErr *out_err);
   // Deletes one stored secret.
-  AdbxStatus (*delete)(SecretStore *store, const SecretRefInfo *ref);
+  AdbxStatus (*delete)(SecretStore *store, const SecretRefInfo *ref,
+                       SecretStoreErr *out_err);
   // Deletes all stored secrets in one namespace.
-  AdbxStatus (*wipe_namespace)(SecretStore *store, const char *cred_namespace);
+  AdbxStatus (*wipe_namespace)(SecretStore *store, const char *cred_namespace,
+                               SecretStoreErr *out_err);
   // Deletes all stored secrets in this store namespace.
-  AdbxStatus (*wipe_all)(SecretStore *store);
+  AdbxStatus (*wipe_all)(SecretStore *store, SecretStoreErr *out_err);
   // Destroys the store and releases resources.
   void (*destroy)(SecretStore *store);
-  // Returns backend-specific last error text for diagnostics.
-  // Safe to return NULL since our wrapper secret_store_last_error handles it.
-  const char *(*last_error)(SecretStore *store);
-  // Returns backend-specific error category for diagnostics.
-  // Safe to return SSERR_NONE when there is no detail.
-  SecretStoreErrCode (*last_error_code)(SecretStore *store);
 };
 
 struct SecretStore {
@@ -65,37 +67,28 @@ struct SecretStore {
 /* Creates one SecretStore instance using the backend selected for this machine.
  * On success, caller owns the returned store and must destroy it.
  * Returns NULL when no backend can be initialized safely; if 'out_err' is not
- * NULL, it may receive one heap-allocated diagnostic string that caller must
- * free.
+ * NULL, it receives one non-allocating typed error snapshot.
  */
-SecretStore *secret_store_create(char **out_err);
+SecretStore *secret_store_create(SecretStoreErr *out_err);
 
 /* -------------------------------- HELPERS -------------------------------- */
 
 void secret_store_destroy(SecretStore *store);
 
 AdbxTriStatus secret_store_get(SecretStore *store, const SecretRefInfo *ref,
-                               StrBuf *out);
+                               StrBuf *out, SecretStoreErr *out_err);
 
 AdbxStatus secret_store_set(SecretStore *store, const SecretRefInfo *ref,
-                            const char *secret);
+                            const char *secret, SecretStoreErr *out_err);
 
-AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref);
+AdbxStatus secret_store_delete(SecretStore *store, const SecretRefInfo *ref,
+                               SecretStoreErr *out_err);
 
 AdbxStatus secret_store_wipe_namespace(SecretStore *store,
-                                       const char *cred_namespace);
+                                       const char *cred_namespace,
+                                       SecretStoreErr *out_err);
 
-AdbxStatus secret_store_wipe_all(SecretStore *store);
-
-/* Returns backend-specific last error text.
- * Error semantics: returns empty string when unavailable or no error detail.
- */
-const char *secret_store_last_error(SecretStore *store);
-
-/* Returns backend-specific last error category.
- * Error semantics: returns SSERR_NONE when unavailable or no error detail.
- */
-SecretStoreErrCode secret_store_last_error_code(SecretStore *store);
+AdbxStatus secret_store_wipe_all(SecretStore *store, SecretStoreErr *out_err);
 
 /* ---------------------------- SUPPORTED STORES --------------------------- */
 
@@ -105,7 +98,8 @@ SecretStoreErrCode secret_store_last_error_code(SecretStore *store);
  * Error semantics: returns YES on success, ERR on invalid input or
  * initialization failure.
  */
-AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store);
+AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store,
+                                              SecretStoreErr *out_err);
 
 /* Probes and creates the macOS Keychain-backed SecretStore.
  * Ownership: on YES, caller owns *out_store and must destroy it.
@@ -113,7 +107,8 @@ AdbxTriStatus secret_store_file_backend_probe(SecretStore **out_store);
  * Error semantics: returns YES on success, NO when backend unavailable, ERR on
  * runtime failures.
  */
-AdbxTriStatus secret_store_keychain_backend_probe(SecretStore **out_store);
+AdbxTriStatus secret_store_keychain_backend_probe(SecretStore **out_store,
+                                                  SecretStoreErr *out_err);
 
 /* Probes and creates the libsecret-backed SecretStore.
  * Ownership: on YES, caller owns *out_store and must destroy it.
@@ -121,14 +116,7 @@ AdbxTriStatus secret_store_keychain_backend_probe(SecretStore **out_store);
  * Error semantics: returns YES on success, NO when backend unavailable, ERR on
  * runtime failures.
  */
-AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store);
-
-#ifdef DUMMY_SECRET_STORE_WARNING
-/* Creates a dummy SecretStore implementation. Use this only in test env.
- * Ownership: returned SecretStore owned by caller and must be destroyed.
- * Error semantics: returns NULL on failure.
- */
-SecretStore *secret_store_dummy_backend_create(void);
-#endif
+AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store,
+                                                   SecretStoreErr *out_err);
 
 #endif

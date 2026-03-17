@@ -365,7 +365,7 @@ static void seed_secret(const char *cred_namespace, const char *connection_name,
       secret_store_set(store,
                        &(SecretRefInfo){.cred_namespace = cred_namespace,
                                         .connection_name = connection_name},
-                       secret) == OK);
+                       secret, NULL) == OK);
   secret_store_destroy(store);
 }
 
@@ -385,7 +385,7 @@ static void assert_secret_value(const char *cred_namespace,
       secret_store_get(store,
                        &(SecretRefInfo){.cred_namespace = cred_namespace,
                                         .connection_name = connection_name},
-                       &out) == YES);
+                       &out, NULL) == YES);
   ASSERT_STREQ(out.data, expected_secret);
   sb_zero_clean(&out);
   secret_store_destroy(store);
@@ -405,7 +405,7 @@ static void assert_secret_missing(const char *cred_namespace,
       secret_store_get(store,
                        &(SecretRefInfo){.cred_namespace = cred_namespace,
                                         .connection_name = connection_name},
-                       &out) == NO);
+                       &out, NULL) == NO);
   sb_zero_clean(&out);
   secret_store_destroy(store);
 }

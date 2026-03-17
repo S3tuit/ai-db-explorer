@@ -64,20 +64,18 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
   // Fetch password if needed
   StrBuf pw;
   sb_init(&pw);
+  SecretStoreErr ss_err;
   AdbxTriStatus s_rc = secret_store_get(m->secrets, &e->profile->secret_ref,
-                                        &pw);
+                                        &pw, &ss_err);
   if (s_rc == NO) {
     TLOG("ERROR - missing secret for %s", e->profile->connection_name);
     sb_zero_clean(&pw);
     return ERR;
   }
   if (s_rc != YES) {
-    // TODO: maybe print to stderr
-    const char *ss_err = secret_store_last_error(m->secrets);
-    (void)ss_err;
     TLOG("ERROR - secret_store_get failed for %s: %s",
          e->profile->connection_name,
-         (ss_err && ss_err[0] != '\0') ? ss_err : "no backend error detail");
+         (ss_err.msg[0] != '\0') ? ss_err.msg : "no backend error detail");
     sb_zero_clean(&pw);
     return ERR;
   }

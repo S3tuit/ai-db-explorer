@@ -23,8 +23,9 @@ typedef struct {
  * store while still exercising successful connection establishment.
  */
 static AdbxTriStatus fake_ss_get(SecretStore *store, const SecretRefInfo *ref,
-                                 StrBuf *out) {
+                                 StrBuf *out, SecretStoreErr *out_err) {
   (void)store;
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
   if (!ref || !ref->connection_name || !out)
     return ERR;
   if (sb_append_bytes(out, ref->connection_name,
@@ -35,28 +36,35 @@ static AdbxTriStatus fake_ss_get(SecretStore *store, const SecretRefInfo *ref,
 }
 
 static AdbxStatus fake_ss_set(SecretStore *store, const SecretRefInfo *ref,
-                              const char *secret) {
+                              const char *secret, SecretStoreErr *out_err) {
   (void)store;
   (void)ref;
   (void)secret;
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
   return OK;
 }
 
-static AdbxStatus fake_ss_delete(SecretStore *store, const SecretRefInfo *ref) {
+static AdbxStatus fake_ss_delete(SecretStore *store, const SecretRefInfo *ref,
+                                 SecretStoreErr *out_err) {
   (void)store;
   (void)ref;
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
   return OK;
 }
 
 static AdbxStatus fake_ss_wipe_namespace(SecretStore *store,
-                                         const char *cred_namespace) {
+                                         const char *cred_namespace,
+                                         SecretStoreErr *out_err) {
   (void)store;
   (void)cred_namespace;
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
   return OK;
 }
 
-static AdbxStatus fake_ss_wipe_all(SecretStore *store) {
+static AdbxStatus fake_ss_wipe_all(SecretStore *store,
+                                   SecretStoreErr *out_err) {
   (void)store;
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
   return OK;
 }
 
