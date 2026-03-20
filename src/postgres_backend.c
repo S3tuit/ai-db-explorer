@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdalign.h>
@@ -29,7 +30,144 @@ typedef struct PgImpl {
   SafetyPolicy policy;
   uint8_t policy_applied; // 1 if the policy has already been enforced
                           // at session level, else 0
+  Arena *type_name_arena; // owns cached type-name strings and array
+  struct PgOidInfo *type_names;
+  uint32_t type_names_len;
 } PgImpl;
+
+typedef struct PgOidInfo {
+  uint32_t oid;
+  char *readable_v;
+} PgOidInfo;
+
+/* Releases the cached OID->type-name mapping owned by 'p'.
+ * It borrows 'p' and does not transfer ownership.
+ * Side effects: frees the arena blocks that back cached metadata.
+ * Returns void.
+ */
+static void pg_type_name_cache_reset(PgImpl *p) {
+  if (!p)
+    return;
+  arena_destroy(p->type_name_arena);
+  p->type_name_arena = NULL;
+  p->type_names = NULL;
+  p->type_names_len = 0;
+}
+
+/* Loads a sorted Postgres OID->typname cache for one live connection.
+ * It borrows 'p' and stores the cache in p->type_name_arena on success.
+ * Side effects: executes one read-only catalog query and allocates cache
+ * storage with connection lifetime.
+ * Returns OK on success, ERR on invalid input, query failure, or allocation/
+ * parse error.
+ */
+static AdbxStatus pg_type_name_cache_load(PgImpl *p) {
+  if (!p || !p->conn)
+    return ERR;
+
+  // The query returns all the "real" data types; all the OID excluding arrays
+  // (prefixed with _) and tables, views, materialized views, foreign tables,
+  // partitioned tables
+  PGresult *res =
+      PQexec(p->conn, "SELECT t.oid, t.typname "
+                      "FROM pg_catalog.pg_type t "
+                      "WHERE t.typname NOT LIKE '\\_%' "
+                      "AND t.typtype <> 'p' "
+                      " AND NOT EXISTS ("
+                      "   SELECT 1 FROM pg_catalog.pg_class c"
+                      "   WHERE c.reltype = t.oid"
+                      "      AND c.relkind IN ('r', 'v', 'm', 'f', 'p')"
+                      "  ) "
+                      "ORDER BY t.oid");
+  if (!res)
+    return ERR;
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    PQclear(res);
+    return ERR;
+  }
+
+  int ntuples = PQntuples(res);
+  if (ntuples < 0) {
+    PQclear(res);
+    return ERR;
+  }
+
+  Arena *tmp_arena = arena_create(NULL, NULL);
+  if (!tmp_arena) {
+    PQclear(res);
+    return ERR;
+  }
+
+  PgOidInfo *tmp_infos = NULL;
+  if (ntuples > 0) {
+    size_t infos_bytes = (size_t)ntuples * sizeof(*tmp_infos);
+    if (infos_bytes > UINT32_MAX) {
+      goto clean_n_return;
+    }
+    tmp_infos = (PgOidInfo *)arena_alloc(tmp_arena, (uint32_t)infos_bytes);
+    if (!tmp_infos) {
+      goto clean_n_return;
+    }
+  }
+
+  for (int row = 0; row < ntuples; row++) {
+    if (PQgetisnull(res, row, 0) || PQgetisnull(res, row, 1)) {
+      goto clean_n_return;
+    }
+
+    const char *oid_txt = PQgetvalue(res, row, 0);
+    const char *typname = PQgetvalue(res, row, 1);
+    if (!oid_txt || !typname) {
+      goto clean_n_return;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long parsed = strtoul(oid_txt, &end, 10);
+    if (errno != 0 || end == oid_txt || *end != '\0' || parsed > UINT32_MAX) {
+      goto clean_n_return;
+    }
+
+    char *cached_name =
+        (char *)arena_add_nul(tmp_arena, (void *)typname, strlen(typname));
+    if (!cached_name) {
+      goto clean_n_return;
+    }
+
+    tmp_infos[row].oid = (uint32_t)parsed;
+    tmp_infos[row].readable_v = cached_name;
+  }
+
+  PQclear(res);
+
+  pg_type_name_cache_reset(p);
+  p->type_name_arena = tmp_arena;
+  p->type_names = tmp_infos;
+  p->type_names_len = (uint32_t)ntuples;
+  return OK;
+
+clean_n_return:
+  arena_destroy(tmp_arena);
+  PQclear(res);
+  return ERR;
+}
+
+/* Compares one lookup OID key against one cached PgOidInfo entry for bsearch().
+ * It borrows both pointers and does not allocate memory.
+ * Returns <0 when key oid is smaller, >0 when larger, 0 on exact match.
+ */
+static int pg_oid_info_cmp(const void *key_v, const void *elem_v) {
+  if (!key_v || !elem_v)
+    return 0;
+
+  uint32_t key_oid = *(const uint32_t *)key_v;
+  const PgOidInfo *elem = (const PgOidInfo *)elem_v;
+  if (key_oid < elem->oid)
+    return -1;
+  if (key_oid > elem->oid)
+    return 1;
+  return 0;
+}
 
 // --------------------------- QueryIR helpers (Postgres) --------------------
 
@@ -2385,6 +2523,7 @@ static AdbxStatus pg_connect(DbBackend *db, const ConnProfile *profile,
     PQfinish(p->conn);
     p->conn = NULL;
   }
+  pg_type_name_cache_reset(p);
 
   const char *port_str = NULL;
   char portbuf[16];
@@ -2425,6 +2564,10 @@ static AdbxStatus pg_connect(DbBackend *db, const ConnProfile *profile,
 
   p->policy = *policy;
   p->policy_applied = 0;
+  if (pg_type_name_cache_load(p) != OK) {
+    TLOG("WARN - failed to preload Postgres type-name cache; falling back to "
+         "OID strings in column metadata");
+  }
   return OK;
 }
 
@@ -2445,6 +2588,7 @@ static void pg_disconnect(DbBackend *db) {
     PQfinish(p->conn);
     p->conn = NULL;
   }
+  pg_type_name_cache_reset(p);
   p->policy_applied = 0;
 }
 
@@ -2580,11 +2724,25 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
         name = "";
 
       Oid oid = PQftype(res, c);
-      char typebuf[32];
-      // materialize Oid to a textual representation
-      snprintf(typebuf, sizeof(typebuf), "%u", (unsigned)oid);
+      char oidbuf[32];
+      const PgOidInfo *found = NULL;
+      if (p->type_names) {
+        found =
+            (const PgOidInfo *)bsearch(&oid, p->type_names, p->type_names_len,
+                                       sizeof(*p->type_names), pg_oid_info_cmp);
+      }
 
-      if (qb_set_col(&qb, c, name, typebuf, (uint32_t)oid) != OK) {
+      const char *type_name;
+      if (found) {
+        type_name = found->readable_v;
+      } else {
+        // Keep column metadata stable even if the cache is unavailable or the
+        // server reports an OID we did not preload.
+        snprintf(oidbuf, sizeof(oidbuf), "oid: %u", (unsigned)oid);
+        type_name = oidbuf;
+      }
+
+      if (qb_set_col(&qb, c, name, type_name, (uint32_t)oid) != OK) {
         ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "qb_set_col failed");
         goto fail;
       }
@@ -2664,8 +2822,7 @@ fail:
   if (qr)
     qr_destroy(qr);
 fail_bad_input:
-  safe_msg =
-      (db_err.msg[0] != '\0') ? db_err.msg : "Unknown backend error.";
+  safe_msg = (db_err.msg[0] != '\0') ? db_err.msg : "Unknown backend error.";
   *out_qr =
       qr_create_tool_err(NULL, "PostgreSQL execution failed: %s", safe_msg);
   return (*out_qr ? OK : ERR);

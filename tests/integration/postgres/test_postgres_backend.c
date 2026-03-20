@@ -186,6 +186,58 @@ static void test_select_null_cell(void) {
   db_destroy(pg);
 }
 
+/* Verifies Postgres column metadata uses typname strings instead of raw OIDs.
+ */
+static void test_column_types_are_human_readable(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  QueryResult *qr = PG_EXEC(pg, "SELECT 'ok'::text AS txt, "
+                                "42::integer AS power, "
+                                "DATE '2024-01-02' AS day");
+
+  ASSERT_OK_QR(qr);
+  ASSERT_TRUE(qr->ncols == 3);
+  ASSERT_TRUE(qr->nrows == 1);
+
+  const QRColumn *c0 = qr_get_col(qr, 0);
+  const QRColumn *c1 = qr_get_col(qr, 1);
+  const QRColumn *c2 = qr_get_col(qr, 2);
+  ASSERT_TRUE(c0 && c1 && c2);
+  ASSERT_STREQ(c0->type, "text");
+  ASSERT_STREQ(c1->type, "int4");
+  ASSERT_STREQ(c2->type, "date");
+
+  qr_destroy(qr);
+  db_destroy(pg);
+}
+
+/* Verifies unknown OID are handled gracefully by returning "oid: <oid-val>" */
+static void test_column_types_oid_fallback(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  QueryResult *qr = PG_EXEC(pg, "SELECT tab "
+                                "FROM public.zfighters AS tab "
+                                "LIMIT 1");
+
+  ASSERT_OK_QR(qr);
+  ASSERT_TRUE(qr->ncols == 1);
+  ASSERT_TRUE(qr->nrows == 1);
+
+  const QRColumn *c = qr_get_col(qr, 0);
+  ASSERT_TRUE(c);
+  ASSERT_TRUE(strncmp(c->type, "oid: ", 5) == 0);
+  char *endptr;
+  long val = strtol(c->type + 5, &endptr, 10);
+  ASSERT_TRUE(val > 0);
+  ASSERT_TRUE(endptr != c->type + 5); // at least one digit was parsed
+  ASSERT_TRUE(*endptr == '\0');       // nothing trailing after the number
+
+  qr_destroy(qr);
+  db_destroy(pg);
+}
+
 static void test_max_rows_truncates(void) {
   SafetyPolicy p = policy_default();
   p.max_rows = 3;
@@ -423,6 +475,8 @@ static void test_bound_exec_over_max_params_fails_soft(void) {
 void test_postgres_backend(void) {
   test_base_select_join();
   test_select_null_cell();
+  test_column_types_are_human_readable();
+  test_column_types_oid_fallback();
   test_max_rows_truncates();
   test_max_payload_bytes_truncates_result();
   test_delete_fails_read_only();

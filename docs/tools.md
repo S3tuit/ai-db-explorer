@@ -3,7 +3,8 @@ TBD
 
 ## run_sql_query
 
-Tool definition aligned with MCP `2025-11-25`:
+Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
+`outputSchema` documents below explicitly target JSON Schema 2020-12:
 
 ```json
 {
@@ -11,6 +12,7 @@ Tool definition aligned with MCP `2025-11-25`:
   "title": "Run SQL Query",
   "description": "Execute a read-only SQL query against a configured database connection.",
   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
       "connectionName": {
@@ -28,6 +30,7 @@ Tool definition aligned with MCP `2025-11-25`:
     "additionalProperties": false
   },
   "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
       "exec_ms": {
@@ -47,7 +50,6 @@ Tool definition aligned with MCP `2025-11-25`:
             },
             "type": {
               "type": "string",
-              // WARN: RIGHT NOW WE ACTUALLY PUT POSTGRES OID IN HERE
               "description": "Database type name (for example: int4, text, date)."
             }
           },
@@ -96,7 +98,8 @@ Tool definition aligned with MCP `2025-11-25`:
 
 ## run_sql_query_tokens
 
-Future tool definition aligned with MCP `2025-11-25`:
+Future tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
+`outputSchema` documents below explicitly target JSON Schema 2020-12:
 
 ```json
 {
@@ -104,6 +107,7 @@ Future tool definition aligned with MCP `2025-11-25`:
   "title": "Run SQL Query With Parameters",
   "description": "Execute a read-only SQL query against a configured database connection using positional text parameters (for example PostgreSQL $1, $2).",
   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
       "connectionName": {
@@ -129,6 +133,7 @@ Future tool definition aligned with MCP `2025-11-25`:
     "additionalProperties": false
   },
   "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
       "exec_ms": {
@@ -148,7 +153,6 @@ Future tool definition aligned with MCP `2025-11-25`:
             },
             "type": {
               "type": "string",
-              // WARN: RIGHT NOW WE ACTUALLY PUT POSTGRES OID IN HERE
               "description": "Database type name (for example: int4, text, date)."
             }
           },

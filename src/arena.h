@@ -43,10 +43,13 @@ typedef struct {
   uint32_t cap;
 } PtrVec;
 
-/* Allocates and returns a Arena. The first block is 1 KiB when size_p
- * is NULL, otherwise it uses *size_p. Each subsequent block doubles in size.
- * If cap_p is provided, it is used as the total hard cap. Returns NULL if
- * there's an error. */
+#define DEFAULT_ARENA_SIZE 2024u   // ~2KB
+#define DEFAULT_ARENA_CAP 2048000u // ~2MB
+
+/* Allocates and returns a Arena. The first block is *size_p bytes, if NULL,
+ * uses a default size. Each subsequent block doubles in size. If cap_p is
+ * provided, it is used as the total hard cap. Returns NULL if there's an error.
+ */
 Arena *arena_create(uint32_t *size_p, uint32_t *cap_p);
 
 /* Initializes an arena in-place. Returns OK on success, ERR on bad input. */

@@ -45,8 +45,9 @@ AdbxStatus arena_init(Arena *ar, uint32_t *size_p, uint32_t *cap_p) {
     return ERR;
 
   // resolve defaults
-  uint32_t size = (size_p == NULL || *size_p == 0) ? 2024u : *size_p; // ~2KB
-  uint32_t cap = (cap_p == NULL || *cap_p == 0) ? 2048000u : *cap_p;  // ~2MB
+  uint32_t size =
+      (size_p == NULL || *size_p == 0) ? DEFAULT_ARENA_SIZE : *size_p;
+  uint32_t cap = (cap_p == NULL || *cap_p == 0) ? DEFAULT_ARENA_CAP : *cap_p;
 
   // Validate alignment
   if (!arena_is_power_of_two_u32(ARENA_ALIGN))
