@@ -2602,16 +2602,16 @@ static void pg_destroy(DbBackend *db) {
 }
 
 /* Executes one SQL statement (optionally with bound positional params) and
- * materializes one QueryResult. Allocates '*out_qr' on success.
+ * materializes either one QueryResult or one backend tool-error message.
  * Side effects: executes SQL, enforces policy/transactions, and writes
  * diagnostics into one local transient buffer.
- * Returns OK if a QueryResult object is produced, ERR only on catastrophic
- * allocation/input failures.
+ * Returns OK when 'out_res' is populated with either a QueryResult or a
+ * tool-error message, ERR only on catastrophic allocation/input failures.
  */
 static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
                                const DbExecParam *params, uint32_t nparams,
                                const QueryResultBuildPolicy *qb_policy,
-                               QueryResult **out_qr) {
+                               DbExecResult *out_res) {
   DbErr db_err;
   const char *safe_msg;
   QueryResult *qr = NULL;
@@ -2619,12 +2619,12 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
 
   ADBX_ERR_CLEAR(&db_err, DBERR_NONE);
 
-  if (!db || !db->impl || !sql || !out_qr || (nparams > 0 && params == NULL)) {
+  if (!db || !db->impl || !sql || !out_res ||
+      (nparams > 0 && params == NULL)) {
     ADBX_ERR_SETF(&db_err, DBERR_INPUT,
                   "unexpected input before executing the query");
     goto fail_bad_input;
   };
-  *out_qr = NULL;
 
   PgImpl *p = (PgImpl *)db->impl;
   if (!p->conn) {
@@ -2704,10 +2704,10 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
       result_truncated = 1;
     }
 
-    qr = qr_create_ok(NULL, (uint32_t)ncols, out_rows, result_truncated,
-                      p->policy.max_payload_bytes);
+    qr = qr_create((uint32_t)ncols, out_rows, result_truncated,
+                   p->policy.max_payload_bytes);
     if (!qr) {
-      ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "qr_create_ok error");
+      ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "qr_create failed");
       goto fail;
     }
     QueryResultBuilder qb = {0};
@@ -2806,11 +2806,14 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
   uint64_t t1 = now_ms_monotonic();
   qr->exec_ms = (t1 >= t0) ? (t1 - t0) : 0;
 
-  *out_qr = qr;
-  return (*out_qr ? OK : ERR);
+  if (db_exec_result_set_qr(out_res, qr) != OK) {
+    qr_destroy(qr);
+    return ERR;
+  }
+  return OK;
 
 fail:
-  if (!out_qr)
+  if (!out_res)
     return ERR; // catastrophic
 
   TLOG("ERROR - pg_exec failed: %s",
@@ -2823,22 +2826,21 @@ fail:
     qr_destroy(qr);
 fail_bad_input:
   safe_msg = (db_err.msg[0] != '\0') ? db_err.msg : "Unknown backend error.";
-  *out_qr =
-      qr_create_tool_err(NULL, "PostgreSQL execution failed: %s", safe_msg);
-  return (*out_qr ? OK : ERR);
+  return db_exec_result_set_tool_err(out_res, "PostgreSQL execution failed: %s",
+                                     safe_msg);
 }
 
 static AdbxStatus pg_exec(DbBackend *db, const char *sql,
                           const QueryResultBuildPolicy *qb_policy,
-                          QueryResult **out_qr) {
-  return pg_exec_impl(db, sql, NULL, 0, qb_policy, out_qr);
+                          DbExecResult *out_res) {
+  return pg_exec_impl(db, sql, NULL, 0, qb_policy, out_res);
 }
 
 static AdbxStatus pg_exec_bound(DbBackend *db, const char *sql,
                                 const DbExecParam *params, uint32_t nparams,
                                 const QueryResultBuildPolicy *qb_policy,
-                                QueryResult **out_qr) {
-  return pg_exec_impl(db, sql, params, nparams, qb_policy, out_qr);
+                                DbExecResult *out_res) {
+  return pg_exec_impl(db, sql, params, nparams, qb_policy, out_res);
 }
 
 // This list of functions MUST be sorted ASC.

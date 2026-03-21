@@ -71,51 +71,104 @@ static DbBackend *pg_connect_impl(const SafetyPolicy *policy, const char *file,
 }
 #define PG_CONNECT(policy) pg_connect_impl((policy), __FILE__, __LINE__)
 
-static QueryResult *pg_exec_impl(DbBackend *pg, const char *sql,
-                                 const char *file, int line) {
-  QueryResult *qr = NULL;
-  int rc = db_exec(pg, sql, NULL, &qr);
+/* Executes one SQL statement and returns the successful QueryResult payload.
+ * Ownership: caller owns returned QueryResult and must destroy it.
+ * Side effects: sends one SQL statement to the backend.
+ * Error semantics: asserts backend contract (OK + QUERY_RESULT payload).
+ */
+static QueryResult *pg_exec_qr_impl(DbBackend *pg, const char *sql,
+                                    const char *file, int line) {
+  DbExecResult res = {0};
+  int rc = db_exec(pg, sql, NULL, &res);
 
-  /* Contract: backend returns OK and always produces a QueryResult (OK or
-   * ERROR) */
   ASSERT_TRUE_AT(rc == OK, file, line);
-  ASSERT_TRUE_AT(qr != NULL, file, line);
+  ASSERT_TRUE_AT(res.kind == DBEXEC_RESULT_QUERY_RESULT, file, line);
+  ASSERT_TRUE_AT(res.qr != NULL, file, line);
 
+  QueryResult *qr = res.qr;
+  res.kind = DBEXEC_RESULT_NONE;
+  res.qr = NULL;
   return qr;
 }
-#define PG_EXEC(pg, sql) pg_exec_impl((pg), (sql), __FILE__, __LINE__)
+#define PG_EXEC_QR(pg, sql) pg_exec_qr_impl((pg), (sql), __FILE__, __LINE__)
 
-/* Executes one bound SQL statement and returns one QueryResult.
+/* Executes one SQL statement and returns the backend tool-error message.
+ * Ownership: caller owns returned message and must free it.
+ * Side effects: sends one SQL statement to the backend.
+ * Error semantics: asserts backend contract (OK + TOOL_ERR payload).
+ */
+static char *pg_exec_tool_err_impl(DbBackend *pg, const char *sql,
+                                   const char *file, int line) {
+  DbExecResult res = {0};
+  int rc = db_exec(pg, sql, NULL, &res);
+
+  ASSERT_TRUE_AT(rc == OK, file, line);
+  ASSERT_TRUE_AT(res.kind == DBEXEC_RESULT_TOOL_ERR, file, line);
+  ASSERT_TRUE_AT(res.tool_err_msg != NULL, file, line);
+  ASSERT_TRUE_AT(res.tool_err_msg[0] != '\0', file, line);
+
+  char *msg = res.tool_err_msg;
+  res.kind = DBEXEC_RESULT_NONE;
+  res.tool_err_msg = NULL;
+  return msg;
+}
+#define PG_EXEC_TOOL_ERR(pg, sql)                                              \
+  pg_exec_tool_err_impl((pg), (sql), __FILE__, __LINE__)
+
+/* Executes one bound SQL statement and returns one successful QueryResult.
  * Ownership: caller owns returned QueryResult and must destroy it.
  * Side effects: sends one parameterized query to the backend.
- * Error semantics: asserts backend contract (OK + non-NULL QueryResult).
+ * Error semantics: asserts backend contract (OK + QUERY_RESULT payload).
  */
-static QueryResult *pg_exec_bound_impl(DbBackend *pg, const char *sql,
-                                       const DbExecParam *params,
-                                       uint32_t nparams, const char *file,
-                                       int line) {
-  QueryResult *qr = NULL;
-  int rc = db_exec_bound(pg, sql, params, nparams, NULL, &qr);
+static QueryResult *pg_exec_bound_qr_impl(DbBackend *pg, const char *sql,
+                                          const DbExecParam *params,
+                                          uint32_t nparams, const char *file,
+                                          int line) {
+  DbExecResult res = {0};
+  int rc = db_exec_bound(pg, sql, params, nparams, NULL, &res);
+
   ASSERT_TRUE_AT(rc == OK, file, line);
-  ASSERT_TRUE_AT(qr != NULL, file, line);
+  ASSERT_TRUE_AT(res.kind == DBEXEC_RESULT_QUERY_RESULT, file, line);
+  ASSERT_TRUE_AT(res.qr != NULL, file, line);
+
+  QueryResult *qr = res.qr;
+  res.kind = DBEXEC_RESULT_NONE;
+  res.qr = NULL;
   return qr;
 }
-#define PG_EXEC_BOUND(pg, sql, params, nparams)                                \
-  pg_exec_bound_impl((pg), (sql), (params), (nparams), __FILE__, __LINE__)
+#define PG_EXEC_BOUND_QR(pg, sql, params, nparams)                             \
+  pg_exec_bound_qr_impl((pg), (sql), (params), (nparams), __FILE__, __LINE__)
+
+/* Executes one bound SQL statement and returns the backend tool-error message.
+ * Ownership: caller owns returned message and must free it.
+ * Side effects: sends one parameterized query to the backend.
+ * Error semantics: asserts backend contract (OK + TOOL_ERR payload).
+ */
+static char *pg_exec_bound_tool_err_impl(DbBackend *pg, const char *sql,
+                                         const DbExecParam *params,
+                                         uint32_t nparams, const char *file,
+                                         int line) {
+  DbExecResult res = {0};
+  int rc = db_exec_bound(pg, sql, params, nparams, NULL, &res);
+
+  ASSERT_TRUE_AT(rc == OK, file, line);
+  ASSERT_TRUE_AT(res.kind == DBEXEC_RESULT_TOOL_ERR, file, line);
+  ASSERT_TRUE_AT(res.tool_err_msg != NULL, file, line);
+  ASSERT_TRUE_AT(res.tool_err_msg[0] != '\0', file, line);
+
+  char *msg = res.tool_err_msg;
+  res.kind = DBEXEC_RESULT_NONE;
+  res.tool_err_msg = NULL;
+  return msg;
+}
+#define PG_EXEC_BOUND_TOOL_ERR(pg, sql, params, nparams)                       \
+  pg_exec_bound_tool_err_impl((pg), (sql), (params), (nparams), __FILE__,     \
+                              __LINE__)
 
 static void assert_ok_qr(const QueryResult *qr, const char *file, int line) {
   ASSERT_TRUE_AT(qr != NULL, file, line);
-  ASSERT_TRUE_AT(qr->status == QR_OK, file, line);
-}
-static void assert_tool_err_qr(const QueryResult *qr, const char *file,
-                               int line) {
-  ASSERT_TRUE_AT(qr != NULL, file, line);
-  ASSERT_TRUE_AT(qr->status == QR_TOOL_ERROR, file, line);
-  ASSERT_TRUE_AT(qr->err_msg != NULL, file, line);
-  ASSERT_TRUE_AT(qr->err_msg[0] != '\0', file, line);
 }
 #define ASSERT_OK_QR(qr) assert_ok_qr((qr), __FILE__, __LINE__)
-#define ASSERT_TOOL_ERR_QR(qr) assert_tool_err_qr((qr), __FILE__, __LINE__)
 
 /* Verifies the backend connection is still usable after an error.
  * Ownership: borrows 'pg'; temporary QueryResult is destroyed internally.
@@ -123,7 +176,7 @@ static void assert_tool_err_qr(const QueryResult *qr, const char *file,
  * Error semantics: assertions abort on failure.
  */
 static void assert_backend_still_usable(DbBackend *pg) {
-  QueryResult *qr = PG_EXEC(pg, "SELECT 1 AS one");
+  QueryResult *qr = PG_EXEC_QR(pg, "SELECT 1 AS one");
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->nrows == 1);
   ASSERT_STREQ(qr_get_cell(qr, 0, 0), "1");
@@ -136,10 +189,10 @@ static void test_base_select_join(void) {
   SafetyPolicy p = policy_default();
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "SELECT z.name, r.race_name, z.height_cm "
-                                "FROM zfighters z "
-                                "JOIN races r ON r.id = z.race_id "
-                                "ORDER BY z.id");
+  QueryResult *qr = PG_EXEC_QR(pg, "SELECT z.name, r.race_name, z.height_cm "
+                                   "FROM zfighters z "
+                                   "JOIN races r ON r.id = z.race_id "
+                                   "ORDER BY z.id");
 
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->ncols == 3);
@@ -171,7 +224,7 @@ static void test_select_null_cell(void) {
   SafetyPolicy p = policy_default();
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "SELECT NULL::text AS x, 'ok'::text AS y");
+  QueryResult *qr = PG_EXEC_QR(pg, "SELECT NULL::text AS x, 'ok'::text AS y");
 
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->ncols == 2);
@@ -192,9 +245,9 @@ static void test_column_types_are_human_readable(void) {
   SafetyPolicy p = policy_default();
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "SELECT 'ok'::text AS txt, "
-                                "42::integer AS power, "
-                                "DATE '2024-01-02' AS day");
+  QueryResult *qr = PG_EXEC_QR(pg, "SELECT 'ok'::text AS txt, "
+                                   "42::integer AS power, "
+                                   "DATE '2024-01-02' AS day");
 
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->ncols == 3);
@@ -217,9 +270,9 @@ static void test_column_types_oid_fallback(void) {
   SafetyPolicy p = policy_default();
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "SELECT tab "
-                                "FROM public.zfighters AS tab "
-                                "LIMIT 1");
+  QueryResult *qr = PG_EXEC_QR(pg, "SELECT tab "
+                                   "FROM public.zfighters AS tab "
+                                   "LIMIT 1");
 
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->ncols == 1);
@@ -243,7 +296,7 @@ static void test_max_rows_truncates(void) {
   p.max_rows = 3;
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "SELECT name FROM zfighters ORDER BY id");
+  QueryResult *qr = PG_EXEC_QR(pg, "SELECT name FROM zfighters ORDER BY id");
 
   // Rows should be truncated when too many
   ASSERT_OK_QR(qr);
@@ -260,9 +313,9 @@ static void test_max_payload_bytes_truncates_result(void) {
   p.max_payload_bytes = 5; // allow only one 5-byte cell
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "SELECT '12345' AS v "
-                                "UNION ALL "
-                                "SELECT '67890' AS v");
+  QueryResult *qr = PG_EXEC_QR(pg, "SELECT '12345' AS v "
+                                   "UNION ALL "
+                                   "SELECT '67890' AS v");
 
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->ncols == 1);
@@ -279,11 +332,8 @@ static void test_delete_fails_read_only(void) {
   p.read_only = 1;
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "DELETE FROM zfighters WHERE name = 'Goku'");
-
-  ASSERT_TOOL_ERR_QR(qr);
-
-  qr_destroy(qr);
+  char *msg = PG_EXEC_TOOL_ERR(pg, "DELETE FROM zfighters WHERE name = 'Goku'");
+  free(msg);
   db_destroy(pg);
 }
 
@@ -292,14 +342,12 @@ static void test_attempt_disable_readonly_still_cannot_write(void) {
   p.read_only = 1;
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr1 = PG_EXEC(pg, "SET default_transaction_read_only = off");
-  ASSERT_TOOL_ERR_QR(qr1);
-  qr_destroy(qr1);
+  char *msg1 = PG_EXEC_TOOL_ERR(pg, "SET default_transaction_read_only = off");
+  free(msg1);
 
-  QueryResult *qr2 = PG_EXEC(pg, "DELETE FROM zfighters WHERE name = 'Vegeta'");
-  ASSERT_TOOL_ERR_QR(qr2);
-
-  qr_destroy(qr2);
+  char *msg2 =
+      PG_EXEC_TOOL_ERR(pg, "DELETE FROM zfighters WHERE name = 'Vegeta'");
+  free(msg2);
   db_destroy(pg);
 }
 
@@ -308,10 +356,8 @@ static void test_long_running_query(void) {
   p.statement_timeout_ms = 100;
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC(pg, "SELECT pg_sleep(1);");
-  ASSERT_TOOL_ERR_QR(qr);
-
-  qr_destroy(qr);
+  char *msg = PG_EXEC_TOOL_ERR(pg, "SELECT pg_sleep(1);");
+  free(msg);
   db_destroy(pg);
 }
 
@@ -328,7 +374,7 @@ static void test_conn_options_applied(void) {
   int rc = db_connect(pg, &profile, &p, pwd, NULL);
   ASSERT_TRUE(rc == OK);
 
-  QueryResult *qr = PG_EXEC(pg, "SHOW search_path");
+  QueryResult *qr = PG_EXEC_QR(pg, "SHOW search_path");
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->ncols == 1);
   ASSERT_TRUE(qr->nrows == 1);
@@ -345,7 +391,7 @@ static void test_bound_exec_one_param_ok(void) {
   const DbExecParam params[] = {
       {.value = "SCT-9001-A", .value_len = 10, .pg_oid = 25},
   };
-  QueryResult *qr = PG_EXEC_BOUND(
+  QueryResult *qr = PG_EXEC_BOUND_QR(
       pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1",
       params, ARRLEN(params));
 
@@ -367,11 +413,11 @@ static void test_bound_exec_two_params_ok(void) {
       {.value = "Prince", .value_len = 6, .pg_oid = 25},
   };
   QueryResult *qr =
-      PG_EXEC_BOUND(pg,
-                    "SELECT z.name FROM zfighter_intel zi "
-                    "JOIN zfighters z ON z.id = zi.fighter_id "
-                    "WHERE zi.scouter_serial = $1 AND zi.codename = $2",
-                    params, ARRLEN(params));
+      PG_EXEC_BOUND_QR(pg,
+                       "SELECT z.name FROM zfighter_intel zi "
+                       "JOIN zfighters z ON z.id = zi.fighter_id "
+                       "WHERE zi.scouter_serial = $1 AND zi.codename = $2",
+                       params, ARRLEN(params));
 
   ASSERT_OK_QR(qr);
   ASSERT_TRUE(qr->ncols == 1);
@@ -386,11 +432,10 @@ static void test_bound_exec_null_params_pointer_fails_soft(void) {
   SafetyPolicy p = policy_default();
   DbBackend *pg = PG_CONNECT(&p);
 
-  QueryResult *qr = PG_EXEC_BOUND(
+  char *msg = PG_EXEC_BOUND_TOOL_ERR(
       pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1", NULL,
       1);
-  ASSERT_TOOL_ERR_QR(qr);
-  qr_destroy(qr);
+  free(msg);
 
   assert_backend_still_usable(pg);
   db_destroy(pg);
@@ -403,11 +448,10 @@ static void test_bound_exec_null_value_param_fails_soft(void) {
   const DbExecParam params[] = {
       {.value = NULL, .value_len = 0, .pg_oid = 25},
   };
-  QueryResult *qr = PG_EXEC_BOUND(
+  char *msg = PG_EXEC_BOUND_TOOL_ERR(
       pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1",
       params, ARRLEN(params));
-  ASSERT_TOOL_ERR_QR(qr);
-  qr_destroy(qr);
+  free(msg);
 
   assert_backend_still_usable(pg);
   db_destroy(pg);
@@ -420,14 +464,13 @@ static void test_bound_exec_sql_param_count_mismatch_missing(void) {
   const DbExecParam params[] = {
       {.value = "SCT-9002-B", .value_len = 10, .pg_oid = 25},
   };
-  QueryResult *qr =
-      PG_EXEC_BOUND(pg,
-                    "SELECT z.name FROM zfighter_intel zi "
-                    "JOIN zfighters z ON z.id = zi.fighter_id "
-                    "WHERE zi.scouter_serial = $1 AND zi.codename = $2",
-                    params, ARRLEN(params));
-  ASSERT_TOOL_ERR_QR(qr);
-  qr_destroy(qr);
+  char *msg =
+      PG_EXEC_BOUND_TOOL_ERR(pg,
+                             "SELECT z.name FROM zfighter_intel zi "
+                             "JOIN zfighters z ON z.id = zi.fighter_id "
+                             "WHERE zi.scouter_serial = $1 AND zi.codename = $2",
+                             params, ARRLEN(params));
+  free(msg);
 
   assert_backend_still_usable(pg);
   db_destroy(pg);
@@ -440,12 +483,12 @@ static void test_bound_exec_sql_param_count_mismatch_fewer(void) {
   const DbExecParam params[] = {
       {.value = "SCT-9002-B", .value_len = 10, .pg_oid = 25},
   };
-  QueryResult *qr = PG_EXEC_BOUND(pg,
-                                  "SELECT codename FROM zfighter_intel "
-                                  "WHERE scouter_serial = $1 AND codename = $2",
-                                  params, ARRLEN(params));
-  ASSERT_TOOL_ERR_QR(qr);
-  qr_destroy(qr);
+  char *msg = PG_EXEC_BOUND_TOOL_ERR(
+      pg,
+      "SELECT codename FROM zfighter_intel "
+      "WHERE scouter_serial = $1 AND codename = $2",
+      params, ARRLEN(params));
+  free(msg);
 
   assert_backend_still_usable(pg);
   db_destroy(pg);
@@ -462,11 +505,10 @@ static void test_bound_exec_over_max_params_fails_soft(void) {
     params[i].value_len = 1;
     params[i].pg_oid = 25;
   }
-  QueryResult *qr = PG_EXEC_BOUND(
+  char *msg = PG_EXEC_BOUND_TOOL_ERR(
       pg, "SELECT codename FROM zfighter_intel WHERE scouter_serial = $1",
       params, (uint32_t)ARRLEN(params));
-  ASSERT_TOOL_ERR_QR(qr);
-  qr_destroy(qr);
+  free(msg);
 
   assert_backend_still_usable(pg);
   db_destroy(pg);

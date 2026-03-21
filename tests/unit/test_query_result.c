@@ -7,12 +7,6 @@
 #include "sensitive_tok.h"
 #include "test.h"
 
-static McpId id_u32(uint32_t v) {
-  McpId id = {0};
-  mcp_id_init_u32(&id, v);
-  return id;
-}
-
 static int set_col_plain(QueryResultBuilder *qb, uint32_t col, const char *name,
                          const char *type) {
   return qb_set_col(qb, col, name, type, 0);
@@ -32,15 +26,12 @@ static DbTokenStore *create_det_store(Arena *arena, const char *conn_name) {
 }
 
 static void test_create_and_basic_set_get(void) {
-  McpId id = id_u32(7);
-  QueryResult *qr = qr_create_ok(&id, 3, 2, 1, 0);
+  QueryResult *qr = qr_create(3, 2, 1, 0);
   ASSERT_TRUE(qr != NULL);
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, NULL) == OK);
   ASSERT_TRUE(qr->ncols == 3);
   ASSERT_TRUE(qr->nrows == 2);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr->id.u32 == 7);
   ASSERT_TRUE(qr->result_truncated == 1);
 
   ASSERT_TRUE(set_col_plain(&qb, 0, "id", "int4") == OK);
@@ -77,8 +68,7 @@ static void test_create_and_basic_set_get(void) {
 }
 
 static void test_max_query_bytes_cap(void) {
-  McpId id = id_u32(1);
-  QueryResult *qr = qr_create_ok(&id, 2, 2, 0, 5);
+  QueryResult *qr = qr_create(2, 2, 0, 5);
   ASSERT_TRUE(qr != NULL);
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, NULL) == OK);
@@ -91,8 +81,7 @@ static void test_max_query_bytes_cap(void) {
 }
 
 static void test_deep_copy_outlives_input_buffers(void) {
-  McpId id = id_u32(1);
-  QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
+  QueryResult *qr = qr_create(2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, NULL) == OK);
@@ -124,12 +113,10 @@ static void test_deep_copy_outlives_input_buffers(void) {
 }
 
 static void test_bounds_and_bad_inputs(void) {
-  McpId id = id_u32(1);
-  QueryResult *qr = qr_create_ok(&id, 2, 2, 0, 0);
+  QueryResult *qr = qr_create(2, 2, 0, 0);
   ASSERT_TRUE(qr != NULL);
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, NULL) == OK);
-  ASSERT_TRUE(qr->status == QR_OK);
 
   // qr_set_col name cannot be NULL
   ASSERT_TRUE(set_col_plain(&qb, 0, NULL, "text") == ERR);
@@ -154,84 +141,8 @@ static void test_bounds_and_bad_inputs(void) {
   qr_destroy(qr);
 }
 
-static void test_create_error(void) {
-  McpId id = id_u32(3);
-  QueryResult *qr = qr_create_err(&id, QRERR_INREQ, "An error.");
-
-  ASSERT_TRUE(qr != NULL);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr->id.u32 == 3);
-  ASSERT_TRUE(qr->status == QR_ERROR);
-  ASSERT_TRUE(qr->err_code == QRERR_INREQ);
-  ASSERT_STREQ(qr->err_msg, "An error.");
-
-  qr_destroy(qr);
-}
-
-static void test_create_tool_error(void) {
-  McpId id = id_u32(4);
-  QueryResult *qr = qr_create_tool_err(&id, "Query failed.");
-
-  ASSERT_TRUE(qr != NULL);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr->id.u32 == 4);
-  ASSERT_TRUE(qr->status == QR_TOOL_ERROR);
-  ASSERT_STREQ(qr->err_msg, "Query failed.");
-
-  qr_destroy(qr);
-}
-
-static void test_create_error_fmt(void) {
-  McpId id = id_u32(5);
-  QueryResult *qr = qr_create_err(&id, QRERR_INPARAM,
-                                  "Invalid token '%s' at position %u.",
-                                  "tok_bad", 3u);
-
-  ASSERT_TRUE(qr != NULL);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr->id.u32 == 5);
-  ASSERT_TRUE(qr->status == QR_ERROR);
-  ASSERT_TRUE(qr->err_code == QRERR_INPARAM);
-  ASSERT_STREQ(qr->err_msg, "Invalid token 'tok_bad' at position 3.");
-  qr_destroy(qr);
-
-  QueryResult *tool_qr = qr_create_tool_err(&id, "Connection '%s' is stale.",
-                                            "analytics");
-  ASSERT_TRUE(tool_qr != NULL);
-  ASSERT_TRUE(tool_qr->status == QR_TOOL_ERROR);
-  ASSERT_STREQ(tool_qr->err_msg, "Connection 'analytics' is stale.");
-  qr_destroy(tool_qr);
-}
-
-static void test_create_msg(void) {
-  McpId id = id_u32(9);
-  QueryResult *qr = qr_create_msg(&id, "Hello");
-  ASSERT_TRUE(qr != NULL);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr->id.u32 == 9);
-  ASSERT_TRUE(qr->status == QR_OK);
-  ASSERT_TRUE(qr->ncols == 1);
-  ASSERT_TRUE(qr->nrows == 1);
-  ASSERT_STREQ(qr_get_col(qr, 0)->name, "message");
-  ASSERT_STREQ(qr_get_col(qr, 0)->type, "text");
-  ASSERT_STREQ(qr_get_cell(qr, 0, 0), "Hello");
-  qr_destroy(qr);
-
-  McpId id2 = id_u32(10);
-  QueryResult *qr_null = qr_create_msg(&id2, NULL);
-  ASSERT_TRUE(qr_null != NULL);
-  ASSERT_TRUE(qr_null->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr_null->id.u32 == 10);
-  ASSERT_TRUE(qr_null->status == QR_OK);
-  ASSERT_TRUE(qr_null->ncols == 1);
-  ASSERT_TRUE(qr_null->nrows == 1);
-  ASSERT_STREQ(qr_get_cell(qr_null, 0, 0), "");
-  qr_destroy(qr_null);
-}
-
 static void test_qb_init_input_validation(void) {
-  McpId id = id_u32(11);
-  QueryResult *qr = qr_create_ok(&id, 1, 1, 0, 0);
+  QueryResult *qr = qr_create(1, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
 
   QueryResultBuilder qb = {0};
@@ -242,8 +153,7 @@ static void test_qb_init_input_validation(void) {
 }
 
 static void test_qb_init_policy_and_reset(void) {
-  McpId id = id_u32(12);
-  QueryResult *qr = qr_create_ok(&id, 1, 1, 0, 0);
+  QueryResult *qr = qr_create(1, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
 
   QueryResultBuilder qb = {0};
@@ -268,34 +178,6 @@ static void test_qb_init_policy_and_reset(void) {
   qr_destroy(qr);
 }
 
-static void test_qr_set_id_replaces_previous(void) {
-  QueryResult *qr = qr_create_ok(NULL, 1, 1, 0, 0);
-  ASSERT_TRUE(qr != NULL);
-
-  McpId int_id = id_u32(99);
-  ASSERT_TRUE(qr_set_id(qr, &int_id) == OK);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr->id.u32 == 99);
-
-  McpId str_id = {0};
-  ASSERT_TRUE(mcp_id_init_str_copy(&str_id, "req-abc") == OK);
-  ASSERT_TRUE(qr_set_id(qr, &str_id) == OK);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_STR);
-  ASSERT_STREQ(qr->id.str, "req-abc");
-
-  // Set back to int; previous string id must be released safely.
-  McpId int_id2 = id_u32(7);
-  ASSERT_TRUE(qr_set_id(qr, &int_id2) == OK);
-  ASSERT_TRUE(qr->id.kind == MCP_ID_INT);
-  ASSERT_TRUE(qr->id.u32 == 7);
-
-  ASSERT_TRUE(qr_set_id(NULL, &int_id2) == ERR);
-  ASSERT_TRUE(qr_set_id(qr, NULL) == ERR);
-
-  mcp_id_clean(&str_id);
-  qr_destroy(qr);
-}
-
 /* Verifies that when the validator plan marks all output columns as plaintext,
  * QueryResultBuilder stores plaintext values and does not require a token store.
  */
@@ -306,8 +188,7 @@ static void test_qb_plan_plaintext_only_no_tokenization(void) {
   ASSERT_TRUE(out.plan.cols != NULL);
   ASSERT_TRUE(parr_len(out.plan.cols) == 2);
 
-  McpId id = id_u32(20);
-  QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
+  QueryResult *qr = qr_create(2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
 
   QueryResultBuildPolicy policy = {
@@ -355,8 +236,7 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
   DbTokenStore *store = create_det_store(&arena, "pgmain");
   ASSERT_TRUE(store != NULL);
 
-  McpId id = id_u32(21);
-  QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
+  QueryResult *qr = qr_create(2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
 
   QueryResultBuildPolicy policy = {
@@ -423,8 +303,7 @@ static void test_qb_sensitive_null_remains_null(void) {
   DbTokenStore *store = create_det_store(&arena, "pgmain");
   ASSERT_TRUE(store != NULL);
 
-  McpId id = id_u32(22);
-  QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
+  QueryResult *qr = qr_create(2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
 
   QueryResultBuildPolicy policy = {
@@ -456,8 +335,7 @@ static void test_qb_sensitive_col_missing_store_returns_err(void) {
   ValidateQueryOut out = {0};
   ASSERT_TRUE(get_validate_query_out(&out, sql) == OK);
 
-  McpId id = id_u32(23);
-  QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
+  QueryResult *qr = qr_create(2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
 
   QueryResultBuildPolicy policy = {
@@ -495,8 +373,7 @@ static void test_qb_sensitive_col_missing_col_id_returns_err(void) {
   DbTokenStore *store = create_det_store(&arena, "pgmain");
   ASSERT_TRUE(store != NULL);
 
-  McpId id = id_u32(24);
-  QueryResult *qr = qr_create_ok(&id, 2, 1, 0, 0);
+  QueryResult *qr = qr_create(2, 1, 0, 0);
   ASSERT_TRUE(qr != NULL);
 
   QueryResultBuildPolicy policy = {
@@ -528,13 +405,8 @@ int main(void) {
   test_max_query_bytes_cap();
   test_deep_copy_outlives_input_buffers();
   test_bounds_and_bad_inputs();
-  test_create_error();
-  test_create_tool_error();
-  test_create_error_fmt();
-  test_create_msg();
   test_qb_init_input_validation();
   test_qb_init_policy_and_reset();
-  test_qr_set_id_replaces_previous();
   test_qb_plan_plaintext_only_no_tokenization();
   test_qb_tokenizes_sensitive_column_and_store_roundtrip();
   test_qb_sensitive_null_remains_null();

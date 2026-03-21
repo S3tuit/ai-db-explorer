@@ -71,7 +71,6 @@ AdbxTriStatus connm_get_connection(ConnManager *m, const char *connection_name,
  * - '*out_profiles' points into ConnManager-owned catalog memory.
  * - Borrowed data remains valid only while ConnManager is alive.
  * - The caller must not free or mutate the returned profiles.
- * Side effects: none.
  * Returns OK on success, ERR on invalid input or inconsistent catalog state.
  */
 AdbxStatus connm_profile_borrow(const ConnManager *m,

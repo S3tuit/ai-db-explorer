@@ -41,6 +41,27 @@ typedef struct DbExecParam {
   uint32_t pg_oid;
 } DbExecParam;
 
+typedef enum {
+  DBEXEC_RESULT_NONE = 0,
+  DBEXEC_RESULT_QUERY_RESULT = 1,
+  DBEXEC_RESULT_TOOL_ERR = 2,
+} DbExecResultKind;
+
+/* Result of one db_exec()/db_exec_bound() call.
+ * Ownership:
+ * - when kind is DBEXEC_RESULT_QUERY_RESULT, caller owns 'qr' and must destroy
+ *   it with qr_destroy() or db_exec_result_clean().
+ * - when kind is DBEXEC_RESULT_TOOL_ERR, caller owns 'tool_err_msg' and must
+ *   free it or call db_exec_result_clean().
+ */
+typedef struct DbExecResult {
+  DbExecResultKind kind;
+  union {
+    QueryResult *qr;
+    char *tool_err_msg;
+  };
+} DbExecResult;
+
 typedef struct DbBackendVTable {
   // Establishes a connection described by 'profile' using 'pwd' when needed.
   // The SafetyPolicy is borrowed and copied inside the backend. 'out_err' is
@@ -61,22 +82,24 @@ typedef struct DbBackendVTable {
   void (*destroy)(DbBackend *db);
 
   // Executes 'sql' statement and materializes a QueryResult. The QueryResult
-  // may represent an error or a good response. The id field of the result is
-  // left zeroed; the caller is responsible for stamping it.
-  // 'qb_policy' is optional; when non-NULL it drives sensitive-token
+  // represents only successful tabular output. Tool-level execution failures
+  // are returned via 'out_res->tool_err_msg'. Safe to call with unitialized
+  // 'out_res'. 'qb_policy' is optional; when non-NULL it drives sensitive-token
   // tokenization during materialization.
-  // Returns OK if it was able to allocate a QueryResult, ERR otherwise.
+  // Returns OK when 'out_res' is populated with either a QueryResult or a tool
+  // error message, ERR on invalid input or backend/internal failure.
   AdbxStatus (*exec)(DbBackend *db, const char *sql,
                      const QueryResultBuildPolicy *qb_policy,
-                     QueryResult **out_qr);
+                     DbExecResult *out_res);
 
   // Executes one SQL statement with positional bind parameters.
-  // 'params[i]' maps to SQL placeholder $(i+1).
-  // Returns OK if it was able to allocate a QueryResult, ERR otherwise.
+  // 'params[i]' maps to SQL placeholder $(i+1). Safe to call with unitialized
+  // 'out_res'. Returns OK when 'out_res' is populated with either a QueryResult
+  // or a tool error message, ERR on invalid input or backend/internal failure.
   AdbxStatus (*exec_bound)(DbBackend *db, const char *sql,
                            const DbExecParam *params, uint32_t nparams,
                            const QueryResultBuildPolicy *qb_policy,
-                           QueryResult **out_qr);
+                           DbExecResult *out_res);
 
   // Creates a QirQueryHandle starting from 'sql'. The backend owns and
   // populates the handle, and the caller must destroy it via
@@ -98,10 +121,33 @@ struct DbBackend {
 /* Returns the right DbBackend based on 'kind'. */
 DbBackend *db_backend_create(DbKind kind);
 
+/* Initializes one DbExecResult to empty state.
+ * It borrows 'out' and does not allocate. NULL input is ignored.
+ */
+void db_exec_result_init(DbExecResult *out);
+
+/* Releases any payload owned by 'out' and resets it to the empty state.
+ * It borrows 'out'. NULL input is ignored.
+ */
+void db_exec_result_clean(DbExecResult *out);
+
+/* Stores one successful QueryResult into 'out'.
+ * It borrows 'out' and takes ownership of 'qr'. 'out' must be empty.
+ * Returns OK on success, ERR on invalid input or non-empty output state.
+ */
+AdbxStatus db_exec_result_set_qr(DbExecResult *out, QueryResult *qr);
+
+/* Stores one formatted tool-error message into 'out'.
+ * It borrows 'out' and formatting inputs. 'out' must be empty.
+ * Returns OK on success, ERR on invalid input, allocation failure, or
+ * non-empty output state.
+ */
+AdbxStatus db_exec_result_set_tool_err(DbExecResult *out, const char *fmt, ...);
+
 /* Small helpers */
 static inline AdbxStatus db_connect(DbBackend *db, const ConnProfile *profile,
-                                    const SafetyPolicy *policy,
-                                    const char *pwd, DbErr *out_err) {
+                                    const SafetyPolicy *policy, const char *pwd,
+                                    DbErr *out_err) {
   ADBX_ERR_CLEAR(out_err, DBERR_NONE);
   if (!db || !db->vt || !db->vt->connect) {
     ADBX_ERR_SETF(out_err, DBERR_INPUT,
@@ -133,25 +179,26 @@ static inline void db_destroy(DbBackend *db) {
 }
 static inline AdbxStatus db_exec(DbBackend *db, const char *sql,
                                  const QueryResultBuildPolicy *qb_policy,
-                                 QueryResult **out_qr) {
-  if (!db || !db->vt || !db->vt->exec)
+                                 DbExecResult *out_res) {
+  db_exec_result_init(out_res);
+  if (!db || !db->vt || !db->vt->exec || !out_res)
     return ERR;
-  return db->vt->exec(db, sql, qb_policy, out_qr);
+  return db->vt->exec(db, sql, qb_policy, out_res);
 }
 
 static inline AdbxStatus db_exec_bound(DbBackend *db, const char *sql,
                                        const DbExecParam *params,
                                        uint32_t nparams,
                                        const QueryResultBuildPolicy *qb_policy,
-                                       QueryResult **out_qr) {
-  if (!db || !db->vt || !db->vt->exec_bound)
+                                       DbExecResult *out_res) {
+  db_exec_result_init(out_res);
+  if (!db || !db->vt || !db->vt->exec_bound || !out_res)
     return ERR;
-  return db->vt->exec_bound(db, sql, params, nparams, qb_policy, out_qr);
+  return db->vt->exec_bound(db, sql, params, nparams, qb_policy, out_res);
 }
 
 static inline AdbxStatus db_make_query_ir(DbBackend *db, const char *sql,
-                                          QirQueryHandle *out,
-                                          DbErr *out_err) {
+                                          QirQueryHandle *out, DbErr *out_err) {
   ADBX_ERR_CLEAR(out_err, DBERR_NONE);
   if (!db || !db->vt || !db->vt->make_query_ir) {
     ADBX_ERR_SETF(out_err, DBERR_INPUT,

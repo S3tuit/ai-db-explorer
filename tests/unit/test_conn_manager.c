@@ -109,6 +109,7 @@ static ConnCatalog *make_catalog(void) {
   int read_only = 1;
   uint32_t max_rows = 10;
   safety_policy_init(&cat->policy, &read_only, &max_rows, NULL, NULL);
+  p->safe_policy = cat->policy;
   return cat;
 }
 

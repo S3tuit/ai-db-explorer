@@ -2,6 +2,7 @@
 
 #include "broker.h"
 #include "arena.h"
+#include "broker_response.h"
 #include "frame_codec.h"
 #include "handshake_codec.h"
 #include "json_codec.h"
@@ -655,22 +656,22 @@ typedef struct BrokerRunSQLArgs {
   McpId *id;
 } BrokerRunSQLArgs;
 
-/* Executes validated run_sql_query arguments and builds a QueryResult.
+/* Executes validated run_sql_query arguments and builds one BrokerResponse.
  * It borrows 'args' and allocates temporary strings and may allocate
- * '*out_query'; caller owns/destroys '*out_query'. Side effects: acquires/uses
+ * '*out_resp'; caller owns/destroys '*out_resp'. Side effects: acquires/uses
  * DB connection through ConnManager and records connection usage on success.
  * Error semantics: this helper is fail-soft and returns void; it aims to set
- * '*out_query' to an error/result object and leaves it NULL only on
- * catastrophic allocation/copy failures.
+ * '*out_resp' to a response object and leaves it NULL only on catastrophic
+ * allocation/copy failures.
  */
 static void broker_run_sql_query(const BrokerRunSQLArgs *args,
-                                 QueryResult **out_query) {
+                                 BrokerResponse **out_resp) {
   assert(args != NULL);
   assert(args->b != NULL);
   assert(args->sess != NULL);
   assert(args->jg != NULL);
   assert(args->id != NULL);
-  assert(out_query != NULL);
+  assert(out_resp != NULL);
 
   Broker *b = args->b;
   BrokerMcpSession *sess = args->sess;
@@ -684,10 +685,10 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
       jsget_string_decode_alloc(jg, "params.arguments.query", &query) != YES) {
     free(conn_name);
     free(query);
-    *out_query =
-        qr_create_err(id, QRERR_INPARAM,
-                      "Invalid run_sql_query arguments: expected string fields "
-                      "'connectionName' and 'query'.");
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INPARAM,
+        "Invalid run_sql_query arguments: expected string fields "
+        "'connectionName' and 'query'.");
     goto free_n_return;
   }
 
@@ -695,13 +696,13 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
   ConnView cv = {0};
   AdbxTriStatus rc = connm_get_connection(b->cm, conn_name, &cv);
   if (rc == NO) {
-    *out_query = qr_create_err(id, QRERR_RESOURCE,
-                               "Unknown connectionName '%s'.", conn_name);
+    *out_resp = bresp_create_err(id, BRESPERR_RESOURCE,
+                                 "Unknown connectionName '%s'.", conn_name);
     goto free_n_return;
   }
   if (rc != YES || !cv.db || !cv.profile) {
     TLOG("ERROR - unable to connect to %s", conn_name);
-    *out_query = qr_create_tool_err(
+    *out_resp = bresp_create_tool_err(
         id, "Unable to connect to connectionName '%s'.", conn_name);
     goto free_n_return;
   }
@@ -709,7 +710,7 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
   DbTokenStore *store = NULL;
   if (broker_get_or_init_store(sess, cv.profile, &store) != OK || !store) {
     TLOG("ERROR - failed to initialize session token store for %s", conn_name);
-    *out_query = qr_create_tool_err(
+    *out_resp = bresp_create_tool_err(
         id, "Internal error while preparing sensitive token storage for '%s'.",
         conn_name);
     goto free_n_return;
@@ -717,7 +718,7 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
 
   ValidateQueryOut vout = {0};
   if (vq_out_init(&vout) != OK) {
-    *out_query = qr_create_tool_err(
+    *out_resp = bresp_create_tool_err(
         id, "Internal error while preparing run_sql_query validation.");
     goto free_n_return;
   }
@@ -734,8 +735,8 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
       err_desc = "Unknown error while validating the query. Please make sure "
                  "the query is valid and formatted correctly.";
     }
-    *out_query =
-        qr_create_tool_err(id, "Query validation failed: %s", err_desc);
+    *out_resp =
+        bresp_create_tool_err(id, "Query validation failed: %s", err_desc);
     vq_out_clean(&vout);
     goto free_n_return;
   }
@@ -746,20 +747,45 @@ static void broker_run_sql_query(const BrokerRunSQLArgs *args,
       .generation = sess->generation,
   };
 
-  if (db_exec(cv.db, query, &qb_policy, out_query) != OK) {
+  DbExecResult exec_res;
+  if (db_exec(cv.db, query, &qb_policy, &exec_res) != OK) {
     vq_out_clean(&vout);
     TLOG("ERROR - error while communicating with %s", conn_name);
-    *out_query = qr_create_tool_err(
-        id, "Database execution failed on connectionName '%s'.", conn_name);
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INTERNAL,
+        "Internal error while executing query on connectionName '%s'.",
+        conn_name);
     goto free_n_return;
   }
-  // db_exec leaves the id zeroed; stamp it with the request id
-  if (qr_set_id(*out_query, id) != OK) {
-    qr_destroy(*out_query);
+
+  if (exec_res.kind == DBEXEC_RESULT_TOOL_ERR) {
+    *out_resp = bresp_create_tool_err(id, "%s",
+                                      exec_res.tool_err_msg
+                                          ? exec_res.tool_err_msg
+                                          : "Database execution failed.");
+    db_exec_result_clean(&exec_res);
     vq_out_clean(&vout);
-    *out_query = NULL;
     goto free_n_return;
   }
+
+  if (exec_res.kind != DBEXEC_RESULT_QUERY_RESULT || !exec_res.qr) {
+    db_exec_result_clean(&exec_res);
+    vq_out_clean(&vout);
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INTERNAL,
+        "Internal error while executing query on connectionName '%s'.",
+        conn_name);
+    goto free_n_return;
+  }
+
+  *out_resp = bresp_create_query_result(id, exec_res.qr);
+  if (!*out_resp) {
+    db_exec_result_clean(&exec_res);
+    vq_out_clean(&vout);
+    goto free_n_return;
+  }
+  exec_res.kind = DBEXEC_RESULT_NONE;
+  exec_res.qr = NULL;
   connm_mark_used(b->cm, conn_name);
   vq_out_clean(&vout);
 
@@ -768,22 +794,22 @@ free_n_return:
   free(query);
 }
 
-/* Handles the 'run_sql_query_tokens' tool call and produces a QueryResult at
- * 'out_query'. It borrows 'args' and allocates temporary decoded token strings
- * that are always freed before return. Side effects: parses hostile JSON token
- * parameters and verifies session-bound token metadata (connection name +
- * generation). Error semantics: fail-soft helper; writes '*out_query' with a
- * protocol/tool error on malformed input and leaves '*out_query' NULL only on
- * catastrophic allocation failures.
+/* Handles the 'run_sql_query_tokens' tool call and produces one
+ * BrokerResponse at 'out_resp'. It borrows 'args' and allocates temporary
+ * decoded token strings that are always freed before return. Side effects:
+ * parses hostile JSON token parameters and verifies session-bound token
+ * metadata (connection name + generation). Error semantics: fail-soft helper;
+ * writes '*out_resp' with a response object on malformed input and leaves
+ * '*out_resp' NULL only on catastrophic allocation failures.
  */
 static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
-                                        QueryResult **out_query) {
+                                        BrokerResponse **out_resp) {
   assert(args != NULL);
   assert(args->b != NULL);
   assert(args->sess != NULL);
   assert(args->jg != NULL);
   assert(args->id != NULL);
-  assert(out_query != NULL);
+  assert(out_resp != NULL);
 
   Broker *b = args->b;
   BrokerMcpSession *sess = args->sess;
@@ -797,8 +823,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
       jsget_string_decode_alloc(jg, "params.arguments.query", &query) != YES) {
     free(conn_name);
     free(query);
-    *out_query = qr_create_err(
-        id, QRERR_INPARAM,
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INPARAM,
         "Invalid run_sql_query_tokens arguments: expected string fields "
         "'connectionName' and 'query'.");
     return;
@@ -807,19 +833,19 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   ConnView cv = {0};
   AdbxTriStatus rc = connm_get_connection(b->cm, conn_name, &cv);
   if (rc == NO) {
-    *out_query = qr_create_err(id, QRERR_RESOURCE,
-                               "Unknown connectionName '%s'.", conn_name);
+    *out_resp = bresp_create_err(id, BRESPERR_RESOURCE,
+                                 "Unknown connectionName '%s'.", conn_name);
     goto free_n_return;
   }
   if (rc != YES || !cv.db || !cv.profile) {
-    *out_query = qr_create_tool_err(
+    *out_resp = bresp_create_tool_err(
         id, "Unable to connect to connectionName '%s'.", conn_name);
     goto free_n_return;
   }
 
   DbTokenStore *store = NULL;
   if (broker_get_or_init_store(sess, cv.profile, &store) != OK || !store) {
-    *out_query = qr_create_tool_err(
+    *out_resp = bresp_create_tool_err(
         id, "Internal error while preparing sensitive token storage for '%s'.",
         conn_name);
     goto free_n_return;
@@ -829,15 +855,15 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   AdbxTriStatus arc =
       jsget_array_strings_begin(jg, "params.arguments.parameters", &it);
   if (arc != YES) {
-    *out_query =
-        qr_create_err(id, QRERR_INPARAM,
-                      "Invalid run_sql_query_tokens arguments: missing "
-                      "'params.arguments.parameters' array.");
+    *out_resp =
+        bresp_create_err(id, BRESPERR_INPARAM,
+                         "Invalid run_sql_query_tokens arguments: missing "
+                         "'params.arguments.parameters' array.");
     goto free_n_return;
   }
   if (it.count <= 0 || (uint32_t)it.count > MAX_TOKEN_PARAMS) {
-    *out_query = qr_create_err(
-        id, QRERR_INPARAM,
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INPARAM,
         "Invalid token parameter count %d: expected 1..%u entries.", it.count,
         MAX_TOKEN_PARAMS);
     goto free_n_return;
@@ -855,8 +881,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     if (nrc == NO)
       break;
     if (nrc != YES) {
-      *out_query = qr_create_err(
-          id, QRERR_INPARAM,
+      *out_resp = bresp_create_err(
+          id, BRESPERR_INPARAM,
           "Invalid token parameter at index %d: expected a JSON string.",
           it.idx);
       goto free_n_return;
@@ -865,8 +891,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     char *tok = NULL;
     AdbxTriStatus drc = json_span_decode_alloc(&sp, &tok);
     if (drc != YES || !tok) {
-      *out_query = qr_create_err(
-          id, QRERR_INPARAM,
+      *out_resp = bresp_create_err(
+          id, BRESPERR_INPARAM,
           "Invalid token parameter at index %d: malformed JSON string value.",
           it.idx - 1);
       free(tok);
@@ -875,16 +901,17 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
 
     ParsedTokView parsed = {0};
     if (stok_parse_view_inplace(tok, &parsed) != OK) {
-      *out_query = qr_create_tool_err(id,
-                                      "Invalid token format '%s'. Expected "
-                                      "tok_<connection>_<generation>_<index>.",
-                                      tok);
+      *out_resp =
+          bresp_create_tool_err(id,
+                                "Invalid token format '%s'. Expected "
+                                "tok_<connection>_<generation>_<index>.",
+                                tok);
       free(tok);
       goto free_n_return;
     }
 
     if (strcmp(parsed.connection_name, conn_name) != 0) {
-      *out_query = qr_create_tool_err(
+      *out_resp = bresp_create_tool_err(
           id,
           "Token connection mismatch: token is bound to '%s' but "
           "request connectionName is '%s'.",
@@ -893,7 +920,7 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
       goto free_n_return;
     }
     if (parsed.generation != sess->generation) {
-      *out_query = qr_create_tool_err(
+      *out_resp = bresp_create_tool_err(
           id,
           "Stale token generation: token=%u current=%u. Run a fresh "
           "sensitive query first.",
@@ -904,14 +931,14 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
 
     const SensitiveTok *bound = stok_store_get(store, parsed.index);
     if (!bound) {
-      *out_query = qr_create_tool_err(
+      *out_resp = bresp_create_tool_err(
           id, "Unknown token index %u for this session.", parsed.index);
       free(tok);
       goto free_n_return;
     }
 
     if (nparams >= MAX_TOKEN_PARAMS) {
-      *out_query = qr_create_tool_err(
+      *out_resp = bresp_create_tool_err(
           id, "Token parameters exceed maximum supported entries (%u).",
           MAX_TOKEN_PARAMS);
       free(tok);
@@ -925,7 +952,7 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
   // Validate the query
   ValidateQueryOut vout = {0};
   if (vq_out_init(&vout) != OK) {
-    *out_query = qr_create_tool_err(
+    *out_resp = bresp_create_tool_err(
         id, "Internal error while preparing run_sql_query_tokens validation.");
     goto free_n_return;
   }
@@ -942,8 +969,8 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
       err_desc = "Unknown error while validating the query. Please make sure "
                  "the query is valid and formatted correctly.";
     }
-    *out_query =
-        qr_create_tool_err(id, "Query validation failed: %s", err_desc);
+    *out_resp =
+        bresp_create_tool_err(id, "Query validation failed: %s", err_desc);
     vq_out_clean(&vout);
     goto free_n_return;
   }
@@ -967,22 +994,47 @@ static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
     db_params[i].pg_oid = vparams[i].pg_oid;
   }
 
-  if (db_exec_bound(cv.db, query, db_params, nparams, &qb_policy, out_query) !=
+  DbExecResult exec_res;
+  if (db_exec_bound(cv.db, query, db_params, nparams, &qb_policy, &exec_res) !=
       OK) {
     vq_out_clean(&vout);
     TLOG("ERROR - bound execution failed while communicating with %s",
          conn_name);
-    *out_query = qr_create_tool_err(
-        id, "Database execution failed on connectionName '%s'.", conn_name);
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INTERNAL,
+        "Internal error while executing query on connectionName '%s'.",
+        conn_name);
     goto free_n_return;
   }
-  // db_exec_bound leaves the id zeroed; stamp it with the request id
-  if (qr_set_id(*out_query, id) != OK) {
-    qr_destroy(*out_query);
+
+  if (exec_res.kind == DBEXEC_RESULT_TOOL_ERR) {
+    *out_resp = bresp_create_tool_err(id, "%s",
+                                      exec_res.tool_err_msg
+                                          ? exec_res.tool_err_msg
+                                          : "Database execution failed.");
+    db_exec_result_clean(&exec_res);
     vq_out_clean(&vout);
-    *out_query = NULL;
     goto free_n_return;
   }
+
+  if (exec_res.kind != DBEXEC_RESULT_QUERY_RESULT || !exec_res.qr) {
+    db_exec_result_clean(&exec_res);
+    vq_out_clean(&vout);
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INTERNAL,
+        "Internal error while executing query on connectionName '%s'.",
+        conn_name);
+    goto free_n_return;
+  }
+
+  *out_resp = bresp_create_query_result(id, exec_res.qr);
+  if (!*out_resp) {
+    db_exec_result_clean(&exec_res);
+    vq_out_clean(&vout);
+    goto free_n_return;
+  }
+  exec_res.kind = DBEXEC_RESULT_NONE;
+  exec_res.qr = NULL;
   connm_mark_used(b->cm, conn_name);
   vq_out_clean(&vout);
 
@@ -991,24 +1043,77 @@ free_n_return:
   free(query);
 }
 
-/* Handles one framed broker request and produces one QueryResult.
- * It borrows 'b', 'sess', and request bytes. It may allocate '*out_res'; caller
- * owns/destroys '*out_res' on success.
- * Side effects: parses untrusted JSON, dispatches tool logic, and may touch DB
- * through tool handlers.
+/* Handles the 'list_database_connections' tool call and produces one
+ * BrokerResponse at 'out_resp'. Writes '*out_resp' with a response object on
+ * malformed input and leaves
+ * '*out_resp' NULL only on catastrophic allocation failures.
+ */
+static void broker_list_database_connections(const BrokerRunSQLArgs *args,
+                                             BrokerResponse **out_resp) {
+  assert(args != NULL);
+  assert(args->b != NULL);
+  assert(args->sess != NULL);
+  assert(args->jg != NULL);
+  assert(args->id != NULL);
+  assert(out_resp != NULL);
+
+  Broker *b = args->b;
+  JsonGetter *jg = args->jg;
+  McpId *id = args->id;
+  JsonGetter args_obj = {0};
+  JsonStrSpan unknown = {0};
+  const char *no_allowed[] = {""};
+
+  AdbxTriStatus a_rc = jsget_object(jg, "params.arguments", &args_obj);
+  if (a_rc != YES ||
+      jsget_top_level_validation(&args_obj, NULL, no_allowed, 0, &unknown) !=
+          YES) {
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INPARAM,
+        "Invalid list_database_connections arguments: expected empty "
+        "'params.arguments' object.");
+    return;
+  }
+
+  size_t n_profiles = 0;
+  const ConnProfile *profiles = NULL;
+  if (connm_profile_borrow(b->cm, &profiles, &n_profiles) != OK) {
+    *out_resp = bresp_create_err(id, BRESPERR_INPARAM,
+                                 "Inconsistent internal state while executing "
+                                 "list_database_connections, please, retry. "
+                                 "If the issue persist, report it.");
+    return;
+  }
+
+  BrokerResponse *br = bresp_create_conn_profiles(id, profiles, n_profiles);
+  if (!br) {
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INPARAM,
+        "Internal error while serializing list_database_connections result. "
+        "If the issue persist, report it.");
+    return;
+  }
+  *out_resp = br;
+  return;
+}
+
+/* Handles one framed broker request and produces one BrokerResponse.
+ * It borrows 'b', 'sess', and request bytes. It may allocate '*out_res';
+ * caller owns/destroys '*out_res' on success.
  * Returns OK when '*out_res' is populated with either success or tool/error
  * payload; returns ERR only for catastrophic parse/allocation/internal
  * failures.
  */
 static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
                                         const char *req, uint32_t req_len,
-                                        QueryResult **out_res) {
+                                        BrokerResponse **out_res) {
   if (!b || !sess || !req || !out_res)
     return ERR;
   TLOG("INFO - handling a request of %u bytes", req_len);
   *out_res = NULL;
 
   McpId id = {0};
+  mcp_id_init_u32(&id, 0);
   JsonGetter jg;
   JsonTokBuf tok_buf = {0};
   if (jsget_init(&jg, req, req_len, &tok_buf) != OK) {
@@ -1024,16 +1129,13 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
     if (s_rc == YES) {
       id.kind = MCP_ID_STR;
       id.str = id_str;
-    } else {
-      mcp_id_clean(&id);
-      return ERR;
     }
   }
 
   AdbxTriStatus vrc = jsget_simple_rpc_validation(&jg);
   if (vrc != YES) {
-    *out_res = qr_create_err(
-        &id, QRERR_INREQ,
+    *out_res = bresp_create_err(
+        &id, BRESPERR_INREQ,
         "Invalid JSON-RPC request: expected 'jsonrpc':'2.0' with valid "
         "'id', 'method', and 'params'.");
     goto return_res;
@@ -1041,14 +1143,14 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
   // exec command
   JsonStrSpan method_sp = {0};
   if (jsget_string_span(&jg, "method", &method_sp) != YES) {
-    *out_res =
-        qr_create_err(&id, QRERR_INREQ, "Missing required field 'method'.");
+    *out_res = bresp_create_err(&id, BRESPERR_INREQ,
+                                "Missing required field 'method'.");
     goto return_res;
   }
 
   if (!STREQ(method_sp.ptr, method_sp.len, "tools/call")) {
-    *out_res = qr_create_err(
-        &id, QRERR_INMETHOD,
+    *out_res = bresp_create_err(
+        &id, BRESPERR_INMETHOD,
         "Unsupported RPC method '%.*s'; only 'tools/call' is supported.",
         (int)method_sp.len, method_sp.ptr);
     goto return_res;
@@ -1056,8 +1158,8 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
 
   JsonStrSpan name_sp = {0};
   if (jsget_string_span(&jg, "params.name", &name_sp) != YES) {
-    *out_res = qr_create_err(&id, QRERR_INPARAM,
-                             "Tool call is missing 'params.name'.");
+    *out_res = bresp_create_err(&id, BRESPERR_INPARAM,
+                                "Tool call is missing 'params.name'.");
     goto return_res;
   }
 
@@ -1071,13 +1173,17 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
   // Call the different tools
   if (STREQ(name_sp.ptr, name_sp.len, "run_sql_query")) {
     broker_run_sql_query(&run_args, out_res);
+
   } else if (STREQ(name_sp.ptr, name_sp.len, "run_sql_query_tokens")) {
     broker_run_sql_query_tokens(&run_args, out_res);
 
+  } else if (STREQ(name_sp.ptr, name_sp.len, "list_database_connections")) {
+    broker_list_database_connections(&run_args, out_res);
+
     // Unknown tools
   } else {
-    *out_res = qr_create_err(&id, QRERR_INMETHOD, "Unknown tool '%.*s'.",
-                             (int)name_sp.len, name_sp.ptr);
+    *out_res = bresp_create_err(&id, BRESPERR_INMETHOD, "Unknown tool '%.*s'.",
+                                (int)name_sp.len, name_sp.ptr);
   }
 
 return_res:
@@ -1367,21 +1473,21 @@ send_n_close: {
   return OK;
 }
 
-/* Serializes one QueryResult as JSON-RPC and writes one length-prefixed frame.
- * It borrows 'sess' and 'q_res'.
+/* Serializes one BrokerResponse as JSON-RPC and writes one length-prefixed
+ * frame. It borrows 'sess' and 'resp'.
  * Side effects: writes to the client channel.
  * Returns OK on successful encode/write, ERR on invalid input or write failure.
  */
-static AdbxStatus broker_write_q_res(BrokerMcpSession *sess,
-                                     const QueryResult *q_res) {
-  if (!q_res || !sess)
+static AdbxStatus broker_write_response(BrokerMcpSession *sess,
+                                        const BrokerResponse *resp) {
+  if (!resp || !sess)
     return ERR;
 
   StrBuf response;
   AdbxStatus rc;
   sb_init(&response);
 
-  if (qr_to_jsonrpc(q_res, &response) != OK) {
+  if (bresp_to_jsonrpc(resp, &response) != OK) {
     rc = ERR;
     goto clean_n_ret;
   }
@@ -1457,8 +1563,7 @@ AdbxStatus broker_run(Broker *b) {
 
         StrBuf req;
         sb_init(&req);
-        QueryResult *q_res = NULL;
-        uint64_t t0 = now_ms_monotonic();
+        BrokerResponse *resp = NULL;
         AdbxStatus rr = frame_read_len(&sess->bc, &req);
         if (rr != OK || req.len > MAX_REQ_LEN) {
           // framing error -> drop client
@@ -1479,12 +1584,12 @@ AdbxStatus broker_run(Broker *b) {
                    req.len, MAX_REQ_LEN);
           McpId id = {0};
           mcp_id_init_u32(&id, 0);
-          q_res = qr_create_err(&id, QRERR_INREQ, "%s", buf);
+          resp = bresp_create_err(&id, BRESPERR_INREQ, "%s", buf);
           goto send_q_res;
         }
 
         AdbxStatus hr =
-            broker_handle_request(b, sess, req.data, req.len, &q_res);
+            broker_handle_request(b, sess, req.data, req.len, &resp);
 
         if (hr != OK) {
           // Something bad happend, drop client
@@ -1497,22 +1602,18 @@ AdbxStatus broker_run(Broker *b) {
 
         // Send response frame
       send_q_res:
-        if (q_res && q_res->exec_ms == 0) {
-          uint64_t t1 = now_ms_monotonic();
-          q_res->exec_ms = (t1 >= t0) ? (t1 - t0) : 0;
-        }
-        if (broker_write_q_res(sess, q_res) != OK) {
+        if (broker_write_response(sess, resp) != OK) {
           fprintf(stderr, "Broker: failed to write response\n");
           TLOG("ERROR - drop client: failed to write response");
           sb_clean(&req);
-          qr_destroy(q_res);
+          bresp_destroy(resp);
           parr_drop_swap(b->active_sessions, (uint32_t)i);
           nsessions--;
           continue;
         }
 
         sb_clean(&req);
-        qr_destroy(q_res);
+        bresp_destroy(resp);
       }
 
       i++;

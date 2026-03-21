@@ -247,11 +247,11 @@ static void fake_destroy(DbBackend *db) {
  */
 static int fake_exec(DbBackend *db, const char *sql,
                      const QueryResultBuildPolicy *qb_policy,
-                     QueryResult **out_qr) {
+                     DbExecResult *out_res) {
   (void)db;
   (void)sql;
   (void)qb_policy;
-  (void)out_qr;
+  (void)out_res;
   return ERR;
 }
 

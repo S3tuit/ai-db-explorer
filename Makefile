@@ -49,10 +49,11 @@ PG_DUMP_AST_BIN := build/pg_dump_ast
 PG_DUMP_AST_SRC := py_utils/pg_dump_ast.c
 
 # Unit tests: each tests/unit/test_foo.c -> build/tests/unit/test_foo
-UNIT_TEST_SRC := $(filter-out tests/unit/test_env.c,$(wildcard tests/unit/test_*.c))
+UNIT_TEST_SRC := $(filter-out tests/unit/test_env.c tests/unit/test_broker_run_utils.c,$(wildcard tests/unit/test_*.c))
 UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
 TEST_HELPER_OBJ := build/tests/unit/test.o
 TEST_ENV_HELPER_OBJ := build/tests/unit/test_env.o
+TEST_BROKER_RUN_UTILS_OBJ := build/tests/unit/test_broker_run_utils.o
 
 # Integration tests: tests/integration/*/test_foo.c -> build/tests/integration/*/test_foo
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
@@ -163,6 +164,10 @@ endif
 
 # Link each test binary from its test object + shared test helper + sanitized app objects
 build/tests/%: build/tests/%.o $(TEST_HELPER_OBJ) $(TEST_ENV_HELPER_OBJ) $(TEST_APP_OBJ) $(LIBPG_QUERY_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $^ -o $@ $(TLDFLAGS)
+
+build/tests/unit/test_broker_tool_calls: build/tests/unit/test_broker_tool_calls.o $(TEST_BROKER_RUN_UTILS_OBJ) $(TEST_HELPER_OBJ) $(TEST_ENV_HELPER_OBJ) $(TEST_APP_OBJ) $(LIBPG_QUERY_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $^ -o $@ $(TLDFLAGS)
 

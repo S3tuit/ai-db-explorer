@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 #include "arena.h"
-#include "mcp_id.h"
 #include "utils.h"
 
 typedef struct ValidatorPlan ValidatorPlan;
@@ -23,49 +22,21 @@ typedef struct QRColumn {
   uint32_t pg_oid; // db-specific metadata used for tokenized binds
 } QRColumn;
 
-typedef enum QRStatus { QR_OK = 0, QR_ERROR = 1, QR_TOOL_ERROR = 2 } QRStatus;
-
-// indicates errors that may be encountered at the protol layer
-typedef enum {
-  QRERR_INTERNAL = -32603, // unexpected condition encountered
-  QRERR_INPARAM = -32602,  // invalid or malformed parameters
-  QRERR_INREQ = -32600,    // invalid request object
-  QRERR_INMETHOD = -32601, // invalid/not found method
-  QRERR_PARSER = -32700,   // invalid JSON was received
-
-  QRERR_RESOURCE = -30001, // resource (e.g. ConnectionName) not found
-} QrErrorCode;
-
 /* It's a materialized, DB-agnostic query result. It owns cols and cells. */
 typedef struct QueryResult {
-  McpId id; // id of the request
-  QRStatus status;
-  uint64_t exec_ms; // execution time in ms for both OK and ERROR
+  uint64_t exec_ms;
+  uint32_t ncols;
+  QRColumn *cols; // malloc'd array of ncols length
 
-  union {
-    // valid if QR_OK
-    struct {
-      uint32_t ncols;
-      QRColumn *cols; // malloc'd array of ncols length
-
-      uint32_t nrows;
-      uint32_t nrows_alloc;      // allocated rows for cells storage
-      char **cells;              // length (nrows_alloc * ncols). To access an
-                                 // element: cells[row*ncols + col];
-      uint8_t result_truncated;  // 1 if output row count is lower than the
-                                 // row count of the query executed
-      uint64_t max_query_bytes;  // 0 = unlimited
-      uint64_t used_query_bytes; // bytes stored across all non-NULL cells
-      Arena text_arena;          // owns column/cell strings for QR_OK
-    };
-
-    // valid if QR_ERROR or QR_TOOL_ERROR
-    struct {
-      char *err_msg;
-      QrErrorCode err_code; // only meaningful for QR_ERROR
-    };
-  };
-
+  uint32_t nrows;
+  uint32_t nrows_alloc;      // allocated rows for cells storage
+  char **cells;              // length (nrows_alloc * ncols). To access an
+                             // element: cells[row*ncols + col];
+  uint8_t result_truncated;  // 1 if output row count is lower than the
+                             // row count of the query executed
+  uint64_t max_query_bytes;  // 0 = unlimited
+  uint64_t used_query_bytes; // bytes stored across all non-NULL cells
+  Arena text_arena;          // owns column/cell strings
 } QueryResult;
 
 /* Builder context used while populating one QueryResult.
@@ -121,36 +92,10 @@ AdbxStatus qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
 AdbxTriStatus qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
                           const char *value, size_t v_len);
 
-/* Replaces the id stored in 'qr' with a deep copy of 'id'.
- * It borrows both pointers; any previous id storage in 'qr' is released.
- * Side effects: may allocate and free memory when ids are string-backed.
- * Returns OK on success, ERR on invalid input or allocation failure.
- */
-AdbxStatus qr_set_id(QueryResult *qr, const McpId *id);
-
 /* Creates a QueryResult with allocated storage for cells (all NULL).
- * If 'id' is non-NULL, makes an internal copy (string ids are duplicated).
- * If 'id' is NULL, the id field is zeroed; caller can set it later.
  * Returns NULL on allocation failure. */
-QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
-                          uint8_t result_truncated, uint64_t max_query_bytes);
-
-/* Creates a QueryResult that represents a protocol error (JSON-RPC error).
- * 'fmt' uses printf-style formatting; when NULL an empty message is used.
- * If 'id' is NULL, the id field is zeroed. Returns NULL on failure. */
-QueryResult *qr_create_err(const McpId *id, QrErrorCode code,
-                           const char *fmt, ...);
-
-/* Creates a QueryResult that represents a tool execution error.
- * 'fmt' uses printf-style formatting; when NULL an empty message is used.
- * Serialized as a successful JSON-RPC result with isError=true.
- * If 'id' is NULL, the id field is zeroed. Returns NULL on failure. */
-QueryResult *qr_create_tool_err(const McpId *id, const char *fmt, ...);
-
-/* Creates a QueryResult with a single text column named "message" and one row.
- * If 'id' is NULL, the id field is zeroed. If msg is NULL, stores an empty
- * string. Returns NULL on failure. */
-QueryResult *qr_create_msg(const McpId *id, const char *msg);
+QueryResult *qr_create(uint32_t ncols, uint32_t nrows,
+                       uint8_t result_truncated, uint64_t max_query_bytes);
 
 /* Frees all owned memory, 'qr' itself too. */
 void qr_destroy(QueryResult *qr);

@@ -4,9 +4,6 @@
 #include "validator.h"
 
 #include <assert.h>
-#include <limits.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -131,29 +128,8 @@ static AdbxTriStatus qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
   return YES;
 }
 
-AdbxStatus qr_set_id(QueryResult *qr, const McpId *id) {
-  if (!qr || !id)
-    return ERR;
-
-  McpId tmp = {0};
-  if (id->kind == MCP_ID_INT) {
-    mcp_id_init_u32(&tmp, id->u32);
-  } else if (id->kind == MCP_ID_STR) {
-    if (!id->str)
-      return ERR;
-    if (mcp_id_init_str_copy(&tmp, id->str) != OK)
-      return ERR;
-  } else {
-    return ERR;
-  }
-
-  mcp_id_clean(&qr->id);
-  qr->id = tmp;
-  return OK;
-}
-
-QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
-                          uint8_t result_truncated, uint64_t max_query_bytes) {
+QueryResult *qr_create(uint32_t ncols, uint32_t nrows,
+                       uint8_t result_truncated, uint64_t max_query_bytes) {
   QueryResult *qr = xmalloc(sizeof(*qr));
   size_t ncells = (size_t)ncols * (size_t)nrows;
   uint32_t arena_init_sz = 0;
@@ -174,17 +150,6 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
     return NULL;
   }
 
-  qr->id = (McpId){0};
-  if (id) {
-    if (qr_set_id(qr, id) != OK) {
-      arena_clean(&qr->text_arena);
-      free(qr->cells);
-      free(qr->cols);
-      free(qr);
-      return NULL;
-    }
-  }
-  qr->status = QR_OK;
   qr->ncols = ncols;
   qr->nrows = nrows;
   qr->nrows_alloc = nrows;
@@ -196,103 +161,9 @@ QueryResult *qr_create_ok(const McpId *id, uint32_t ncols, uint32_t nrows,
   return qr;
 }
 
-/* Formats one error message from printf-like inputs.
- * It borrows 'fmt' and 'args' and returns a newly allocated C string; caller
- * owns and frees the returned pointer.
- * Side effects: allocates heap memory.
- * Error semantics: returns an allocated empty string when formatting fails.
- */
-static char *qr_format_err_msg(const char *fmt, va_list args) {
-  const char *safe_fmt = fmt ? fmt : "";
-
-  va_list args_len;
-  va_copy(args_len, args);
-  int need = vsnprintf(NULL, 0, safe_fmt, args_len);
-  va_end(args_len);
-
-  if (need < 0) {
-    char *fallback = xmalloc(1);
-    fallback[0] = '\0';
-    return fallback;
-  }
-
-  size_t buf_len = (size_t)need + 1u;
-  char *msg = xmalloc(buf_len);
-  int written = vsnprintf(msg, buf_len, safe_fmt, args);
-  if (written < 0 || (size_t)written >= buf_len) {
-    msg[0] = '\0';
-  }
-  return msg;
-}
-
-/* Shared helper for QR_ERROR and QR_TOOL_ERROR.
- * It borrows 'id' and formatting arguments, and returns a new QueryResult that
- * owns its copied id/error message.
- * Side effects: allocates heap memory for QueryResult internals.
- * Error semantics: returns NULL only when id copy fails.
- */
-static QueryResult *qr_create_err_impl_v(const McpId *id, QRStatus status,
-                                         QrErrorCode code, const char *fmt,
-                                         va_list args) {
-  QueryResult *qr = xmalloc(sizeof(*qr));
-
-  qr->id = (McpId){0};
-  if (id) {
-    if (qr_set_id(qr, id) != OK) {
-      free(qr);
-      return NULL;
-    }
-  }
-  qr->status = status;
-  qr->exec_ms = 0;
-  qr->err_code = code;
-  qr->err_msg = qr_format_err_msg(fmt, args);
-
-  return qr;
-}
-
-QueryResult *qr_create_err(const McpId *id, QrErrorCode code,
-                           const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  QueryResult *qr = qr_create_err_impl_v(id, QR_ERROR, code, fmt, args);
-  va_end(args);
-  return qr;
-}
-
-QueryResult *qr_create_tool_err(const McpId *id, const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  QueryResult *qr = qr_create_err_impl_v(id, QR_TOOL_ERROR, 0, fmt, args);
-  va_end(args);
-  return qr;
-}
-
-QueryResult *qr_create_msg(const McpId *id, const char *msg) {
-  QueryResult *qr = qr_create_ok(id, 1, 1, 0, 0);
-  if (!qr)
-    return NULL;
-
-  if (qr_set_col(qr, 0, "message", "text", QRCOL_V_PLAINTEXT, 0) != OK ||
-      qr_set_cell(qr, 0, 0, msg ? msg : "", msg ? strlen(msg) : 0) != YES) {
-    qr_destroy(qr);
-    return NULL;
-  }
-  return qr;
-}
-
 void qr_destroy(QueryResult *qr) {
   if (!qr)
     return;
-
-  mcp_id_clean(&qr->id);
-
-  // if it represents an error (protocol or tool)
-  if (qr->status == QR_ERROR || qr->status == QR_TOOL_ERROR) {
-    free(qr->err_msg);
-    free(qr);
-    return;
-  }
 
   free(qr->cells);
   free(qr->cols);
