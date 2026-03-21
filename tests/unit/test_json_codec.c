@@ -75,14 +75,14 @@ encode_jsonrpc_impl(const McpId *id, uint32_t ncols, uint32_t nrows,
     }
   }
 
-  char *json = NULL;
-  size_t json_len = 0;
-  int rc = qr_to_jsonrpc(qr, &json, &json_len);
+  StrBuf json;
+  sb_init(&json);
+  int rc = qr_to_jsonrpc(qr, &json);
 
   ASSERT_TRUE_AT(rc == OK, file, line);
-  assert_bytes_eq(json, json_len, expected_json, file, line);
+  assert_bytes_eq(json.data, json.len, expected_json, file, line);
 
-  free(json);
+  sb_clean(&json);
   qr_destroy(qr);
 }
 
@@ -160,14 +160,14 @@ static void test_json_null_qrcolumn_safe_defaults(void) {
                          "\"resultTruncated\":false"
                          "}}}";
 
-  char *json = NULL;
-  size_t json_len = 0;
-  int rc = qr_to_jsonrpc(qr, &json, &json_len);
+  StrBuf json;
+  sb_init(&json);
+  int rc = qr_to_jsonrpc(qr, &json);
 
   ASSERT_TRUE(rc == OK);
-  assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+  assert_bytes_eq(json.data, json.len, expected, __FILE__, __LINE__);
 
-  free(json);
+  sb_clean(&json);
   qr_destroy(qr);
 }
 
@@ -231,14 +231,14 @@ static void test_json_error_result(void) {
                          "\"message\":\"bad \\\"x\\\"\""
                          "}}";
 
-  char *json = NULL;
-  size_t json_len = 0;
-  int rc = qr_to_jsonrpc(qr, &json, &json_len);
+  StrBuf json;
+  sb_init(&json);
+  int rc = qr_to_jsonrpc(qr, &json);
 
   ASSERT_TRUE(rc == OK);
-  assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+  assert_bytes_eq(json.data, json.len, expected, __FILE__, __LINE__);
 
-  free(json);
+  sb_clean(&json);
   qr_destroy(qr);
 }
 
@@ -253,14 +253,14 @@ static void test_json_tool_error_result(void) {
       "\"isError\":true"
       "}}";
 
-  char *json = NULL;
-  size_t json_len = 0;
-  int rc = qr_to_jsonrpc(qr, &json, &json_len);
+  StrBuf json;
+  sb_init(&json);
+  int rc = qr_to_jsonrpc(qr, &json);
 
   ASSERT_TRUE(rc == OK);
-  assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+  assert_bytes_eq(json.data, json.len, expected, __FILE__, __LINE__);
 
-  free(json);
+  sb_clean(&json);
   qr_destroy(qr);
 }
 
@@ -283,15 +283,120 @@ static void test_json_string_id(void) {
       "\"resultTruncated\":false"
       "}}}";
 
-  char *json = NULL;
-  size_t json_len = 0;
-  int rc = qr_to_jsonrpc(qr, &json, &json_len);
+  StrBuf json;
+  sb_init(&json);
+  int rc = qr_to_jsonrpc(qr, &json);
   ASSERT_TRUE(rc == OK);
-  assert_bytes_eq(json, json_len, expected, __FILE__, __LINE__);
+  assert_bytes_eq(json.data, json.len, expected, __FILE__, __LINE__);
 
-  free(json);
+  sb_clean(&json);
   qr_destroy(qr);
   mcp_id_clean(&id);
+}
+
+/* Validates one connection entry emitted by list_database_connections.
+ * It borrows 'obj' and expected strings and allocates decoded JSON strings
+ * that are freed before returning.
+ */
+static void assert_conn_profile_json_obj(const JsonGetter *obj,
+                                         const char *expected_name,
+                                         const char *expected_type,
+                                         int expected_read_only) {
+  const char *allowed[] = {"connectionName", "type", "readOnly"};
+  JsonStrSpan unknown = {0};
+  char *name = NULL;
+  char *type = NULL;
+  int read_only = -1;
+
+  ASSERT_TRUE(jsget_top_level_validation(obj, NULL, allowed, 3, &unknown) ==
+              YES);
+  ASSERT_TRUE(jsget_string_decode_alloc(obj, "connectionName", &name) == YES);
+  ASSERT_TRUE(jsget_string_decode_alloc(obj, "type", &type) == YES);
+  ASSERT_TRUE(jsget_bool01(obj, "readOnly", &read_only) == YES);
+  ASSERT_STREQ(name, expected_name);
+  ASSERT_STREQ(type, expected_type);
+  ASSERT_TRUE(read_only == expected_read_only);
+
+  free(name);
+  free(type);
+}
+
+/* Verifies that list_database_connections emits structuredContent compatible
+ * with docs/tools.md and preserves the typed connection metadata.
+ */
+static void test_conn_profiles_to_jsonrpc_schema_shape(void) {
+  ConnProfile profiles[2] = {0};
+  McpId id = id_u32(88);
+  StrBuf json;
+  JsonGetter jg = {0};
+  JsonTokBuf tok_buf = {0};
+  JsonGetter structured = {0};
+  JsonGetter obj = {0};
+  JsonArrIter it = {0};
+  JsonStrSpan unknown = {0};
+  const char *root_allowed[] = {"jsonrpc", "id", "result"};
+  const char *structured_allowed[] = {"connections"};
+  uint32_t got_id = 0;
+
+  profiles[0].connection_name = "analytics";
+  profiles[0].kind = DB_KIND_POSTGRES;
+  profiles[0].safe_policy.read_only = 1;
+
+  profiles[1].connection_name = "warehouse";
+  profiles[1].kind = DB_KIND_POSTGRES;
+  profiles[1].safe_policy.read_only = 0;
+
+  sb_init(&json);
+  ASSERT_TRUE(conn_profiles_to_jsonrpc(profiles, 2, &id, &json) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json.data, json.len, &tok_buf) == OK);
+  ASSERT_TRUE(jsget_top_level_validation(&jg, NULL, root_allowed, 3, &unknown) ==
+              YES);
+  ASSERT_TRUE(jsget_u32(&jg, "id", &got_id) == YES);
+  ASSERT_TRUE(got_id == 88);
+  ASSERT_TRUE(jsget_object(&jg, "result.structuredContent", &structured) ==
+              YES);
+  ASSERT_TRUE(jsget_top_level_validation(&structured, NULL, structured_allowed,
+                                         1, &unknown) == YES);
+  ASSERT_TRUE(jsget_array_objects_begin(&jg, "result.structuredContent.connections",
+                                        &it) == YES);
+
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+  assert_conn_profile_json_obj(&obj, "analytics", "postgres", 1);
+
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+  assert_conn_profile_json_obj(&obj, "warehouse", "postgres", 0);
+
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == NO);
+  sb_clean(&json);
+}
+
+/* Verifies conn_profiles_to_jsonrpc rejects invalid pointers and malformed
+ * profile data rather than emitting partial or misleading JSON.
+ */
+static void test_conn_profiles_to_jsonrpc_bad_input(void) {
+  ConnProfile profile = {0};
+  McpId id = id_u32(9);
+  StrBuf json;
+
+  profile.connection_name = "broken";
+  profile.kind = DB_KIND_POSTGRES;
+
+  sb_init(&json);
+  ASSERT_TRUE(conn_profiles_to_jsonrpc(NULL, 1, &id, &json) == ERR);
+  ASSERT_TRUE(json.len == 0);
+  ASSERT_TRUE(conn_profiles_to_jsonrpc(&profile, 1, NULL, &json) == ERR);
+  ASSERT_TRUE(json.len == 0);
+  ASSERT_TRUE(conn_profiles_to_jsonrpc(&profile, 1, &id, NULL) == ERR);
+
+  profile.kind = 0;
+  ASSERT_TRUE(conn_profiles_to_jsonrpc(&profile, 1, &id, &json) == ERR);
+  ASSERT_TRUE(json.len == 0);
+
+  profile.kind = DB_KIND_POSTGRES;
+  profile.connection_name = NULL;
+  ASSERT_TRUE(conn_profiles_to_jsonrpc(&profile, 1, &id, &json) == ERR);
+  ASSERT_TRUE(json.len == 0);
+  sb_clean(&json);
 }
 
 static void test_json_builder_object(void) {
@@ -635,6 +740,8 @@ int main(void) {
   test_json_error_result();
   test_json_tool_error_result();
   test_json_string_id();
+  test_conn_profiles_to_jsonrpc_schema_shape();
+  test_conn_profiles_to_jsonrpc_bad_input();
   test_json_builder_object();
   test_json_builder_array();
   test_json_builder_nested();

@@ -360,6 +360,37 @@ AdbxStatus json_rpc_begin(StrBuf *sb) {
 
 /* --------------------------- encoding objects --------------------------- */
 
+/* Appends one JSON-RPC id field using MCP integer or string encoding.
+ * It borrows 'sb' and 'id' and does not allocate externally-owned memory.
+ * Returns OK on success, else ERR.
+ */
+static AdbxStatus json_rpc_append_id(StrBuf *sb, const McpId *id) {
+  if (!sb || !id)
+    return ERR;
+
+  switch (id->kind) {
+  case MCP_ID_INT:
+    return json_kv_u64(sb, "id", id->u32);
+  case MCP_ID_STR:
+    return json_kv_str(sb, "id", id->str ? id->str : "");
+  default:
+    return ERR;
+  }
+}
+
+/* Returns the JSON string used for one database backend kind in MCP tool
+ * responses. Returns a stable string on success, NULL for unsupported
+ * kinds.
+ */
+static const char *json_db_kind_name(DbKind kind) {
+  switch (kind) {
+  case DB_KIND_POSTGRES:
+    return "postgres";
+  default:
+    return NULL;
+  }
+}
+
 /* Builds the structured payload for a successful run_sql_query tool result.
  * It borrows 'sb' and 'qr' and does not allocate externally-owned memory.
  * Side effects: appends a JSON object to 'sb'.
@@ -533,69 +564,148 @@ static AdbxStatus json_qr_tool_err(StrBuf *sb, const QueryResult *qr) {
   return OK;
 }
 
-AdbxStatus qr_to_jsonrpc(const QueryResult *qr, char **out_json,
-                         size_t *out_len) {
-  if (!out_json || !out_len)
+/* Builds the structured payload for list_database_connections and appends it to
+ * 'sb'. Returns OK on success, esle ERR.
+ */
+static AdbxStatus json_conn_profiles_structured(StrBuf *sb,
+                                                const ConnProfile *profiles,
+                                                size_t n_profiles) {
+  if (!sb)
     return ERR;
-  *out_json = NULL;
-  *out_len = 0;
-
-  if (!qr)
+  if (n_profiles > 0 && !profiles)
     return ERR;
 
-  StrBuf sb;
-  sb_init(&sb);
-  // begin JSON-RPC envelope
-  if (json_obj_begin(&sb) != OK)
+  if (json_obj_begin(sb) != OK)
     goto err;
-  if (json_kv_str(&sb, "jsonrpc", "2.0") != OK)
+  if (json_kv_arr_begin(sb, "connections") != OK)
     goto err;
-  if (qr->id.kind == MCP_ID_STR) {
-    if (json_kv_str(&sb, "id", qr->id.str ? qr->id.str : "") != OK)
+
+  for (size_t i = 0; i < n_profiles; i++) {
+    const ConnProfile *profile = &profiles[i];
+    const char *kind_name = NULL;
+
+    if (!profile || !profile->connection_name)
       goto err;
-  } else {
-    if (json_kv_u64(&sb, "id", qr->id.u32) != OK)
+
+    kind_name = json_db_kind_name(profile->kind);
+    if (!kind_name)
+      goto err;
+
+    if (json_obj_begin(sb) != OK)
+      goto err;
+    if (json_kv_str(sb, "connectionName", profile->connection_name) != OK)
+      goto err;
+    if (json_kv_str(sb, "type", kind_name) != OK)
+      goto err;
+    if (json_kv_bool(sb, "readOnly", profile->safe_policy.read_only ? 1 : 0) !=
+        OK)
+      goto err;
+    if (json_obj_end(sb) != OK)
       goto err;
   }
-
-  if (qr->status == QR_ERROR) {
-    if (json_maybe_comma(&sb) != OK)
-      goto err;
-    if (json_append(&sb, "\"error\":") != OK)
-      goto err;
-    if (json_qr_err(&sb, qr) != OK)
-      goto err;
-  } else if (qr->status == QR_TOOL_ERROR) {
-    if (json_maybe_comma(&sb) != OK)
-      goto err;
-    if (json_append(&sb, "\"result\":") != OK)
-      goto err;
-    if (json_qr_tool_err(&sb, qr) != OK)
-      goto err;
-  } else {
-    if (json_maybe_comma(&sb) != OK)
-      goto err;
-    if (json_append(&sb, "\"result\":") != OK)
-      goto err;
-    if (json_qr_ok(&sb, qr) != OK)
-      goto err;
-  }
-  if (json_obj_end(&sb) != OK)
+  if (json_arr_end(sb) != OK)
+    goto err;
+  if (json_obj_end(sb) != OK)
     goto err;
 
-  // materialize output (exact size; not NUL-terminated)
-  char *out = xmalloc(sb.len);
-  memcpy(out, sb.data, sb.len);
-  *out_json = out;
-  *out_len = sb.len;
-
-  sb_clean(&sb);
   return OK;
 
 err:
-  sb_clean(&sb);
-  *out_json = NULL;
-  *out_len = 0;
+  return ERR;
+}
+
+AdbxStatus qr_to_jsonrpc(const QueryResult *qr, StrBuf *out_json) {
+  if (!qr || !out_json)
+    return ERR;
+
+  sb_reset(out_json);
+
+  // begin JSON-RPC envelope
+  if (json_rpc_begin(out_json) != OK)
+    goto err;
+  if (json_rpc_append_id(out_json, &qr->id) != OK)
+    goto err;
+
+  if (qr->status == QR_ERROR) {
+    if (json_maybe_comma(out_json) != OK)
+      goto err;
+    if (json_append(out_json, "\"error\":") != OK)
+      goto err;
+    if (json_qr_err(out_json, qr) != OK)
+      goto err;
+  } else if (qr->status == QR_TOOL_ERROR) {
+    if (json_maybe_comma(out_json) != OK)
+      goto err;
+    if (json_append(out_json, "\"result\":") != OK)
+      goto err;
+    if (json_qr_tool_err(out_json, qr) != OK)
+      goto err;
+  } else {
+    if (json_maybe_comma(out_json) != OK)
+      goto err;
+    if (json_append(out_json, "\"result\":") != OK)
+      goto err;
+    if (json_qr_ok(out_json, qr) != OK)
+      goto err;
+  }
+  if (json_obj_end(out_json) != OK)
+    goto err;
+
+  return OK;
+
+err:
+  sb_reset(out_json);
+  return ERR;
+}
+
+AdbxStatus conn_profiles_to_jsonrpc(const ConnProfile *profiles,
+                                    size_t n_profiles, const McpId *id,
+                                    StrBuf *out_json) {
+  if (!id || !out_json)
+    return ERR;
+  if (n_profiles > 0 && !profiles)
+    return ERR;
+
+  sb_reset(out_json);
+
+  if (json_rpc_begin(out_json) != OK)
+    goto err;
+  if (json_rpc_append_id(out_json, id) != OK)
+    goto err;
+  if (json_maybe_comma(out_json) != OK)
+    goto err;
+  if (json_append(out_json, "\"result\":") != OK)
+    goto err;
+  if (json_obj_begin(out_json) != OK)
+    return ERR;
+  if (json_kv_arr_begin(out_json, "content") != OK)
+    return ERR;
+  if (json_obj_begin(out_json) != OK)
+    return ERR;
+  if (json_kv_str(out_json, "type", "text") != OK)
+    return ERR;
+  if (json_kv_str(out_json, "text",
+                  "Database connections listed successfully.") != OK)
+    return ERR;
+  if (json_obj_end(out_json) != OK)
+    return ERR;
+  if (json_arr_end(out_json) != OK)
+    return ERR;
+  if (json_maybe_comma(out_json) != OK)
+    return ERR;
+  if (json_append(out_json, "\"structuredContent\":") != OK)
+    return ERR;
+  if (json_conn_profiles_structured(out_json, profiles, n_profiles) != OK)
+    return ERR;
+  if (json_obj_end(out_json) != OK)
+    return ERR;
+  if (json_obj_end(out_json) != OK)
+    goto err;
+
+  return OK;
+
+err:
+  sb_reset(out_json);
   return ERR;
 }
 

@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "conn_catalog.h"
 #include "query_result.h"
 #include "string_op.h"
 #include "utils.h"
@@ -35,15 +36,23 @@
  *
  *  {"jsonrpc":"2.0","id":<u|s>,"error":{"code":<int>,"message":<s>}}
  *
- * Returns:
- *  OK: success. *out_json points to a malloc'd buffer containing exactly
- *  out_len bytes. It is NOT NUL-terminated (treat as raw bytes).
- *  ERR: error. *out_json is set to NULL, *out_len set to 0
- *
- * NOTE: Caller must free(*out_json).
+ * Serializes one QueryResult into a full JSON-RPC response.
+ * It borrows 'qr' and caller-owned initialized 'out_json'.
+ * Side effects: resets and grows 'out_json'.
+ * Returns OK on success, ERR on invalid input or encoding failure. On ERR
+ * 'out_json' is reset to empty.
  */
-AdbxStatus qr_to_jsonrpc(const QueryResult *qr, char **out_json,
-                         size_t *out_len);
+AdbxStatus qr_to_jsonrpc(const QueryResult *qr, StrBuf *out_json);
+
+/* Serializes 'profiles' into a full JSON-RPC response compliant with
+ * docs/tools.md:list_database_connections outputSchema. 'profiles' may be NULL
+ * only when 'n_profiles' is 0. Side effects: resets and grows 'out_json'.
+ * Returns OK on success, ERR on invalid input, unsupported profile kind, or
+ * encoding failure. On ERR 'out_json' is reset to empty.
+ */
+AdbxStatus conn_profiles_to_jsonrpc(const ConnProfile *profiles,
+                                    size_t n_profiles, const McpId *id,
+                                    StrBuf *out_json);
 
 /* JSON helpers for building objects/arrays with automatic comma handling. */
 AdbxStatus json_obj_begin(StrBuf *sb);

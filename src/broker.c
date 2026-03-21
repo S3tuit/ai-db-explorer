@@ -1377,22 +1377,23 @@ static AdbxStatus broker_write_q_res(BrokerMcpSession *sess,
   if (!q_res || !sess)
     return ERR;
 
-  size_t response_len;
-  char *response;
+  StrBuf response;
   AdbxStatus rc;
-  if (qr_to_jsonrpc(q_res, &response, &response_len) != OK) {
+  sb_init(&response);
+
+  if (qr_to_jsonrpc(q_res, &response) != OK) {
     rc = ERR;
     goto clean_n_ret;
   }
 
-  if (response_len > UINT32_MAX) {
+  if (response.len > UINT32_MAX) {
     rc = ERR;
     goto clean_n_ret;
   }
-  rc = frame_write_len(&sess->bc, response, (uint32_t)response_len);
+  rc = frame_write_len(&sess->bc, response.data, (uint32_t)response.len);
 
 clean_n_ret:
-  free(response);
+  sb_clean(&response);
   return rc;
 }
 

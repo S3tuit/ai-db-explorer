@@ -1,5 +1,53 @@
 ## list_database_connections
-TBD
+Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
+`outputSchema` documents below explicitly target JSON Schema 2020-12:
+
+```json
+{
+  "name": "list_database_connections",
+  "title": "List Database Connections",
+  "description": "List configured database connections together with the effective broker safety metadata exposed to the agent for each one.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "connections": {
+        "type": "array",
+        "description": "Configured database connections available for other tool calls.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Stable connection identifier used by tools such as run_sql_query."
+            },
+            "type": {
+              "type": "string",
+              "enum": ["postgres"],
+              "description": "Database backend type."
+            },
+            "readOnly": {
+              "type": "boolean",
+              "description": "True when the effective safety policy enforces read-only access for this connection."
+            }
+          },
+          "required": ["connectionName", "type", "readOnly"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["connections"],
+    "additionalProperties": false
+  }
+}
+```
 
 ## run_sql_query
 

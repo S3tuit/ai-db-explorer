@@ -27,6 +27,18 @@ struct ConnManager {
   size_t n_entries;
 };
 
+/* Validates basic catalog shape assumptions required by ConnManager.
+ * Returns YES when the catalog shape is internally consistent, NO when the
+ * catalog is malformed, ERR on invalid input.
+ */
+static inline AdbxTriStatus connm_catalog_shape_ok(const ConnCatalog *cat) {
+  if (!cat)
+    return ERR;
+  if (cat->n_profiles > 0 && !cat->profiles)
+    return NO;
+  return YES;
+}
+
 /* Returns the ConnEntry identified by connection_name or NULL. Since for now we
  * expect few connection (<50 surely) this is good enough even for O(n) search
  * time. */
@@ -65,8 +77,8 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
   StrBuf pw;
   sb_init(&pw);
   SecretStoreErr ss_err;
-  AdbxTriStatus s_rc = secret_store_get(m->secrets, &e->profile->secret_ref,
-                                        &pw, &ss_err);
+  AdbxTriStatus s_rc =
+      secret_store_get(m->secrets, &e->profile->secret_ref, &pw, &ss_err);
   if (s_rc == NO) {
     TLOG("ERROR - missing secret for %s", e->profile->connection_name);
     sb_zero_clean(&pw);
@@ -82,9 +94,8 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
 
   // Connect
   DbErr db_err;
-  AdbxStatus rc =
-      db_connect(e->backend, e->profile, &e->profile->safe_policy, pw.data,
-                 &db_err);
+  AdbxStatus rc = db_connect(e->backend, e->profile, &e->profile->safe_policy,
+                             pw.data, &db_err);
   if (rc != OK) {
     TLOG("ERROR - db_connect failed for %s: %s", e->profile->connection_name,
          db_err.msg[0] != '\0' ? db_err.msg : "no backend error detail");
@@ -101,6 +112,8 @@ static AdbxStatus ensure_connected(ConnManager *m, ConnEntry *e) {
 ConnManager *connm_create_with_factory(ConnCatalog *cat, SecretStore *secrets,
                                        DbBackend *(*factory)(DbKind kind)) {
   if (!cat || !secrets)
+    return NULL;
+  if (connm_catalog_shape_ok(cat) != YES)
     return NULL;
 
   ConnManager *m = (ConnManager *)xmalloc(sizeof(*m));
@@ -209,6 +222,24 @@ AdbxTriStatus connm_get_connection(ConnManager *m, const char *connection_name,
   out->db = e->backend;
   out->profile = e->profile;
   return YES;
+}
+
+/* Returns a borrowed view over the catalog-owned profile array.
+ * It borrows 'm' and writes borrowed outputs into caller-owned pointers.
+ * Side effects: none.
+ * Returns OK on success, ERR on invalid input or inconsistent catalog state.
+ */
+AdbxStatus connm_profile_borrow(const ConnManager *m,
+                                const ConnProfile **out_profiles,
+                                size_t *out_n_profiles) {
+  if (!m || !out_profiles || !out_n_profiles)
+    return ERR;
+  if (connm_catalog_shape_ok(m->cat) != YES)
+    return ERR;
+
+  *out_profiles = m->cat->profiles;
+  *out_n_profiles = m->cat->n_profiles;
+  return OK;
 }
 
 void connm_mark_used(ConnManager *m, const char *connection_name) {

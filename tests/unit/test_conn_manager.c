@@ -161,8 +161,55 @@ static void test_conn_manager_lifecycle(void) {
   ASSERT_TRUE(fake_backend_destroy_calls() == 1);
 }
 
+/* Verifies ConnManager exposes a borrowed profile-array view without
+ * allocating or copying profile records.
+ * It borrows the catalog pointer after ownership transfer only for
+ * pre-destroy assertions inside this test.
+ * Side effects: creates and destroys one ConnManager instance.
+ * Error semantics: assertions abort on failure.
+ */
+static void test_conn_manager_profile_borrow_happy_path(void) {
+  ConnCatalog *cat = make_catalog();
+  SecretStore *ss = fake_secret_store_create();
+  ConnManager *m = connm_create_with_factory(cat, ss, fake_backend_create);
+  ASSERT_TRUE(m != NULL);
+
+  const ConnProfile *profiles = NULL;
+  size_t n_profiles = 0;
+  ASSERT_TRUE(connm_profile_borrow(m, &profiles, &n_profiles) == OK);
+  ASSERT_TRUE(n_profiles == 1);
+  ASSERT_TRUE(profiles == cat->profiles);
+  ASSERT_STREQ(profiles[0].connection_name, "db1");
+  ASSERT_TRUE(profiles[0].kind == DB_KIND_POSTGRES);
+  ASSERT_TRUE(profiles[0].safe_policy.read_only == 1);
+
+  connm_destroy(m);
+}
+
+/* Verifies connm_profile_borrow rejects invalid caller input.
+ * It borrows no mutable external state beyond one temporary ConnManager.
+ * Side effects: creates and destroys one ConnManager instance.
+ * Error semantics: assertions abort on failure.
+ */
+static void test_conn_manager_profile_borrow_invalid_input(void) {
+  ConnCatalog *cat = make_catalog();
+  SecretStore *ss = fake_secret_store_create();
+  ConnManager *m = connm_create_with_factory(cat, ss, fake_backend_create);
+  ASSERT_TRUE(m != NULL);
+
+  const ConnProfile *profiles = NULL;
+  size_t n_profiles = 0;
+  ASSERT_TRUE(connm_profile_borrow(NULL, &profiles, &n_profiles) == ERR);
+  ASSERT_TRUE(connm_profile_borrow(m, NULL, &n_profiles) == ERR);
+  ASSERT_TRUE(connm_profile_borrow(m, &profiles, NULL) == ERR);
+
+  connm_destroy(m);
+}
+
 int main(void) {
   test_conn_manager_lifecycle();
+  test_conn_manager_profile_borrow_happy_path();
+  test_conn_manager_profile_borrow_invalid_input();
   fprintf(stderr, "OK: test_conn_manager\n");
   return 0;
 }

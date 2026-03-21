@@ -66,6 +66,18 @@ void connm_destroy(ConnManager *m);
 AdbxTriStatus connm_get_connection(ConnManager *m, const char *connection_name,
                                    ConnView *out);
 
+/* Borrows the catalog-owned ConnProfile array managed by 'm'.
+ * Ownership:
+ * - '*out_profiles' points into ConnManager-owned catalog memory.
+ * - Borrowed data remains valid only while ConnManager is alive.
+ * - The caller must not free or mutate the returned profiles.
+ * Side effects: none.
+ * Returns OK on success, ERR on invalid input or inconsistent catalog state.
+ */
+AdbxStatus connm_profile_borrow(const ConnManager *m,
+                                const ConnProfile **out_profiles,
+                                size_t *out_n_profiles);
+
 /**
  * Marks a connection as "used now" (e.g., call this after exec completes,
  * regardless of success/failure).
