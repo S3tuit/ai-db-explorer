@@ -165,6 +165,57 @@ static char *pg_exec_bound_tool_err_impl(DbBackend *pg, const char *sql,
   pg_exec_bound_tool_err_impl((pg), (sql), (params), (nparams), __FILE__,     \
                               __LINE__)
 
+/* Describes one relation and returns the successful DbRelationInfo payload.
+ * Ownership: caller owns returned DbRelationInfo and must destroy it.
+ * Side effects: sends one relation-describe request to the backend.
+ * Error semantics: asserts backend contract (OK + RELATION_INFO payload).
+ */
+static DbRelationInfo *pg_describe_relation_impl(DbBackend *pg,
+                                                 const char *schema_name,
+                                                 const char *relation_name,
+                                                 const char *file, int line) {
+  DbDescribeResult res = {0};
+  int rc = db_describe_relation(pg, schema_name, relation_name, &res);
+
+  ASSERT_TRUE_AT(rc == OK, file, line);
+  ASSERT_TRUE_AT(res.kind == DBDESCRIBE_RESULT_RELATION_INFO, file, line);
+  ASSERT_TRUE_AT(res.relation_info != NULL, file, line);
+
+  DbRelationInfo *info = res.relation_info;
+  res.kind = DBDESCRIBE_RESULT_NONE;
+  res.relation_info = NULL;
+  return info;
+}
+#define PG_DESCRIBE_RELATION(pg, schema_name, relation_name)                   \
+  pg_describe_relation_impl((pg), (schema_name), (relation_name), __FILE__,   \
+                            __LINE__)
+
+/* Describes one relation and returns the backend tool-error message.
+ * Ownership: caller owns returned message and must free it.
+ * Side effects: sends one relation-describe request to the backend.
+ * Error semantics: asserts backend contract (OK + TOOL_ERR payload).
+ */
+static char *pg_describe_relation_tool_err_impl(DbBackend *pg,
+                                                const char *schema_name,
+                                                const char *relation_name,
+                                                const char *file, int line) {
+  DbDescribeResult res = {0};
+  int rc = db_describe_relation(pg, schema_name, relation_name, &res);
+
+  ASSERT_TRUE_AT(rc == OK, file, line);
+  ASSERT_TRUE_AT(res.kind == DBDESCRIBE_RESULT_TOOL_ERR, file, line);
+  ASSERT_TRUE_AT(res.tool_err_msg != NULL, file, line);
+  ASSERT_TRUE_AT(res.tool_err_msg[0] != '\0', file, line);
+
+  char *msg = res.tool_err_msg;
+  res.kind = DBDESCRIBE_RESULT_NONE;
+  res.tool_err_msg = NULL;
+  return msg;
+}
+#define PG_DESCRIBE_RELATION_TOOL_ERR(pg, schema_name, relation_name)          \
+  pg_describe_relation_tool_err_impl((pg), (schema_name), (relation_name),    \
+                                     __FILE__, __LINE__)
+
 static void assert_ok_qr(const QueryResult *qr, const char *file, int line) {
   ASSERT_TRUE_AT(qr != NULL, file, line);
 }
@@ -181,6 +232,42 @@ static void assert_backend_still_usable(DbBackend *pg) {
   ASSERT_TRUE(qr->nrows == 1);
   ASSERT_STREQ(qr_get_cell(qr, 0, 0), "1");
   qr_destroy(qr);
+}
+
+/* Finds one column by name inside relation metadata.
+ * It borrows 'info' and 'name' and allocates no memory.
+ * Error semantics: returns the borrowed column on success, NULL when not
+ * found or on invalid input.
+ */
+static const DbRelationColumn *find_relation_col(const DbRelationInfo *info,
+                                                 const char *name) {
+  if (!info || !name)
+    return NULL;
+  for (uint32_t i = 0; i < info->ncols; i++) {
+    const DbRelationColumn *col = &info->cols[i];
+    if (col->name && strcmp(col->name, name) == 0)
+      return col;
+  }
+  return NULL;
+}
+
+/* Counts how many columns with the given name are present in relation
+ * metadata.
+ * It borrows 'info' and 'name' and allocates no memory.
+ * Error semantics: returns 0 on invalid input or when no column matches.
+ */
+static uint32_t count_relation_cols(const DbRelationInfo *info,
+                                    const char *name) {
+  uint32_t count = 0;
+
+  if (!info || !name)
+    return 0;
+  for (uint32_t i = 0; i < info->ncols; i++) {
+    const DbRelationColumn *col = &info->cols[i];
+    if (col->name && strcmp(col->name, name) == 0)
+      count++;
+  }
+  return count;
 }
 
 /* --------------------------------- tests --------------------------------- */
@@ -514,6 +601,70 @@ static void test_bound_exec_over_max_params_fails_soft(void) {
   db_destroy(pg);
 }
 
+static void test_describe_relation_table_metadata(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  DbRelationInfo *info = PG_DESCRIBE_RELATION(pg, "public", "zfighter_intel");
+  ASSERT_TRUE(info != NULL);
+  ASSERT_STREQ(info->schema_name, "public");
+  ASSERT_STREQ(info->relation_name, "zfighter_intel");
+  ASSERT_TRUE(info->kind == DBREL_KIND_TABLE);
+  ASSERT_TRUE(info->ncols >= 4);
+
+  const DbRelationColumn *fighter_id = find_relation_col(info, "fighter_id");
+  ASSERT_TRUE(fighter_id != NULL);
+  ASSERT_TRUE(fighter_id->type != NULL);
+  ASSERT_TRUE(fighter_id->type[0] != '\0');
+  ASSERT_TRUE(fighter_id->is_foreign_key == 1);
+  ASSERT_STREQ(fighter_id->ref_schema_name, "public");
+  ASSERT_STREQ(fighter_id->ref_relation_name, "zfighters");
+  ASSERT_STREQ(fighter_id->ref_column_name, "id");
+
+  const DbRelationColumn *codename = find_relation_col(info, "codename");
+  ASSERT_TRUE(codename != NULL);
+  ASSERT_TRUE(codename->is_foreign_key == 0);
+  ASSERT_TRUE(codename->ref_schema_name == NULL);
+  ASSERT_TRUE(codename->ref_relation_name == NULL);
+  ASSERT_TRUE(codename->ref_column_name == NULL);
+
+  db_relation_info_destroy(info);
+  db_destroy(pg);
+}
+
+static void test_describe_relation_missing_relation_fails_soft(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  char *msg =
+      PG_DESCRIBE_RELATION_TOOL_ERR(pg, "public", "missing_relation_123");
+  ASSERT_TRUE(strstr(msg, "PostgreSQL relation describe failed:") != NULL);
+  ASSERT_TRUE(strstr(msg, "missing_relation_123") != NULL);
+  free(msg);
+
+  assert_backend_still_usable(pg);
+  db_destroy(pg);
+}
+
+static void test_describe_relation_multi_fk_column_keeps_first_reference(void) {
+  SafetyPolicy p = policy_default();
+  DbBackend *pg = PG_CONNECT(&p);
+
+  DbRelationInfo *info = PG_DESCRIBE_RELATION(pg, "public", "zfighter_intel");
+  ASSERT_TRUE(info != NULL);
+  ASSERT_TRUE(count_relation_cols(info, "fighter_id") == 1);
+
+  const DbRelationColumn *fighter_id = find_relation_col(info, "fighter_id");
+  ASSERT_TRUE(fighter_id != NULL);
+  ASSERT_TRUE(fighter_id->is_foreign_key == 1);
+  ASSERT_STREQ(fighter_id->ref_schema_name, "public");
+  ASSERT_STREQ(fighter_id->ref_relation_name, "zfighters");
+  ASSERT_STREQ(fighter_id->ref_column_name, "id");
+
+  db_relation_info_destroy(info);
+  db_destroy(pg);
+}
+
 void test_postgres_backend(void) {
   test_base_select_join();
   test_select_null_cell();
@@ -532,6 +683,9 @@ void test_postgres_backend(void) {
   test_bound_exec_sql_param_count_mismatch_missing();
   test_bound_exec_sql_param_count_mismatch_fewer();
   test_bound_exec_over_max_params_fails_soft();
+  test_describe_relation_table_metadata();
+  test_describe_relation_missing_relation_fails_soft();
+  test_describe_relation_multi_fk_column_keeps_first_reference();
 }
 
 int main(void) {

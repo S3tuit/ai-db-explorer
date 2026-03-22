@@ -4,11 +4,16 @@
 #include <stddef.h>
 
 #include "conn_catalog.h"
+#include "db_backend.h"
 #include "mcp_id.h"
 #include "query_result.h"
 #include "string_op.h"
 #include "utils.h"
 
+/* Entity that handles json serialization of the different entities the broker
+ * has to emit. It takes ownership of request-scoped payloads (QueryResult,
+ * DbRelationInfo); it creates an interal summary for shared views
+ * (ConnProfile).*/
 typedef struct BrokerResponse BrokerResponse;
 
 typedef enum {
@@ -23,8 +28,7 @@ typedef enum {
 
 /* Creates one BrokerResponse that owns the successful QueryResult payload.
  * It borrows 'id' and takes ownership of 'qr' only on success. On failure,
- * caller retains ownership of 'qr'.
- * Side effects: allocates one BrokerResponse and deep-copies 'id'.
+ * caller retains ownership of 'qr'. It deep-copies 'id'.
  * Returns a caller-owned BrokerResponse on success, NULL on invalid input or
  * allocation failure.
  */
@@ -32,19 +36,27 @@ BrokerResponse *bresp_create_query_result(const McpId *id, QueryResult *qr);
 
 /* Creates one BrokerResponse that owns copied list_database_connections
  * summaries derived from 'profiles'. It borrows 'id' and 'profiles'.
- * Side effects: allocates one BrokerResponse, deep-copies 'id', and copies the
- * connection names needed for serialization.
- * Returns a caller-owned BrokerResponse on success, NULL on invalid input,
- * unsupported backend kinds, or allocation failure.
+ * It deep-copies 'id', and a summary of the connection info needed for
+ * serialization. Returns a caller-owned BrokerResponse on success, NULL on
+ * invalid input, unsupported backend kinds, or allocation failure.
  */
 BrokerResponse *bresp_create_conn_profiles(const McpId *id,
                                            const ConnProfile *profiles,
                                            size_t n_profiles);
 
+/* Creates one BrokerResponse that owns one described relation payload.
+ * It borrows 'id' and 'profile', and takes ownership of 'info' only on
+ * success. On failure, caller retains ownership of 'info'. It deep-copies 'id'.
+ * Returns a caller-owned BrokerResponse on success, NULL on invalid input,
+ * malformed relation metadata, sensitivity-resolution failure, or allocation
+ * failure.
+ */
+BrokerResponse *bresp_create_relation_info(const McpId *id,
+                                           const ConnProfile *profile,
+                                           DbRelationInfo *info);
+
 /* Creates one BrokerResponse that serializes as a JSON-RPC error object.
- * It borrows 'id' and formatting inputs.
- * Side effects: allocates one BrokerResponse, deep-copies 'id', and allocates
- * one owned formatted message string.
+ * It borrows 'id' and formatting inputs. It deep-copies 'id'.
  * Returns a caller-owned BrokerResponse on success, NULL on invalid input or
  * allocation failure.
  */
@@ -52,9 +64,7 @@ BrokerResponse *bresp_create_err(const McpId *id, BrespErrorCode code,
                                  const char *fmt, ...);
 
 /* Creates one BrokerResponse that serializes as a CallToolResult with
- * isError=true. It borrows 'id' and formatting inputs.
- * Side effects: allocates one BrokerResponse, deep-copies 'id', and allocates
- * one owned formatted message string.
+ * isError=true. It borrows 'id' and formatting inputs. It deep-copies 'id'.
  * Returns a caller-owned BrokerResponse on success, NULL on invalid input or
  * allocation failure.
  */
@@ -62,8 +72,6 @@ BrokerResponse *bresp_create_tool_err(const McpId *id, const char *fmt, ...);
 
 /* Frees all memory owned by 'bresp', including any copied ids, messages, and
  * payload entities.
- * Side effects: releases heap allocations and may destroy an owned
- * QueryResult.
  * Error semantics: none; NULL input is ignored.
  */
 void bresp_destroy(BrokerResponse *bresp);

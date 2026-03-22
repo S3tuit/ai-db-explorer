@@ -2619,8 +2619,7 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
 
   ADBX_ERR_CLEAR(&db_err, DBERR_NONE);
 
-  if (!db || !db->impl || !sql || !out_res ||
-      (nparams > 0 && params == NULL)) {
+  if (!db || !db->impl || !sql || !out_res || (nparams > 0 && params == NULL)) {
     ADBX_ERR_SETF(&db_err, DBERR_INPUT,
                   "unexpected input before executing the query");
     goto fail_bad_input;
@@ -2843,6 +2842,282 @@ static AdbxStatus pg_exec_bound(DbBackend *db, const char *sql,
   return pg_exec_impl(db, sql, params, nparams, qb_policy, out_res);
 }
 
+/* Maps one PostgreSQL relkind code to the backend-neutral DbRelationKind.
+ * It borrows no heap state and allocates nothing.
+ * Returns one supported DbRelationKind, or DBREL_KIND_NONE on unsupported
+ * input.
+ */
+static DbRelationKind pg_relkind_from_char(char relkind) {
+  switch (relkind) {
+  case 'r':
+    return DBREL_KIND_TABLE;
+  case 'v':
+    return DBREL_KIND_VIEW;
+  case 'm':
+    return DBREL_KIND_MATVIEW;
+  case 'f':
+    return DBREL_KIND_FOREIGN_TABLE;
+  default:
+    return DBREL_KIND_NONE;
+  }
+}
+
+/* Parses one libpq textual boolean representation into 0/1.
+ * It borrows 'txt' and 'out01' and allocates no memory.
+ * Returns YES on successful parse, NO on unrecognized text, ERR on invalid
+ * input.
+ */
+static AdbxTriStatus pg_bool_text_parse01(const char *txt, int *out01) {
+  if (!txt || !out01)
+    return ERR;
+  if (strcmp(txt, "t") == 0 || strcmp(txt, "true") == 0) {
+    *out01 = 1;
+    return YES;
+  }
+  if (strcmp(txt, "f") == 0 || strcmp(txt, "false") == 0) {
+    *out01 = 0;
+    return YES;
+  }
+  return NO;
+}
+
+// the order of the columns of the query below
+enum {
+  RELF_SCHEMA_NAME = 0,
+  RELF_RELATION_NAME = 1,
+  RELF_RELATION_KIND = 2,
+  RELF_COLUMN_NAME = 3,
+  RELF_COLUMN_TYPE = 4,
+  RELF_IS_PRIMARY_KEY = 5,
+  RELF_IS_FOREIGN_KEY = 6,
+  RELF_REF_SCHEMA_NAME = 7,
+  RELF_REF_RELATION_NAME = 8,
+  RELF_REF_COLUMN_NAME = 9,
+  RELF_COUNT = 10,
+};
+/* Describes one schema-qualified PostgreSQL relation and materializes
+ * backend-owned metadata for its columns and key references.
+ * Returns OK when 'out_res' is populated with either relation metadata or a
+ * tool error, ERR only on catastrophic input or allocation failure.
+ */
+static AdbxStatus pg_describe_relation(DbBackend *db, const char *schema_name,
+                                       const char *relation_name,
+                                       DbDescribeResult *out_res) {
+  static const char *kSql =
+      "SELECT ns.nspname AS schema_name, "
+      "       cls.relname AS relation_name, "
+      "       cls.relkind::text AS relation_kind, "
+      "       a.attname AS column_name, "
+      "       pg_catalog.format_type(a.atttypid, a.atttypmod) AS column_type, "
+      "       CASE WHEN pk.conrelid IS NOT NULL THEN TRUE ELSE FALSE END "
+      "         AS is_primary_key, "
+      "       CASE WHEN fk.ref_relation_name IS NOT NULL THEN TRUE ELSE FALSE "
+      "         END AS is_foreign_key, "
+      "       fk.ref_schema_name AS references_schema, "
+      "       fk.ref_relation_name AS references_relation, "
+      "       fk.ref_column_name AS references_column "
+      "FROM pg_catalog.pg_class cls "
+      "JOIN pg_catalog.pg_namespace ns "
+      "  ON ns.oid = cls.relnamespace "
+      "LEFT JOIN pg_catalog.pg_attribute a "
+      "  ON a.attrelid = cls.oid "
+      " AND a.attnum > 0 "
+      " AND NOT a.attisdropped "
+      "LEFT JOIN pg_catalog.pg_constraint pk "
+      "  ON pk.conrelid = cls.oid "
+      " AND pk.contype = 'p' "
+      " AND a.attnum = ANY (pk.conkey) "
+      "LEFT JOIN LATERAL ( "
+      "    SELECT refns.nspname AS ref_schema_name, "
+      "           refcls.relname AS ref_relation_name, "
+      "           refatt.attname AS ref_column_name "
+      "    FROM pg_catalog.pg_constraint c "
+      "    CROSS JOIN LATERAL generate_subscripts(c.conkey, 1) AS s(i) "
+      "    JOIN pg_catalog.pg_class refcls "
+      "      ON refcls.oid = c.confrelid "
+      "    JOIN pg_catalog.pg_namespace refns "
+      "      ON refns.oid = refcls.relnamespace "
+      "    JOIN pg_catalog.pg_attribute refatt "
+      "      ON refatt.attrelid = c.confrelid "
+      "     AND refatt.attnum = c.confkey[s.i] "
+      "    WHERE c.contype = 'f' "
+      "      AND c.conrelid = cls.oid "
+      "      AND a.attnum = c.conkey[s.i] "
+      "    ORDER BY c.oid, s.i "
+      "    LIMIT 1 "
+      ") fk ON a.attnum IS NOT NULL "
+      "WHERE ns.nspname = $1 "
+      "  AND cls.relname = $2 "
+      "  AND cls.relkind IN ('r', 'v', 'm', 'f') "
+      "ORDER BY a.attnum";
+  DbErr db_err;
+  const char *safe_msg = NULL;
+  PGresult *res = NULL;
+  DbRelationInfo *info = NULL;
+
+  ADBX_ERR_CLEAR(&db_err, DBERR_NONE);
+  if (!db || !db->impl || !schema_name || !relation_name || !out_res ||
+      schema_name[0] == '\0' || relation_name[0] == '\0') {
+    ADBX_ERR_SETF(&db_err, DBERR_INPUT,
+                  "unexpected input before describing the relation");
+    goto fail_bad_input;
+  }
+
+  PgImpl *p = (PgImpl *)db->impl;
+  if (!p->conn) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "not connected");
+    goto fail;
+  }
+
+  const DbExecParam params[] = {
+      {.value = schema_name, .value_len = (uint32_t)strlen(schema_name)},
+      {.value = relation_name, .value_len = (uint32_t)strlen(relation_name)},
+  };
+  if (pg_exec_single_result_bound(p, kSql, params, (uint32_t)ARRLEN(params),
+                                  &res, &db_err) != OK) {
+    goto fail;
+  }
+
+  ExecStatusType st = PQresultStatus(res);
+  if (st == PGRES_FATAL_ERROR || st == PGRES_BAD_RESPONSE ||
+      st == PGRES_NONFATAL_ERROR) {
+    const char *msg = PQresultErrorMessage(res);
+    if (!msg || !*msg)
+      msg = PQerrorMessage(p->conn);
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "%s",
+                  msg ? msg : "relation describe failed");
+    goto fail;
+  }
+  if (st != PGRES_TUPLES_OK) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "%s",
+                  PQresStatus(st) ? PQresStatus(st)
+                                  : "unexpected PGresult status");
+    goto fail;
+  }
+
+  int nfields = PQnfields(res);
+  int nrows = PQntuples(res);
+  if (nrows < 1) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                  "relation \"%s.%s\" not found or unsupported", schema_name,
+                  relation_name);
+    goto fail;
+  }
+  if (nfields < RELF_COUNT) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                  "relation describe returned unexpected shape");
+    goto fail;
+  }
+
+  if (PQgetisnull(res, 0, RELF_SCHEMA_NAME) ||
+      PQgetisnull(res, 0, RELF_RELATION_NAME) ||
+      PQgetisnull(res, 0, RELF_RELATION_KIND)) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                  "relation describe returned incomplete metadata");
+    goto fail;
+  }
+
+  const char *schema_txt = PQgetvalue(res, 0, RELF_SCHEMA_NAME);
+  const char *relation_txt = PQgetvalue(res, 0, RELF_RELATION_NAME);
+  const char *kind_txt = PQgetvalue(res, 0, RELF_RELATION_KIND);
+  if (!schema_txt || !relation_txt || !kind_txt || kind_txt[0] == '\0') {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                  "relation describe returned invalid identity metadata");
+    goto fail;
+  }
+
+  DbRelationKind kind = pg_relkind_from_char(kind_txt[0]);
+  if (kind == DBREL_KIND_NONE) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                  "relation describe returned unsupported relation kind");
+    goto fail;
+  }
+
+  uint32_t ncols = 0;
+  for (int row = 0; row < nrows; row++) {
+    if (!PQgetisnull(res, row, RELF_COLUMN_NAME))
+      ncols++;
+  }
+
+  info = db_relation_info_create(ncols);
+  if (!info) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "db_relation_info_create failed");
+    goto fail;
+  }
+  if (db_relation_info_set_identity(info, schema_txt, relation_txt, kind) !=
+      OK) {
+    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                  "db_relation_info_set_identity failed");
+    goto fail;
+  }
+
+  uint32_t out_col = 0;
+  for (int row = 0; row < nrows; row++) {
+    if (PQgetisnull(res, row, RELF_COLUMN_NAME))
+      continue;
+
+    const char *col_name = PQgetvalue(res, row, RELF_COLUMN_NAME);
+    const char *col_type = PQgetisnull(res, row, RELF_COLUMN_TYPE)
+                               ? NULL
+                               : PQgetvalue(res, row, RELF_COLUMN_TYPE);
+
+    int is_primary_key = 0;
+    int is_foreign_key = 0;
+    if (pg_bool_text_parse01(PQgetvalue(res, row, RELF_IS_PRIMARY_KEY),
+                             &is_primary_key) != YES ||
+        pg_bool_text_parse01(PQgetvalue(res, row, RELF_IS_FOREIGN_KEY),
+                             &is_foreign_key) != YES) {
+      ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
+                    "relation describe returned invalid boolean metadata");
+      goto fail;
+    }
+
+    const char *ref_schema = PQgetisnull(res, row, RELF_REF_SCHEMA_NAME)
+                                 ? NULL
+                                 : PQgetvalue(res, row, RELF_REF_SCHEMA_NAME);
+    const char *ref_relation =
+        PQgetisnull(res, row, RELF_REF_RELATION_NAME)
+            ? NULL
+            : PQgetvalue(res, row, RELF_REF_RELATION_NAME);
+    const char *ref_column = PQgetisnull(res, row, RELF_REF_COLUMN_NAME)
+                                 ? NULL
+                                 : PQgetvalue(res, row, RELF_REF_COLUMN_NAME);
+
+    if (db_relation_info_set_col(info, out_col, col_name, col_type,
+                                 (uint8_t)is_primary_key,
+                                 (uint8_t)is_foreign_key, ref_schema,
+                                 ref_relation, ref_column) != OK) {
+      ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "db_relation_info_set_col failed");
+      goto fail;
+    }
+    out_col++;
+  }
+
+  PQclear(res);
+  res = NULL;
+
+  if (db_describe_result_set_relation_info(out_res, info) != OK) {
+    db_relation_info_destroy(info);
+    return ERR;
+  }
+  return OK;
+
+fail:
+  if (!out_res)
+    return ERR;
+
+  TLOG("ERROR - pg_describe_relation failed: %s",
+       db_err.msg[0] != '\0' ? db_err.msg : "unknown");
+  if (res)
+    PQclear(res);
+  if (info)
+    db_relation_info_destroy(info);
+fail_bad_input:
+  safe_msg = (db_err.msg[0] != '\0') ? db_err.msg : "Unknown backend error.";
+  return db_describe_result_set_tool_err(
+      out_res, "PostgreSQL relation describe failed: %s", safe_msg);
+}
+
 // This list of functions MUST be sorted ASC.
 // You can use: py_utils/format_sorted_strings.py
 //
@@ -3062,6 +3337,7 @@ static const DbBackendVTable PG_VT = {.connect = pg_connect,
                                       .destroy = pg_destroy,
                                       .exec = pg_exec,
                                       .exec_bound = pg_exec_bound,
+                                      .describe_relation = pg_describe_relation,
                                       .make_query_ir = pg_make_query_ir,
                                       .safe_functions = pg_safe_functions};
 

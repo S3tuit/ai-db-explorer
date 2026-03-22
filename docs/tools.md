@@ -49,6 +49,154 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
 }
 ```
 
+## describe_relation
+
+Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
+`outputSchema` documents below explicitly target JSON Schema 2020-12:
+
+```json
+{
+  "name": "describe_relation",
+  "title": "Describe Relation",
+  "description": "Describe one database relation available on a configured connection. Relations include base tables, views, materialized views, and foreign tables.",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "connectionName": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Database connection name, specified inside list_database_connections, to use."
+      },
+      "schemaName": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Schema that owns the relation."
+      },
+      "relationName": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Unqualified relation name."
+      }
+    },
+    "required": ["connectionName", "schemaName", "relationName"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "schemaName": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Schema that owns the described relation."
+      },
+      "relationName": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Unqualified relation name."
+      },
+      "relationKind": {
+        "type": "string",
+        "enum": ["table", "view", "materialized_view", "foreign_table"],
+        "description": "Backend relation kind."
+      },
+      "columns": {
+        "type": "array",
+        "description": "Columns in physical relation order. The broker computes sensitivity metadata centrally.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Column name."
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Human-readable database type name."
+            },
+            "sensitive": {
+              "type": "boolean",
+              "description": "True when the broker safety policy marks this column as sensitive."
+            },
+            "isPrimaryKey": {
+              "type": "boolean",
+              "description": "True when the column participates in the relation primary key."
+            },
+            "isForeignKey": {
+              "type": "boolean",
+              "description": "True when the column participates in at least one foreign-key constraint."
+            },
+            "references": {
+              "type": ["object", "null"],
+              "description": "Referenced target for a foreign key, or null when the column is not a foreign key. When one column participates in multiple foreign-key constraints, returns only the first referenced target.",
+              "properties": {
+                "schemaName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Schema that owns the referenced relation."
+                },
+                "relationName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Referenced relation name."
+                },
+                "columnName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Referenced column name."
+                }
+              },
+              "required": ["schemaName", "relationName", "columnName"],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "name",
+            "type",
+            "sensitive",
+            "isPrimaryKey",
+            "isForeignKey",
+            "references"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "isForeignKey": {
+                    "const": true
+                  }
+                },
+                "required": ["isForeignKey"]
+              },
+              "then": {
+                "properties": {
+                  "references": {
+                    "type": "object"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "references": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "required": ["schemaName", "relationName", "relationKind", "columns"],
+    "additionalProperties": false
+  }
+}
+```
+
 ## run_sql_query
 
 Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and

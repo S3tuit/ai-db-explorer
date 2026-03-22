@@ -7,7 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "pl_arena.h"
+#include "arena.h"
 #include "utils.h"
 
 /* We use just one round for the benchmark because that's the closest scenario
@@ -39,7 +39,7 @@ typedef struct BenchCase {
 /* Callback type for arena allocation strategies.
  * It borrows 'ar' and 'payload'; returns arena-owned pointer or NULL.
  */
-typedef char *(*BenchArenaAllocFn)(PlArena *ar, const char *payload,
+typedef char *(*BenchArenaAllocFn)(Arena *ar, const char *payload,
                                    uint32_t len);
 
 static volatile uint64_t g_guard_sink = 0;
@@ -155,27 +155,26 @@ static int bench_fill_payload(char *buf, uint32_t len) {
 /*---------------------------------------------------------------------------*/
 
 /* Arena callback: calloc + memcpy. */
-static char *bench_fn_arena_calloc(PlArena *ar, const char *payload,
+static char *bench_fn_arena_calloc(Arena *ar, const char *payload,
                                    uint32_t len) {
-  char *p = (char *)pl_arena_calloc(ar, len);
+  char *p = (char *)arena_calloc(ar, len);
   if (p)
     memcpy(p, payload, len);
   return p;
 }
 
 /* Arena callback: alloc + memcpy. */
-static char *bench_fn_arena_alloc(PlArena *ar, const char *payload,
+static char *bench_fn_arena_alloc(Arena *ar, const char *payload,
                                   uint32_t len) {
-  char *p = (char *)pl_arena_alloc(ar, len);
+  char *p = (char *)arena_alloc(ar, len);
   if (p)
     memcpy(p, payload, len);
   return p;
 }
 
 /* Arena callback: add (copy built-in). */
-static char *bench_fn_arena_add(PlArena *ar, const char *payload,
-                                uint32_t len) {
-  return (char *)pl_arena_add(ar, (void *)payload, len);
+static char *bench_fn_arena_add(Arena *ar, const char *payload, uint32_t len) {
+  return (char *)arena_add(ar, (void *)payload, len);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -221,7 +220,7 @@ static int bench_round_xmalloc(uint32_t len, uint32_t ops, const char *payload,
 }
 
 /* Runs one arena round using the given allocation callback.
- * When 'include_free' is non-zero the timing window covers pl_arena_clean too.
+ * When 'include_free' is non-zero the timing window covers arena_clean too.
  * It borrows 'payload' and writes elapsed ns to 'out_ns'.
  * Side effects: arena block allocations/frees and guard accumulation.
  * Error semantics: returns OK on success, ERR on invalid input/arena failure.
@@ -239,8 +238,8 @@ static int bench_round_arena(uint32_t len, uint32_t ops, const char *payload,
   if (init_sz > cap)
     init_sz = cap;
 
-  PlArena ar = {0};
-  if (pl_arena_init(&ar, &init_sz, &cap) != OK)
+  Arena ar = {0};
+  if (arena_init(&ar, &init_sz, &cap) != OK)
     return ERR;
 
   uint64_t checksum = 0;
@@ -248,7 +247,7 @@ static int bench_round_arena(uint32_t len, uint32_t ops, const char *payload,
   for (uint32_t i = 0; i < ops; i++) {
     char *p = alloc_fn(&ar, payload, len);
     if (!p) {
-      pl_arena_clean(&ar);
+      arena_clean(&ar);
       return ERR;
     }
     checksum += (uint8_t)p[0];
@@ -256,11 +255,11 @@ static int bench_round_arena(uint32_t len, uint32_t ops, const char *payload,
   }
   if (!include_free) {
     uint64_t t1 = bench_now_ns();
-    pl_arena_clean(&ar);
+    arena_clean(&ar);
     g_guard_sink ^= checksum;
     *out_ns = t1 - t0;
   } else {
-    pl_arena_clean(&ar);
+    arena_clean(&ar);
     uint64_t t1 = bench_now_ns();
     g_guard_sink ^= checksum;
     *out_ns = t1 - t0;
@@ -413,9 +412,9 @@ int main(void) {
   const uint32_t sizes[] = {8u, 16u, 32u, 64u, 128u};
   const BenchCase cases[] = {
       {BENCH_XMALLOC, "xmalloc"},
-      {BENCH_PL_ARENA_CALLOC, "pl_arena_calloc"},
-      {BENCH_PL_ARENA_ADD, "pl_arena_add"},
-      {BENCH_PL_ARENA_ALLOC, "pl_arena_alloc"},
+      {BENCH_PL_ARENA_CALLOC, "arena_calloc"},
+      {BENCH_PL_ARENA_ADD, "arena_add"},
+      {BENCH_PL_ARENA_ALLOC, "arena_alloc"},
   };
 
   char payload[128];

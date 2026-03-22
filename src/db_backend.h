@@ -42,6 +42,45 @@ typedef struct DbExecParam {
 } DbExecParam;
 
 typedef enum {
+  DBREL_KIND_NONE = 0,
+  DBREL_KIND_TABLE = 1,
+  DBREL_KIND_VIEW = 2,
+  DBREL_KIND_MATVIEW = 3,
+  DBREL_KIND_FOREIGN_TABLE = 4,
+} DbRelationKind;
+
+/* Backend-owned metadata for one relation column.
+ * All strings are owned by the parent DbRelationInfo arena.
+ * Foreign-key reference strings are NULL when is_foreign_key is 0.
+ * LIMITATION: v1 stores only the first referenced target when one column
+ * participates in multiple foreign-key constraints.
+ */
+typedef struct DbRelationColumn {
+  char *name;
+  char *type;
+  uint8_t is_primary_key;
+  uint8_t is_foreign_key;
+  char *ref_schema_name;
+  char *ref_relation_name;
+  char *ref_column_name;
+} DbRelationColumn;
+
+/* Materialized relation metadata returned by db_describe_relation().
+ * Ownership:
+ * - strings and the cols array are owned by the embedded arena
+ * - caller owns the DbRelationInfo itself and must destroy it with
+ *   db_relation_info_destroy()
+ */
+typedef struct DbRelationInfo {
+  char *schema_name;
+  char *relation_name;
+  DbRelationKind kind;
+  uint32_t ncols;
+  DbRelationColumn *cols;
+  Arena arena;
+} DbRelationInfo;
+
+typedef enum {
   DBEXEC_RESULT_NONE = 0,
   DBEXEC_RESULT_QUERY_RESULT = 1,
   DBEXEC_RESULT_TOOL_ERR = 2,
@@ -50,9 +89,9 @@ typedef enum {
 /* Result of one db_exec()/db_exec_bound() call.
  * Ownership:
  * - when kind is DBEXEC_RESULT_QUERY_RESULT, caller owns 'qr' and must destroy
- *   it with qr_destroy() or db_exec_result_clean().
+ *   it with db_exec_result_clean().
  * - when kind is DBEXEC_RESULT_TOOL_ERR, caller owns 'tool_err_msg' and must
- *   free it or call db_exec_result_clean().
+ *   call db_exec_result_clean().
  */
 typedef struct DbExecResult {
   DbExecResultKind kind;
@@ -61,6 +100,28 @@ typedef struct DbExecResult {
     char *tool_err_msg;
   };
 } DbExecResult;
+
+typedef enum {
+  DBDESCRIBE_RESULT_NONE = 0,
+  DBDESCRIBE_RESULT_RELATION_INFO = 1,
+  DBDESCRIBE_RESULT_TOOL_ERR = 2,
+} DbDescribeResultKind;
+
+/* Result of one db_describe_relation() call.
+ * Ownership:
+ * - when kind is DBDESCRIBE_RESULT_RELATION_INFO, caller owns
+ *   'relation_info' and must destroy it with db_relation_info_destroy() or
+ *   db_describe_result_clean().
+ * - when kind is DBDESCRIBE_RESULT_TOOL_ERR, caller owns 'tool_err_msg' and
+ *   must free it or call db_describe_result_clean().
+ */
+typedef struct DbDescribeResult {
+  DbDescribeResultKind kind;
+  union {
+    DbRelationInfo *relation_info;
+    char *tool_err_msg;
+  };
+} DbDescribeResult;
 
 typedef struct DbBackendVTable {
   // Establishes a connection described by 'profile' using 'pwd' when needed.
@@ -101,6 +162,15 @@ typedef struct DbBackendVTable {
                            const QueryResultBuildPolicy *qb_policy,
                            DbExecResult *out_res);
 
+  // Describes one schema-qualified relation and materializes relation
+  // metadata. The backend returns only DB facts; sensitivity is resolved by
+  // higher layers. Safe to call with uninitialized 'out_res'. Returns OK when
+  // 'out_res' is populated with either relation metadata or a tool error
+  // message, ERR on invalid input or backend/internal failure.
+  AdbxStatus (*describe_relation)(DbBackend *db, const char *schema_name,
+                                  const char *relation_name,
+                                  DbDescribeResult *out_res);
+
   // Creates a QirQueryHandle starting from 'sql'. The backend owns and
   // populates the handle, and the caller must destroy it via
   // qir_handle_destroy(). 'out_err' is optional and receives one typed
@@ -120,6 +190,47 @@ struct DbBackend {
 
 /* Returns the right DbBackend based on 'kind'. */
 DbBackend *db_backend_create(DbKind kind);
+
+/* Allocates one DbRelationInfo with storage for 'ncols' column entries.
+ * It returns a caller-owned relation info; destroy it with
+ * db_relation_info_destroy().
+ * Side effects: allocates one heap object, initializes an embedded arena, and
+ * allocates an arena-owned column array when ncols > 0.
+ * Returns a caller-owned DbRelationInfo on success, NULL on allocation or
+ * initialization failure.
+ */
+DbRelationInfo *db_relation_info_create(uint32_t ncols);
+
+/* Stores schema/relation identity metadata into 'info'.
+ * It borrows all inputs and copies strings into the info arena.
+ * Side effects: allocates arena-owned string storage.
+ * Returns OK on success, ERR on invalid input, unsupported relation kind, or
+ * arena-allocation failure.
+ */
+AdbxStatus db_relation_info_set_identity(DbRelationInfo *info,
+                                         const char *schema_name,
+                                         const char *relation_name,
+                                         DbRelationKind kind);
+
+/* Stores one column metadata entry into 'info->cols[idx]'.
+ * It borrows all inputs and copies any non-NULL strings into the info arena.
+ * Foreign-key reference strings must be all NULL when is_foreign_key is 0, and
+ * all non-empty when is_foreign_key is 1.
+ * Side effects: allocates arena-owned string storage.
+ * Returns OK on success, ERR on invalid input, out-of-bounds, or
+ * arena-allocation failure.
+ */
+AdbxStatus db_relation_info_set_col(
+    DbRelationInfo *info, uint32_t idx, const char *name, const char *type,
+    uint8_t is_primary_key, uint8_t is_foreign_key, const char *ref_schema_name,
+    const char *ref_relation_name, const char *ref_column_name);
+
+/* Frees one DbRelationInfo and all memory it owns.
+ * It consumes 'info'. NULL input is ignored.
+ * Side effects: releases arena-backed strings and the heap object itself.
+ * Error semantics: none.
+ */
+void db_relation_info_destroy(DbRelationInfo *info);
 
 /* Initializes one DbExecResult to empty state.
  * It borrows 'out' and does not allocate. NULL input is ignored.
@@ -144,7 +255,32 @@ AdbxStatus db_exec_result_set_qr(DbExecResult *out, QueryResult *qr);
  */
 AdbxStatus db_exec_result_set_tool_err(DbExecResult *out, const char *fmt, ...);
 
-/* Small helpers */
+/* Initializes one DbDescribeResult to empty state.
+ * It borrows 'out' and does not allocate. NULL input is ignored.
+ */
+void db_describe_result_init(DbDescribeResult *out);
+
+/* Releases any payload owned by 'out' and resets it to the empty state.
+ * It borrows 'out'. NULL input is ignored.
+ */
+void db_describe_result_clean(DbDescribeResult *out);
+
+/* Stores one successful relation metadata payload into 'out'.
+ * It borrows 'out' and takes ownership of 'info'. 'out' must be empty.
+ * Returns OK on success, ERR on invalid input or non-empty output state.
+ */
+AdbxStatus db_describe_result_set_relation_info(DbDescribeResult *out,
+                                                DbRelationInfo *info);
+
+/* Stores one formatted tool-error message into 'out'.
+ * It borrows 'out' and formatting inputs. 'out' must be empty.
+ * Returns OK on success, ERR on invalid input, allocation failure, or
+ * non-empty output state.
+ */
+AdbxStatus db_describe_result_set_tool_err(DbDescribeResult *out,
+                                           const char *fmt, ...);
+
+/*---------------------------------- helpers -------------------------------*/
 static inline AdbxStatus db_connect(DbBackend *db, const ConnProfile *profile,
                                     const SafetyPolicy *policy, const char *pwd,
                                     DbErr *out_err) {
@@ -195,6 +331,22 @@ static inline AdbxStatus db_exec_bound(DbBackend *db, const char *sql,
   if (!db || !db->vt || !db->vt->exec_bound || !out_res)
     return ERR;
   return db->vt->exec_bound(db, sql, params, nparams, qb_policy, out_res);
+}
+
+/* Describes one schema-qualified relation and materializes backend-owned
+ * metadata about its columns and key references.
+ * It borrows all inputs. 'out_res' may be uninitialized.
+ * Returns OK when 'out_res' is populated with either relation metadata or a
+ * tool error, ERR on invalid input or backend/internal failure.
+ */
+static inline AdbxStatus db_describe_relation(DbBackend *db,
+                                              const char *schema_name,
+                                              const char *relation_name,
+                                              DbDescribeResult *out_res) {
+  db_describe_result_init(out_res);
+  if (!db || !db->vt || !db->vt->describe_relation || !out_res)
+    return ERR;
+  return db->vt->describe_relation(db, schema_name, relation_name, out_res);
 }
 
 static inline AdbxStatus db_make_query_ir(DbBackend *db, const char *sql,

@@ -1,4 +1,5 @@
 DROP TABLE IF EXISTS zfighter_intel;
+DROP TABLE IF EXISTS zfighter_registry;
 DROP TABLE IF EXISTS zfighters;
 DROP TABLE IF EXISTS races;
 
@@ -17,12 +18,24 @@ CREATE TABLE zfighters (
 
 CREATE INDEX idx_zfighters_race_id ON zfighters(race_id);
 
+CREATE TABLE zfighter_registry (
+  fighter_id     INT PRIMARY KEY REFERENCES zfighters(id) ON UPDATE CASCADE ON DELETE CASCADE,
+  archival_code  TEXT NOT NULL UNIQUE
+);
+
 CREATE TABLE zfighter_intel (
   fighter_id       INT  PRIMARY KEY REFERENCES zfighters(id) ON UPDATE CASCADE ON DELETE CASCADE,
   codename         TEXT NOT NULL,
   scouter_serial   TEXT NOT NULL,
   home_coordinates TEXT NOT NULL
 );
+
+ALTER TABLE zfighter_intel
+  ADD CONSTRAINT zfighter_intel_fighter_registry_fk
+  FOREIGN KEY (fighter_id)
+  REFERENCES zfighter_registry(fighter_id)
+  ON UPDATE CASCADE
+  ON DELETE CASCADE;
 
 
 -- =========================
@@ -49,6 +62,18 @@ FROM (
     (8, 'Yamcha',  'Human',    183)
 ) AS v(id, name, race_name, height_cm)
 JOIN races r ON r.race_name = v.race_name;
+
+INSERT INTO zfighter_registry (fighter_id, archival_code)
+SELECT z.id, v.archival_code
+FROM (
+  VALUES
+    ('Goku',   'REG-0001'),
+    ('Vegeta', 'REG-0002'),
+    ('Gohan',  'REG-0003'),
+    ('Trunks', 'REG-0004'),
+    ('Broly',  'REG-0005')
+) AS v(name, archival_code)
+JOIN zfighters z ON z.name = v.name;
 
 INSERT INTO zfighter_intel (fighter_id, codename, scouter_serial, home_coordinates)
 SELECT z.id, v.codename, v.scouter_serial, v.home_coordinates

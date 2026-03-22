@@ -12,6 +12,7 @@ typedef enum {
   BRESP_KIND_TOOL_ERROR = 2,
   BRESP_KIND_QUERY_RESULT = 3,
   BRESP_KIND_CONN_PROFILES = 4,
+  BRESP_KIND_RELATION_INFO = 5,
 } BrokerResponseKind;
 
 typedef struct {
@@ -19,6 +20,11 @@ typedef struct {
   DbKind kind;
   int read_only;
 } BrespConnProfileSummary;
+
+typedef struct {
+  DbRelationInfo *info;
+  uint8_t *sensitive_cols;
+} BrespRelationInfoPayload;
 
 struct BrokerResponse {
   McpId id;
@@ -34,6 +40,7 @@ struct BrokerResponse {
       BrespConnProfileSummary *profiles;
       size_t n_profiles;
     } conn_profiles; // valid if BRESP_KIND_CONN_PROFILES
+    BrespRelationInfoPayload relation_info; // valid if BRESP_KIND_RELATION_INFO
   };
 };
 
@@ -128,6 +135,25 @@ static const char *bresp_db_kind_name(DbKind kind) {
   switch (kind) {
   case DB_KIND_POSTGRES:
     return "postgres";
+  default:
+    return NULL;
+  }
+}
+
+/* Returns the stable wire-format relation kind used in tool responses.
+ * It borrows no dynamic memory and performs no allocations.
+ * Returns a stable string on success, NULL for unsupported relation kinds.
+ */
+static const char *bresp_relation_kind_name(DbRelationKind kind) {
+  switch (kind) {
+  case DBREL_KIND_TABLE:
+    return "table";
+  case DBREL_KIND_VIEW:
+    return "view";
+  case DBREL_KIND_MATVIEW:
+    return "materialized_view";
+  case DBREL_KIND_FOREIGN_TABLE:
+    return "foreign_table";
   default:
     return NULL;
   }
@@ -308,6 +334,129 @@ static AdbxStatus bresp_append_conn_profiles_result(
   return OK;
 }
 
+/* Appends one nullable foreign-key reference object for a relation column.
+ * Returns OK on success, ERR on invalid input or serialization failure.
+ */
+static AdbxStatus bresp_append_relation_reference(StrBuf *sb,
+                                                  const DbRelationColumn *col) {
+  if (!sb || !col)
+    return ERR;
+
+  if (!col->is_foreign_key) {
+    if (col->ref_schema_name || col->ref_relation_name || col->ref_column_name)
+      return ERR;
+    return json_kv_null(sb, "references");
+  }
+
+  if (!col->ref_schema_name || !col->ref_relation_name || !col->ref_column_name)
+    return ERR;
+
+  if (json_kv_obj_begin(sb, "references") != OK)
+    return ERR;
+  if (json_kv_str(sb, "schemaName", col->ref_schema_name) != OK)
+    return ERR;
+  if (json_kv_str(sb, "relationName", col->ref_relation_name) != OK)
+    return ERR;
+  if (json_kv_str(sb, "columnName", col->ref_column_name) != OK)
+    return ERR;
+  if (json_obj_end(sb) != OK)
+    return ERR;
+
+  return OK;
+}
+
+/* Appends the structuredContent object for one described relation payload.
+ * Returns OK on success, ERR on invalid input or serialization failure.
+ */
+static AdbxStatus
+bresp_append_relation_info_structured(StrBuf *sb, const DbRelationInfo *info,
+                                      const uint8_t *sensitive_cols) {
+  const char *kind_name = NULL;
+
+  if (!sb || !info)
+    return ERR;
+  if (!info->schema_name || !info->relation_name)
+    return ERR;
+  if (info->ncols > 0 && (!info->cols || !sensitive_cols))
+    return ERR;
+
+  kind_name = bresp_relation_kind_name(info->kind);
+  if (!kind_name)
+    return ERR;
+
+  if (json_kv_obj_begin(sb, "structuredContent") != OK)
+    return ERR;
+  if (json_kv_str(sb, "schemaName", info->schema_name) != OK)
+    return ERR;
+  if (json_kv_str(sb, "relationName", info->relation_name) != OK)
+    return ERR;
+  if (json_kv_str(sb, "relationKind", kind_name) != OK)
+    return ERR;
+  if (json_kv_arr_begin(sb, "columns") != OK)
+    return ERR;
+
+  for (uint32_t i = 0; i < info->ncols; i++) {
+    const DbRelationColumn *col = &info->cols[i];
+    if (!col->name || !col->type)
+      return ERR;
+
+    if (json_obj_begin(sb) != OK)
+      return ERR;
+    if (json_kv_str(sb, "name", col->name) != OK)
+      return ERR;
+    if (json_kv_str(sb, "type", col->type) != OK)
+      return ERR;
+    if (json_kv_bool(sb, "sensitive", sensitive_cols[i] ? 1 : 0) != OK)
+      return ERR;
+    if (json_kv_bool(sb, "isPrimaryKey", col->is_primary_key ? 1 : 0) != OK)
+      return ERR;
+    if (json_kv_bool(sb, "isForeignKey", col->is_foreign_key ? 1 : 0) != OK)
+      return ERR;
+    if (bresp_append_relation_reference(sb, col) != OK)
+      return ERR;
+    if (json_obj_end(sb) != OK)
+      return ERR;
+  }
+
+  if (json_arr_end(sb) != OK)
+    return ERR;
+  if (json_obj_end(sb) != OK)
+    return ERR;
+
+  return OK;
+}
+
+/* Appends one successful describe_relation payload.
+ * Returns OK on success, ERR on invalid input or serialization failure.
+ */
+static AdbxStatus
+bresp_append_relation_info_result(StrBuf *sb, const DbRelationInfo *info,
+                                  const uint8_t *sensitive_cols) {
+  if (!sb || !info)
+    return ERR;
+
+  if (json_kv_obj_begin(sb, "result") != OK)
+    return ERR;
+  if (json_kv_arr_begin(sb, "content") != OK)
+    return ERR;
+  if (json_obj_begin(sb) != OK)
+    return ERR;
+  if (json_kv_str(sb, "type", "text") != OK)
+    return ERR;
+  if (json_kv_str(sb, "text", "Relation described successfully.") != OK)
+    return ERR;
+  if (json_obj_end(sb) != OK)
+    return ERR;
+  if (json_arr_end(sb) != OK)
+    return ERR;
+  if (bresp_append_relation_info_structured(sb, info, sensitive_cols) != OK)
+    return ERR;
+  if (json_obj_end(sb) != OK)
+    return ERR;
+
+  return OK;
+}
+
 /* Appends one JSON-RPC error object to the root response.
  * Returns OK on success, ERR on invalid input or serialization failure.
  */
@@ -417,6 +566,51 @@ BrokerResponse *bresp_create_conn_profiles(const McpId *id,
   return bresp;
 }
 
+BrokerResponse *bresp_create_relation_info(const McpId *id,
+                                           const ConnProfile *profile,
+                                           DbRelationInfo *info) {
+  BrokerResponse *bresp = NULL;
+  uint8_t *sensitive_cols = NULL;
+
+  if (!id || !profile || !info || !info->schema_name || !info->relation_name)
+    return NULL;
+  if (!bresp_relation_kind_name(info->kind))
+    return NULL;
+  if (info->ncols > 0 && !info->cols)
+    return NULL;
+
+  bresp = bresp_create_base(id);
+  if (!bresp)
+    return NULL;
+
+  if (info->ncols > 0) {
+    sensitive_cols = xmalloc(info->ncols * sizeof(*sensitive_cols));
+    for (uint32_t i = 0; i < info->ncols; i++) {
+      const DbRelationColumn *col = &info->cols[i];
+      if (!col->name || !col->type) {
+        free(sensitive_cols);
+        bresp_destroy(bresp);
+        return NULL;
+      }
+
+      AdbxTriStatus is_sensitive =
+          connp_is_col_sensitive(profile, info->schema_name, info->relation_name,
+                                 col->name);
+      if (is_sensitive == ERR) {
+        free(sensitive_cols);
+        bresp_destroy(bresp);
+        return NULL;
+      }
+      sensitive_cols[i] = (uint8_t)(is_sensitive == YES ? 1 : 0);
+    }
+  }
+
+  bresp->kind = BRESP_KIND_RELATION_INFO;
+  bresp->relation_info.info = info;
+  bresp->relation_info.sensitive_cols = sensitive_cols;
+  return bresp;
+}
+
 BrokerResponse *bresp_create_err(const McpId *id, BrespErrorCode code,
                                  const char *fmt, ...) {
   BrokerResponse *bresp = NULL;
@@ -476,6 +670,10 @@ void bresp_destroy(BrokerResponse *bresp) {
     }
     free(bresp->conn_profiles.profiles);
     break;
+  case BRESP_KIND_RELATION_INFO:
+    free(bresp->relation_info.sensitive_cols);
+    db_relation_info_destroy(bresp->relation_info.info);
+    break;
   default:
     break;
   }
@@ -511,6 +709,12 @@ AdbxStatus bresp_to_jsonrpc(const BrokerResponse *bresp, StrBuf *out_json) {
     if (bresp_append_conn_profiles_result(
             out_json, bresp->conn_profiles.profiles,
             bresp->conn_profiles.n_profiles) != OK)
+      goto err;
+    break;
+  case BRESP_KIND_RELATION_INFO:
+    if (bresp_append_relation_info_result(
+            out_json, bresp->relation_info.info,
+            bresp->relation_info.sensitive_cols) != OK)
       goto err;
     break;
   default:
