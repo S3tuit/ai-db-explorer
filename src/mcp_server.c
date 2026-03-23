@@ -478,10 +478,6 @@ static AdbxStatus mcpser_user_initialize_handshake(McpServer *s) {
     goto fail;
   if (json_obj_end(&sb) != OK)
     goto fail;
-  if (json_kv_obj_begin(&sb, "resources") != OK)
-    goto fail;
-  if (json_obj_end(&sb) != OK)
-    goto fail;
   if (json_obj_end(&sb) != OK)
     goto fail;
   if (json_kv_obj_begin(&sb, "serverInfo") != OK)

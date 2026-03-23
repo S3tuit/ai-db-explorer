@@ -11,6 +11,7 @@ RUN apt-get update \
         pkg-config \
         ca-certificates \
         python3 \
+        python3-jsonschema \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

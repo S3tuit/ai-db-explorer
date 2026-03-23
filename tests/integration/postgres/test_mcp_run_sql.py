@@ -3,6 +3,8 @@ import json
 import shutil
 import sys
 
+from json_utils_tests import assert_tool_payload_valid
+
 from test_broker_mcp_handshake import (
     do_full_handshake,
 )
@@ -27,6 +29,7 @@ def send_tools_call(server, req_id, connection_name, query):
             },
         },
     }
+    assert_tool_payload_valid("run_sql_query", "input", req["params"]["arguments"])
     write_frame(server, json.dumps(req).encode("utf-8"))
     return json.loads(read_frame(server).decode("utf-8"))
 
@@ -54,6 +57,7 @@ def test_run_sql_my_db():
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == "req-3"
         data = resp["result"]["structuredContent"]
+        assert_tool_payload_valid("run_sql_query", "output", data)
         assert data["columns"][0]["name"] == "height_cm"
         assert data["rows"] == [["220"]]
     finally:
@@ -82,6 +86,7 @@ def test_run_sql_another_db():
         )
         assert resp["jsonrpc"] == "2.0"
         assert resp["id"] == 4
+        assert_tool_payload_valid("run_sql_query", "output", resp["result"]["structuredContent"])
         rows = resp["result"]["structuredContent"]["rows"]
         names = [row[0] for row in rows]
         assert "Bench Press" in names

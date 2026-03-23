@@ -3,6 +3,7 @@ import json
 import shutil
 import sys
 
+from json_utils_tests import assert_tool_payload_valid
 from test_broker_mcp_handshake import do_full_handshake
 from test_mcp_run_sql import send_tools_call
 from test_user_mcp_handshake import read_frame, stop_proc, write_frame
@@ -13,6 +14,7 @@ def _assert_tools_call_ok(resp, req_id):
     assert resp["id"] == req_id
     assert "result" in resp
     assert resp["result"].get("isError") is not True
+    assert_tool_payload_valid("run_sql_query_tokens", "output", resp["result"]["structuredContent"])
     return resp["result"]["structuredContent"]
 
 
@@ -30,6 +32,7 @@ def send_tokens_tools_call(server, req_id, connection_name, query, parameters):
             },
         },
     }
+    assert_tool_payload_valid("run_sql_query_tokens", "input", req["params"]["arguments"])
     write_frame(server, json.dumps(req).encode("utf-8"))
     return json.loads(read_frame(server).decode("utf-8"))
 

@@ -11,9 +11,13 @@
 #include "handshake_codec.h"
 #include "private_dir.h"
 
-// TODO: we should be able to accept more than 1 McpServer with just one Broker.
-// We should make the code async, and use a real connection pool.
-#define MAX_CLIENTS 1
+// This is an admission cap for the single threaded broker, not really a
+// concurrency option. Right now, the bottleneck of concurrency is probably db
+// calls. Each client request makes the broker wait for the db call to finish
+// even if the broker could do something else in the meantime. Also, we don't
+// really use a pool of connections right now; we just keep a pool of one
+// connection per connectionName (see conn_manager).
+#define MAX_CLIENTS 4
 #define MAX_IDLE_SESSIONS (MAX_CLIENTS * 2)
 
 /* The entity is responsible for connecting to databases and running the

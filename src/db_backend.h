@@ -333,12 +333,6 @@ static inline AdbxStatus db_exec_bound(DbBackend *db, const char *sql,
   return db->vt->exec_bound(db, sql, params, nparams, qb_policy, out_res);
 }
 
-/* Describes one schema-qualified relation and materializes backend-owned
- * metadata about its columns and key references.
- * It borrows all inputs. 'out_res' may be uninitialized.
- * Returns OK when 'out_res' is populated with either relation metadata or a
- * tool error, ERR on invalid input or backend/internal failure.
- */
 static inline AdbxStatus db_describe_relation(DbBackend *db,
                                               const char *schema_name,
                                               const char *relation_name,

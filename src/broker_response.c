@@ -159,6 +159,27 @@ static const char *bresp_relation_kind_name(DbRelationKind kind) {
   }
 }
 
+/* Validates one DbRelationColumn before BrokerResponse takes ownership of the
+ * parent relation payload.
+ * It borrows 'col' and allocates no memory.
+ * Returns YES when the column metadata is structurally valid, NO when
+ * malformed, ERR on invalid input.
+ */
+static AdbxTriStatus bresp_relation_col_is_valid(const DbRelationColumn *col) {
+  if (!col)
+    return ERR;
+  if (!col->name || !col->type)
+    return NO;
+  if (!col->is_foreign_key) {
+    if (col->ref_schema_name || col->ref_relation_name || col->ref_column_name)
+      return NO;
+    return YES;
+  }
+  if (!col->ref_schema_name || !col->ref_relation_name || !col->ref_column_name)
+    return NO;
+  return YES;
+}
+
 /* Appends the structuredContent object for one successful QueryResult.
  * Returns OK on success, ERR on invalid input or serialization failure.
  */
@@ -587,7 +608,7 @@ BrokerResponse *bresp_create_relation_info(const McpId *id,
     sensitive_cols = xmalloc(info->ncols * sizeof(*sensitive_cols));
     for (uint32_t i = 0; i < info->ncols; i++) {
       const DbRelationColumn *col = &info->cols[i];
-      if (!col->name || !col->type) {
+      if (bresp_relation_col_is_valid(col) != YES) {
         free(sensitive_cols);
         bresp_destroy(bresp);
         return NULL;

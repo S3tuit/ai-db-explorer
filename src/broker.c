@@ -649,22 +649,22 @@ static AdbxStatus broker_get_or_init_store(BrokerMcpSession *sess,
 /* Borrowed context used by run_sql tool handlers.
  * It bundles request-scoped entities so handlers keep narrow signatures.
  */
-typedef struct BrokerRunSQLArgs {
+typedef struct BrokerRunArgs {
   Broker *b;
   BrokerMcpSession *sess;
   JsonGetter *jg;
   McpId *id;
-} BrokerRunSQLArgs;
+} BrokerRunArgs;
 
 /* Executes validated run_sql_query arguments and builds one BrokerResponse.
  * It borrows 'args' and allocates temporary strings and may allocate
- * '*out_resp'; caller owns/destroys '*out_resp'. Side effects: acquires/uses
- * DB connection through ConnManager and records connection usage on success.
- * Error semantics: this helper is fail-soft and returns void; it aims to set
+ * '*out_resp'; caller owns/destroys '*out_resp'.
+ * Side effects: acquires/uses DB connection through ConnManager and records
+ * connection usage on success. This is fail-soft and returns void; it sets
  * '*out_resp' to a response object and leaves it NULL only on catastrophic
  * allocation/copy failures.
  */
-static void broker_run_sql_query(const BrokerRunSQLArgs *args,
+static void broker_run_sql_query(const BrokerRunArgs *args,
                                  BrokerResponse **out_resp) {
   assert(args != NULL);
   assert(args->b != NULL);
@@ -795,14 +795,13 @@ free_n_return:
 }
 
 /* Handles the 'run_sql_query_tokens' tool call and produces one
- * BrokerResponse at 'out_resp'. It borrows 'args' and allocates temporary
- * decoded token strings that are always freed before return. Side effects:
- * parses hostile JSON token parameters and verifies session-bound token
- * metadata (connection name + generation). Error semantics: fail-soft helper;
- * writes '*out_resp' with a response object on malformed input and leaves
+ * BrokerResponse at 'out_resp'. It borrows 'args'.
+ * Side effects: acquires/uses one DB connection through ConnManager
+ * and records connection usage on success.
+ * Writes '*out_resp' with a response object on malformed input and leaves
  * '*out_resp' NULL only on catastrophic allocation failures.
  */
-static void broker_run_sql_query_tokens(const BrokerRunSQLArgs *args,
+static void broker_run_sql_query_tokens(const BrokerRunArgs *args,
                                         BrokerResponse **out_resp) {
   assert(args != NULL);
   assert(args->b != NULL);
@@ -1048,7 +1047,7 @@ free_n_return:
  * malformed input and leaves
  * '*out_resp' NULL only on catastrophic allocation failures.
  */
-static void broker_list_database_connections(const BrokerRunSQLArgs *args,
+static void broker_list_database_connections(const BrokerRunArgs *args,
                                              BrokerResponse **out_resp) {
   assert(args != NULL);
   assert(args->b != NULL);
@@ -1065,9 +1064,8 @@ static void broker_list_database_connections(const BrokerRunSQLArgs *args,
   const char *no_allowed[] = {""};
 
   AdbxTriStatus a_rc = jsget_object(jg, "params.arguments", &args_obj);
-  if (a_rc != YES ||
-      jsget_top_level_validation(&args_obj, NULL, no_allowed, 0, &unknown) !=
-          YES) {
+  if (a_rc != YES || jsget_top_level_validation(&args_obj, NULL, no_allowed, 0,
+                                                &unknown) != YES) {
     *out_resp = bresp_create_err(
         id, BRESPERR_INPARAM,
         "Invalid list_database_connections arguments: expected empty "
@@ -1095,6 +1093,122 @@ static void broker_list_database_connections(const BrokerRunSQLArgs *args,
   }
   *out_resp = br;
   return;
+}
+
+/* Handles the 'describe_relation' tool call and produces one BrokerResponse.
+ * It borrows 'args' and allocates temporary decoded strings and one response
+ * object. Side effects: acquires/uses one DB connection through ConnManager
+ * and records connection usage on success.
+ * This is fail-soft and returns void; it sets '*out_resp' to a response object
+ * and leaves it NULL only on catastrophic allocation failures.
+ */
+static void broker_describe_relation(const BrokerRunArgs *args,
+                                     BrokerResponse **out_resp) {
+  assert(args != NULL);
+  assert(args->b != NULL);
+  assert(args->sess != NULL);
+  assert(args->jg != NULL);
+  assert(args->id != NULL);
+  assert(out_resp != NULL);
+
+  Broker *b = args->b;
+  JsonGetter *jg = args->jg;
+  McpId *id = args->id;
+  JsonGetter args_obj = {0};
+  JsonStrSpan unknown = {0};
+  const char *allowed[] = {"connectionName", "schemaName", "relationName"};
+  char *conn_name = NULL;
+  char *schema_name = NULL;
+  char *relation_name = NULL;
+
+  AdbxTriStatus a_rc = jsget_object(jg, "params.arguments", &args_obj);
+  if (a_rc != YES ||
+      jsget_top_level_validation(&args_obj, NULL, allowed, ARRLEN(allowed),
+                                 &unknown) != YES) {
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INPARAM,
+        "Invalid describe_relation arguments: expected only "
+        "'connectionName', 'schemaName', and 'relationName' inside "
+        "'params.arguments'.");
+    goto free_n_return;
+  }
+
+  if (jsget_string_decode_alloc(jg, "params.arguments.connectionName",
+                                &conn_name) != YES ||
+      jsget_string_decode_alloc(jg, "params.arguments.schemaName",
+                                &schema_name) != YES ||
+      jsget_string_decode_alloc(jg, "params.arguments.relationName",
+                                &relation_name) != YES) {
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INPARAM,
+        "Invalid describe_relation arguments: expected string fields "
+        "'connectionName', 'schemaName', and 'relationName'.");
+    goto free_n_return;
+  }
+
+  ConnView cv = {0};
+  AdbxTriStatus rc = connm_get_connection(b->cm, conn_name, &cv);
+  if (rc == NO) {
+    *out_resp = bresp_create_err(id, BRESPERR_RESOURCE,
+                                 "Unknown connectionName '%s'.", conn_name);
+    goto free_n_return;
+  }
+  if (rc != YES || !cv.db || !cv.profile) {
+    *out_resp = bresp_create_tool_err(
+        id, "Unable to connect to connectionName '%s'.", conn_name);
+    goto free_n_return;
+  }
+
+  DbDescribeResult desc_res = {0};
+  if (db_describe_relation(cv.db, schema_name, relation_name, &desc_res) !=
+      OK) {
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INTERNAL,
+        "Internal error while describing relation '%s.%s' on connectionName "
+        "'%s'.",
+        schema_name, relation_name, conn_name);
+    goto free_n_return;
+  }
+
+  if (desc_res.kind == DBDESCRIBE_RESULT_TOOL_ERR) {
+    *out_resp = bresp_create_tool_err(
+        id, "%s",
+        desc_res.tool_err_msg ? desc_res.tool_err_msg
+                              : "Database relation describe failed.");
+    db_describe_result_clean(&desc_res);
+    goto free_n_return;
+  }
+
+  if (desc_res.kind != DBDESCRIBE_RESULT_RELATION_INFO ||
+      !desc_res.relation_info) {
+    db_describe_result_clean(&desc_res);
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INTERNAL,
+        "Internal error while describing relation '%s.%s' on connectionName "
+        "'%s'.",
+        schema_name, relation_name, conn_name);
+    goto free_n_return;
+  }
+
+  *out_resp =
+      bresp_create_relation_info(id, cv.profile, desc_res.relation_info);
+  if (!*out_resp) {
+    db_describe_result_clean(&desc_res);
+    *out_resp = bresp_create_err(
+        id, BRESPERR_INTERNAL,
+        "Internal error while serializing relation '%s.%s' on connectionName "
+        "'%s'.",
+        schema_name, relation_name, conn_name);
+    goto free_n_return;
+  }
+  desc_res.kind = DBDESCRIBE_RESULT_NONE;
+  desc_res.relation_info = NULL;
+  connm_mark_used(b->cm, conn_name);
+
+free_n_return:
+  free(conn_name);
+  free(schema_name);
+  free(relation_name);
 }
 
 /* Handles one framed broker request and produces one BrokerResponse.
@@ -1163,7 +1277,7 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
     goto return_res;
   }
 
-  BrokerRunSQLArgs run_args = {
+  BrokerRunArgs run_args = {
       .b = b,
       .sess = sess,
       .jg = &jg,
@@ -1179,6 +1293,9 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
 
   } else if (STREQ(name_sp.ptr, name_sp.len, "list_database_connections")) {
     broker_list_database_connections(&run_args, out_res);
+
+  } else if (STREQ(name_sp.ptr, name_sp.len, "describe_relation")) {
+    broker_describe_relation(&run_args, out_res);
 
     // Unknown tools
   } else {

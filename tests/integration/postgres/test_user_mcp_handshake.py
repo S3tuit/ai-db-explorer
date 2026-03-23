@@ -179,7 +179,7 @@ def test_handshake_ok():
         assert resp["id"] == 1
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
         assert "tools" in resp["result"]["capabilities"]
-        assert "resources" in resp["result"]["capabilities"]
+        assert "resources" not in resp["result"]["capabilities"]
         assert resp["result"]["serverInfo"]["name"] == "adbxplorer"
         assert resp["result"]["serverInfo"]["version"] == "0.0.1"
 
@@ -225,7 +225,7 @@ def test_notification_invalid_request():
         resp = do_user_handshake(server, 4, MCP_PROTOCOL_VERSION)
         assert resp["jsonrpc"] == "2.0"
 
-        # Notifications must not include an id; server should ignore them.
+        # Notifications must not include an id; server should ignore them in v1.
         note = {
             "jsonrpc": "2.0",
             "method": "notifications/test",

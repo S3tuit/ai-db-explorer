@@ -132,6 +132,107 @@ static void assert_conn_profile_json_obj(const JsonGetter *obj,
   free(type);
 }
 
+/* Returns the first borrowed ConnProfile from the shared test catalog.
+ * It borrows 'cat' and allocates nothing.
+ * Error semantics: assertions abort on malformed catalog fixtures.
+ */
+static const ConnProfile *test_catalog_first_profile(ConnCatalog *cat) {
+  ConnProfile *profile = NULL;
+
+  ASSERT_TRUE(cat != NULL);
+  ASSERT_TRUE(catalog_list(cat, &profile, 1) == 1);
+  ASSERT_TRUE(profile != NULL);
+  return profile;
+}
+
+/* Creates one DbRelationInfo with copied identity metadata.
+ * It borrows string inputs and returns a caller-owned relation info.
+ * Side effects: allocates one DbRelationInfo and its embedded arena storage.
+ * Error semantics: assertions abort on allocation or initialization failure.
+ */
+static DbRelationInfo *make_relation_info_impl(const char *schema_name,
+                                               const char *relation_name,
+                                               DbRelationKind kind,
+                                               uint32_t ncols,
+                                               const char *file, int line) {
+  DbRelationInfo *info = db_relation_info_create(ncols);
+  ASSERT_TRUE_AT(info != NULL, file, line);
+  ASSERT_TRUE_AT(
+      db_relation_info_set_identity(info, schema_name, relation_name, kind) ==
+          OK,
+      file, line);
+  return info;
+}
+
+#define MAKE_RELATION_INFO(schema_name, relation_name, kind, ncols)            \
+  make_relation_info_impl((schema_name), (relation_name), (kind), (ncols),    \
+                          __FILE__, __LINE__)
+
+/* Validates one column entry emitted by describe_relation.
+ * It borrows 'obj' and expected strings and allocates temporary decoded
+ * strings that are freed before returning.
+ * Error semantics: assertions abort on failure.
+ */
+static void assert_relation_col_json_obj(const JsonGetter *obj,
+                                         const char *expected_name,
+                                         const char *expected_type,
+                                         int expected_sensitive,
+                                         int expected_is_primary_key,
+                                         int expected_is_foreign_key,
+                                         const char *expected_ref_schema,
+                                         const char *expected_ref_relation,
+                                         const char *expected_ref_column) {
+  const char *allowed[] = {"name", "type",       "sensitive",
+                           "isPrimaryKey", "isForeignKey", "references"};
+  JsonStrSpan unknown = {0};
+  char *name = NULL;
+  char *type = NULL;
+  JsonGetter ref_obj = {0};
+  int sensitive = -1;
+  int is_primary_key = -1;
+  int is_foreign_key = -1;
+
+  ASSERT_TRUE(jsget_top_level_validation(obj, NULL, allowed, 6, &unknown) ==
+              YES);
+  ASSERT_TRUE(jsget_string_decode_alloc(obj, "name", &name) == YES);
+  ASSERT_TRUE(jsget_string_decode_alloc(obj, "type", &type) == YES);
+  ASSERT_TRUE(jsget_bool01(obj, "sensitive", &sensitive) == YES);
+  ASSERT_TRUE(jsget_bool01(obj, "isPrimaryKey", &is_primary_key) == YES);
+  ASSERT_TRUE(jsget_bool01(obj, "isForeignKey", &is_foreign_key) == YES);
+  ASSERT_STREQ(name, expected_name);
+  ASSERT_STREQ(type, expected_type);
+  ASSERT_TRUE(sensitive == expected_sensitive);
+  ASSERT_TRUE(is_primary_key == expected_is_primary_key);
+  ASSERT_TRUE(is_foreign_key == expected_is_foreign_key);
+
+  if (!expected_ref_schema && !expected_ref_relation && !expected_ref_column) {
+    ASSERT_TRUE(jsget_exists_nonnull(obj, "references") == NO);
+  } else {
+    char *ref_schema = NULL;
+    char *ref_relation = NULL;
+    char *ref_column = NULL;
+    ASSERT_TRUE(expected_ref_schema != NULL);
+    ASSERT_TRUE(expected_ref_relation != NULL);
+    ASSERT_TRUE(expected_ref_column != NULL);
+    ASSERT_TRUE(jsget_object(obj, "references", &ref_obj) == YES);
+    ASSERT_TRUE(
+        jsget_string_decode_alloc(&ref_obj, "schemaName", &ref_schema) == YES);
+    ASSERT_TRUE(jsget_string_decode_alloc(&ref_obj, "relationName",
+                                          &ref_relation) == YES);
+    ASSERT_TRUE(
+        jsget_string_decode_alloc(&ref_obj, "columnName", &ref_column) == YES);
+    ASSERT_STREQ(ref_schema, expected_ref_schema);
+    ASSERT_STREQ(ref_relation, expected_ref_relation);
+    ASSERT_STREQ(ref_column, expected_ref_column);
+    free(ref_schema);
+    free(ref_relation);
+    free(ref_column);
+  }
+
+  free(name);
+  free(type);
+}
+
 static void test_query_result_json_basic_rows_and_nulls(void) {
   const char *col_names[] = {"id", "name", "amount"};
   const char *col_types[] = {"int4", "text", NULL};
@@ -527,6 +628,206 @@ static void test_broker_response_to_jsonrpc_resets_out_json_on_error(void) {
   bresp_destroy(bresp);
 }
 
+/* Verifies describe_relation allows zero-column relation metadata and
+ * serializes an empty columns array rather than failing.
+ * It borrows the shared test catalog profile and transfers relation ownership
+ * into BrokerResponse on success.
+ */
+static void test_relation_info_broker_response_empty_columns(void) {
+  ConnCatalog *cat = load_test_catalog();
+  const ConnProfile *profile = test_catalog_first_profile(cat);
+  DbRelationInfo *info =
+      MAKE_RELATION_INFO("public", "empty_relation", DBREL_KIND_VIEW, 0);
+  McpId id = id_u32(21);
+  StrBuf json;
+  JsonGetter jg = {0};
+  JsonTokBuf tok_buf = {0};
+  JsonArrIter it = {0};
+  JsonGetter obj = {0};
+  char *schema_name = NULL;
+  char *relation_name = NULL;
+  char *relation_kind = NULL;
+  uint32_t got_id = 0;
+
+  BrokerResponse *bresp = bresp_create_relation_info(&id, profile, info);
+  ASSERT_TRUE(bresp != NULL);
+  info = NULL;
+
+  sb_init(&json);
+  ASSERT_TRUE(bresp_to_jsonrpc(bresp, &json) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json.data, json.len, &tok_buf) == OK);
+  ASSERT_TRUE(jsget_u32(&jg, "id", &got_id) == YES);
+  ASSERT_TRUE(got_id == 21);
+  ASSERT_TRUE(jsget_string_decode_alloc(&jg, "result.structuredContent.schemaName",
+                                        &schema_name) == YES);
+  ASSERT_TRUE(jsget_string_decode_alloc(&jg,
+                                        "result.structuredContent.relationName",
+                                        &relation_name) == YES);
+  ASSERT_TRUE(jsget_string_decode_alloc(&jg,
+                                        "result.structuredContent.relationKind",
+                                        &relation_kind) == YES);
+  ASSERT_STREQ(schema_name, "public");
+  ASSERT_STREQ(relation_name, "empty_relation");
+  ASSERT_STREQ(relation_kind, "view");
+  ASSERT_TRUE(jsget_array_objects_begin(&jg, "result.structuredContent.columns",
+                                        &it) == YES);
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == NO);
+
+  free(schema_name);
+  free(relation_name);
+  free(relation_kind);
+  sb_clean(&json);
+  bresp_destroy(bresp);
+  catalog_destroy(cat);
+}
+
+/* Verifies describe_relation rejects invalid pointers and malformed relation
+ * metadata rather than accepting payloads that would fail later during
+ * serialization.
+ * It borrows the shared test catalog profile and destroys any relation infos
+ * that remain caller-owned after constructor failure.
+ */
+static void test_relation_info_broker_response_bad_input(void) {
+  ConnCatalog *cat = load_test_catalog();
+  const ConnProfile *profile = test_catalog_first_profile(cat);
+  McpId id = id_u32(22);
+  DbRelationInfo *info = NULL;
+
+  info = MAKE_RELATION_INFO("public", "users", DBREL_KIND_TABLE, 0);
+  ASSERT_TRUE(bresp_create_relation_info(NULL, profile, info) == NULL);
+  db_relation_info_destroy(info);
+
+  info = MAKE_RELATION_INFO("public", "users", DBREL_KIND_TABLE, 0);
+  ASSERT_TRUE(bresp_create_relation_info(&id, NULL, info) == NULL);
+  db_relation_info_destroy(info);
+
+  ASSERT_TRUE(bresp_create_relation_info(&id, profile, NULL) == NULL);
+
+  info = MAKE_RELATION_INFO("public", "users", DBREL_KIND_TABLE, 0);
+  info->kind = DBREL_KIND_NONE;
+  ASSERT_TRUE(bresp_create_relation_info(&id, profile, info) == NULL);
+  db_relation_info_destroy(info);
+
+  info = MAKE_RELATION_INFO("public", "users", DBREL_KIND_TABLE, 1);
+  ASSERT_TRUE(db_relation_info_set_col(info, 0, "account_id", "int4", 0, 0,
+                                       NULL, NULL, NULL) == OK);
+  info->cols[0].is_foreign_key = 1;
+  ASSERT_TRUE(bresp_create_relation_info(&id, profile, info) == NULL);
+  db_relation_info_destroy(info);
+
+  info = MAKE_RELATION_INFO("public", "users", DBREL_KIND_TABLE, 1);
+  ASSERT_TRUE(
+      db_relation_info_set_col(info, 0, "age", "int4", 0, 0, NULL, NULL, NULL) ==
+      OK);
+  info->cols[0].name = NULL;
+  ASSERT_TRUE(bresp_create_relation_info(&id, profile, info) == NULL);
+  db_relation_info_destroy(info);
+
+  catalog_destroy(cat);
+}
+
+/* Verifies describe_relation serializes one valid relation payload with
+ * broker-computed sensitivity flags and nullable/non-null references as
+ * expected.
+ * It borrows the shared test catalog profile and transfers relation ownership
+ * into BrokerResponse on success.
+ */
+static void test_relation_info_broker_response_happy_path(void) {
+  ConnCatalog *cat = load_test_catalog();
+  const ConnProfile *profile = test_catalog_first_profile(cat);
+  DbRelationInfo *info =
+      MAKE_RELATION_INFO("public", "users", DBREL_KIND_TABLE, 3);
+  McpId id = id_u32(23);
+  StrBuf json;
+  JsonGetter jg = {0};
+  JsonTokBuf tok_buf = {0};
+  JsonArrIter it = {0};
+  JsonGetter obj = {0};
+  uint32_t got_id = 0;
+
+  ASSERT_TRUE(db_relation_info_set_col(info, 0, "fiscal_code", "text", 0, 0,
+                                       NULL, NULL, NULL) == OK);
+  ASSERT_TRUE(db_relation_info_set_col(info, 1, "age", "int4", 0, 0, NULL,
+                                       NULL, NULL) == OK);
+  ASSERT_TRUE(db_relation_info_set_col(info, 2, "account_id", "int4", 0, 1,
+                                       "public", "accounts", "id") == OK);
+
+  BrokerResponse *bresp = bresp_create_relation_info(&id, profile, info);
+  ASSERT_TRUE(bresp != NULL);
+  info = NULL;
+
+  sb_init(&json);
+  ASSERT_TRUE(bresp_to_jsonrpc(bresp, &json) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json.data, json.len, &tok_buf) == OK);
+  ASSERT_TRUE(jsget_u32(&jg, "id", &got_id) == YES);
+  ASSERT_TRUE(got_id == 23);
+  ASSERT_TRUE(jsget_array_objects_begin(&jg, "result.structuredContent.columns",
+                                        &it) == YES);
+
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+  assert_relation_col_json_obj(&obj, "fiscal_code", "text", 1, 0, 0, NULL,
+                               NULL, NULL);
+
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+  assert_relation_col_json_obj(&obj, "age", "int4", 0, 0, 0, NULL, NULL, NULL);
+
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+  assert_relation_col_json_obj(&obj, "account_id", "int4", 0, 0, 1, "public",
+                               "accounts", "id");
+
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == NO);
+  sb_clean(&json);
+  bresp_destroy(bresp);
+  catalog_destroy(cat);
+}
+
+/* Verifies describe_relation computes sensitivity eagerly and does not depend
+ * on borrowed ConnProfile/catalog state after BrokerResponse creation.
+ * It destroys the catalog and the original string-backed id before
+ * serialization.
+ */
+static void test_relation_info_broker_response_does_not_borrow_profile(void) {
+  ConnCatalog *cat = load_test_catalog();
+  const ConnProfile *profile = test_catalog_first_profile(cat);
+  DbRelationInfo *info =
+      MAKE_RELATION_INFO("public", "users", DBREL_KIND_TABLE, 1);
+  McpId id = {0};
+  StrBuf json;
+  JsonGetter jg = {0};
+  JsonTokBuf tok_buf = {0};
+  JsonArrIter it = {0};
+  JsonGetter obj = {0};
+  char *got_id = NULL;
+  int sensitive = -1;
+
+  ASSERT_TRUE(mcp_id_init_str_copy(&id, "rel-owned") == OK);
+  ASSERT_TRUE(db_relation_info_set_col(info, 0, "fiscal_code", "text", 0, 0,
+                                       NULL, NULL, NULL) == OK);
+
+  BrokerResponse *bresp = bresp_create_relation_info(&id, profile, info);
+  ASSERT_TRUE(bresp != NULL);
+  info = NULL;
+
+  catalog_destroy(cat);
+  cat = NULL;
+  mcp_id_clean(&id);
+
+  sb_init(&json);
+  ASSERT_TRUE(bresp_to_jsonrpc(bresp, &json) == OK);
+  ASSERT_TRUE(jsget_init(&jg, json.data, json.len, &tok_buf) == OK);
+  ASSERT_TRUE(jsget_string_decode_alloc(&jg, "id", &got_id) == YES);
+  ASSERT_TRUE(jsget_array_objects_begin(&jg, "result.structuredContent.columns",
+                                        &it) == YES);
+  ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == YES);
+  ASSERT_TRUE(jsget_bool01(&obj, "sensitive", &sensitive) == YES);
+  ASSERT_STREQ(got_id, "rel-owned");
+  ASSERT_TRUE(sensitive == 1);
+
+  free(got_id);
+  sb_clean(&json);
+  bresp_destroy(bresp);
+}
+
 int main(void) {
   test_query_result_json_basic_rows_and_nulls();
   test_query_result_json_null_qrcolumn_safe_defaults();
@@ -541,6 +842,10 @@ int main(void) {
   test_conn_profiles_broker_response_empty_list();
   test_broker_response_constructor_bad_input();
   test_broker_response_to_jsonrpc_resets_out_json_on_error();
+  test_relation_info_broker_response_empty_columns();
+  test_relation_info_broker_response_bad_input();
+  test_relation_info_broker_response_happy_path();
+  test_relation_info_broker_response_does_not_borrow_profile();
 
   fprintf(stderr, "OK: test_broker_response\n");
   return 0;
