@@ -438,12 +438,24 @@ static AdbxStatus mcpser_user_initialize_handshake(McpServer *s) {
 
   JsonStrSpan method = {0};
   JsonStrSpan proto = {0};
+  JsonStrSpan client_name = {0};
+  JsonStrSpan client_version = {0};
+  JsonGetter caps = {0};
+  JsonGetter client = {0};
   AdbxTriStatus mrc = jsget_string_span(&jg, "method", &method);
   // If the server supports the requested protocol version, it MUST respond
   // with the same version. Otherwise, the server MUST respond with another
   // protocol version it supports.
   AdbxTriStatus prc = jsget_string_span(&jg, "params.protocolVersion", &proto);
+  AdbxTriStatus crc = jsget_object(&jg, "params.capabilities", &caps);
+  AdbxTriStatus circ = jsget_object(&jg, "params.clientInfo", &client);
+  AdbxTriStatus cnrc =
+      jsget_string_span(&jg, "params.clientInfo.name", &client_name);
+  AdbxTriStatus cvrc =
+      jsget_string_span(&jg, "params.clientInfo.version", &client_version);
   if (mrc != YES || prc != YES || method.len == 0 ||
+      crc != YES || circ != YES || cnrc != YES || cvrc != YES ||
+      client_name.len == 0 || client_version.len == 0 ||
       method.len != strlen("initialize") ||
       memcmp(method.ptr, "initialize", method.len) != 0) {
     sb_clean(&req);

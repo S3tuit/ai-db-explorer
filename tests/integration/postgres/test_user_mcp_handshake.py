@@ -156,19 +156,38 @@ def read_proc_stderr(proc):
     return data if data is not None else ""
 
 
-def do_user_handshake(server, req_id, protocol_version):
+def send_initialize_request(server, req_id, protocol_version, params=None):
+    base_params = {
+        "protocolVersion": protocol_version,
+        "capabilities": {"elicitation": {}},
+        "clientInfo": {"name": "example-client", "version": "1.0.0"},
+    }
+    if params is not None:
+        base_params = params
+
     req = {
         "jsonrpc": "2.0",
         "id": req_id,
         "method": "initialize",
-        "params": {
-            "protocolVersion": protocol_version,
-            "capabilities": {"elicitation": {}},
-            "clientInfo": {"name": "example-client", "version": "1.0.0"},
-        },
+        "params": base_params,
     }
     write_frame(server, json.dumps(req).encode("utf-8"))
     return json.loads(read_frame(server).decode("utf-8"))
+
+
+def send_initialized_notification(server):
+    note = {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    }
+    write_frame(server, json.dumps(note).encode("utf-8"))
+
+
+def do_user_handshake(server, req_id, protocol_version):
+    resp = send_initialize_request(server, req_id, protocol_version)
+    if "result" in resp:
+        send_initialized_notification(server)
+    return resp
 
 
 def test_handshake_ok():
@@ -219,6 +238,25 @@ def test_handshake_invalid_json():
         stop_proc(server)
 
 
+def test_handshake_missing_client_info():
+    server = start_server()
+    try:
+        resp = send_initialize_request(
+            server,
+            33,
+            MCP_PROTOCOL_VERSION,
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {"elicitation": {}},
+            },
+        )
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == 33
+        assert resp["error"]["code"] == -32600
+    finally:
+        stop_proc(server)
+
+
 def test_notification_invalid_request():
     server = start_server()
     try:
@@ -247,6 +285,7 @@ def main():
         test_handshake_ok()
         test_handshake_bad_version()
         test_handshake_invalid_json()
+        test_handshake_missing_client_info()
         test_notification_invalid_request()
         print("OK: test_user_mcp_handshake")
     finally:
