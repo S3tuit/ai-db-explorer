@@ -13,7 +13,7 @@ LIBPG_QUERY_LIB := $(LIBPG_QUERY_DIR)/libpg_query.a
 LIBPG_QUERY_INC := -I$(LIBPG_QUERY_DIR)
 
 # Build flags
-CFLAGS  := -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O2 -flto
+CFLAGS  := -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O2 -flto=auto
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
 CFLAGS  += -DNDEBUG
 ifneq ($(strip $(LIBSECRET_LIBS)),)
