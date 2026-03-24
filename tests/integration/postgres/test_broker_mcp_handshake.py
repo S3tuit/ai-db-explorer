@@ -17,6 +17,7 @@ from test_user_mcp_handshake import (
     start_broker,
     start_server,
     read_frame,
+    send_ping_request,
     stop_proc,
     write_frame,
 )
@@ -288,6 +289,32 @@ def test_broker_absent_server_reports_unavailable_on_tools_call():
 
         call = _do_tools_call(server, "no-broker-tool")
         _assert_broker_unavailable_error(call, "no-broker-tool")
+    finally:
+        stop_proc(server)
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+        shutil.rmtree(privdir, ignore_errors=True)
+
+
+def test_broker_absent_server_still_answers_ping():
+    privdir = make_temp_privdir("broker-absent-ping")
+    runtime_dir = make_runtime_dir("restok-absent-ping")
+    server = None
+    try:
+        _prepare_privdir_for_server_start(privdir, os.urandom(SECRET_TOKEN_LEN))
+        server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+
+        resp = send_ping_request(server, "pre-init-ping")
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "pre-init-ping"
+        assert resp["result"] == {}
+
+        resp = do_user_handshake(server, "ping-no-broker", MCP_PROTOCOL_VERSION)
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+        resp = send_ping_request(server, "post-init-ping")
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "post-init-ping"
+        assert resp["result"] == {}
     finally:
         stop_proc(server)
         shutil.rmtree(runtime_dir, ignore_errors=True)

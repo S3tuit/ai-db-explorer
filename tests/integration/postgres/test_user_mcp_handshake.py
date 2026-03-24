@@ -183,6 +183,16 @@ def send_initialized_notification(server):
     write_frame(server, json.dumps(note).encode("utf-8"))
 
 
+def send_ping_request(server, req_id):
+    req = {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "ping",
+    }
+    write_frame(server, json.dumps(req).encode("utf-8"))
+    return json.loads(read_frame(server).decode("utf-8"))
+
+
 def do_user_handshake(server, req_id, protocol_version):
     resp = send_initialize_request(server, req_id, protocol_version)
     if "result" in resp:
@@ -257,6 +267,38 @@ def test_handshake_missing_client_info():
         stop_proc(server)
 
 
+def test_ping_before_initialize():
+    server = start_server()
+    try:
+        resp = send_ping_request(server, "ping-before-init")
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "ping-before-init"
+        assert resp["result"] == {}
+
+        resp = do_user_handshake(server, "post-ping-init", MCP_PROTOCOL_VERSION)
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "post-ping-init"
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+    finally:
+        stop_proc(server)
+
+
+def test_ping_after_initialize():
+    server = start_server()
+    try:
+        resp = do_user_handshake(server, "init-before-ping", MCP_PROTOCOL_VERSION)
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "init-before-ping"
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+        resp = send_ping_request(server, "ping-after-init")
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "ping-after-init"
+        assert resp["result"] == {}
+    finally:
+        stop_proc(server)
+
+
 def test_notification_invalid_request():
     server = start_server()
     try:
@@ -286,6 +328,8 @@ def main():
         test_handshake_bad_version()
         test_handshake_invalid_json()
         test_handshake_missing_client_info()
+        test_ping_before_initialize()
+        test_ping_after_initialize()
         test_notification_invalid_request()
         print("OK: test_user_mcp_handshake")
     finally:

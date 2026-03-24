@@ -10,6 +10,7 @@
 #include "resume_token.h"
 #include "utils.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,19 @@ static void mcpser_set_err(McpServer *s, const char *msg) {
 
 static AdbxStatus mcpser_send_error(McpServer *s, const McpId *id, long code,
                                     const char *msg, const char *requested);
+
+enum {
+  MCPSER_F_BROKER_READY = 1u << 0,     // we already handshaked with the broker
+  MCPSER_F_USER_INITIALIZED = 1u << 1, // the user already handshaked with us
+};
+
+typedef enum McpServerReqKind {
+  MCPSER_REQ_ERR = 0,
+  MCPSER_REQ_NOTIFICATION,
+  MCPSER_REQ_PING,
+  MCPSER_REQ_INITIALIZE,
+  MCPSER_REQ_BROKER_FORWARD,
+} McpServerReqKind;
 
 /* Marks broker channel as unavailable and drops its socket/channel resources.
  * Ownership: borrows 's'.
@@ -337,6 +351,43 @@ err:
   return ERR;
 }
 
+/* Writes a successful JSON-RPC response with an empty object result.
+ * It borrows 's' and 'id'; temporary JSON storage is freed before return.
+ * Side effects: writes one Content-Length frame to 's->out_bc'.
+ * Returns OK on successful serialization/write, ERR on invalid input,
+ * allocation failure, or output I/O failure.
+ */
+static AdbxStatus mcpser_send_empty_result(McpServer *s, const McpId *id) {
+  if (!s || !s->out_bc.ch || !id)
+    return ERR;
+
+  StrBuf sb;
+  sb_init(&sb);
+  if (json_rpc_begin(&sb) != OK)
+    goto err;
+  if (id->kind == MCP_ID_STR) {
+    if (json_kv_str(&sb, "id", id->str ? id->str : "") != OK)
+      goto err;
+  } else {
+    if (json_kv_u64(&sb, "id", id->u32) != OK)
+      goto err;
+  }
+  if (json_kv_obj_begin(&sb, "result") != OK)
+    goto err;
+  if (json_obj_end(&sb) != OK)
+    goto err;
+  if (json_obj_end(&sb) != OK)
+    goto err;
+
+  AdbxStatus rc = frame_write_cl(&s->out_bc, sb.data, sb.len);
+  sb_clean(&sb);
+  return rc;
+
+err:
+  sb_clean(&sb);
+  return ERR;
+}
+
 AdbxStatus mcpser_init(McpServer *s, const McpServerInit *init) {
   if (!s || !init || !init->in || !init->out || !init->privd)
     return ERR;
@@ -375,109 +426,177 @@ AdbxStatus mcpser_init(McpServer *s, const McpServerInit *init) {
   return OK;
 }
 
-/* Validates and answers the user-facing MCP "initialize" JSON-RPC request.
- * Ownership: borrows 's'; allocates temporary request/response buffers and
- * frees them before return.
- * Side effects: reads one Content-Length-framed request from stdin channel and
- * writes one framed response (or error) to stdout channel.
- * Error semantics: returns OK on valid initialize flow, ERR on malformed input
- * framing/JSON, write failure, or protocol mismatch.
+/* Validates one parsed JSON-RPC envelope without requiring an 'id' member.
+ * It borrows 'jg' and writes the method span plus optional id into
+ * caller-owned outputs. String ids transfer ownership to caller.
+ * Returns YES on a valid JSON-RPC envelope, NO when the payload is not a valid
+ * JSON-RPC request/notification shape, ERR on invalid input pointers or
+ * allocation failure while decoding a string id.
  */
-static AdbxStatus mcpser_user_initialize_handshake(McpServer *s) {
-  if (!s)
+static AdbxTriStatus mcpser_parse_rpc_envelope(const JsonGetter *jg,
+                                               JsonStrSpan *out_method,
+                                               McpId *out_id,
+                                               int *out_has_id01) {
+  if (!jg || !out_method || !out_id || !out_has_id01)
     return ERR;
 
-  StrBuf req;
-  sb_init(&req);
-  AdbxTriStatus rc = frame_read_cl(&s->in_bc, &req);
-  if (rc != YES) {
-    sb_clean(&req);
-    return ERR;
+  memset(out_method, 0, sizeof(*out_method));
+  memset(out_id, 0, sizeof(*out_id));
+  *out_has_id01 = 0;
+
+  JsonStrSpan jsonrpc = {0};
+  if (jsget_string_span(jg, "jsonrpc", &jsonrpc) != YES)
+    return NO;
+  if (memcmp(jsonrpc.ptr, "2.0", 3) != 0)
+    return NO;
+  if (jsget_string_span(jg, "method", out_method) != YES ||
+      out_method->len == 0)
+    return NO;
+
+  uint32_t id_u32 = 0;
+  char *id_str = NULL;
+  AdbxTriStatus urc = jsget_u32(jg, "id", &id_u32);
+  AdbxTriStatus src = jsget_string_decode_alloc(jg, "id", &id_str);
+  if (urc == YES) {
+    out_id->kind = MCP_ID_INT;
+    out_id->u32 = id_u32;
+    *out_has_id01 = 1;
+    return YES;
   }
+  if (src == YES) {
+    out_id->kind = MCP_ID_STR;
+    out_id->str = id_str;
+    *out_has_id01 = 1;
+    return YES;
+  }
+  free(id_str);
 
-  const char *json = req.data;
+  if (urc == NO && src == NO)
+    return YES;
+  return NO;
+}
 
-  JsonGetter jg;
-  JsonTokBuf tok_buf = {0};
-  AdbxStatus irc = jsget_init(&jg, json, req.len, &tok_buf);
+/* Parses and classifies one user JSON-RPC frame stored in 'req'.
+ * It initializes 'out_jg' and 'out_tok_buf'. It writes an optional owned id,
+ * and a request kind into caller-owned outputs. Malformed requests are rejected
+ * locally with JSON-RPC errors. Side effects: may write JSON-RPC error
+ * responses to 's->out_bc'. Returns YES when classification succeeded, NO when
+ * the request was rejected/ignored locally, ERR on invalid input pointers or
+ * failed error-response writes.
+ * Safe to call with unitialized '*_out' inputs.
+ */
+static AdbxTriStatus mcpser_parse_user_req(McpServer *s, const StrBuf *req,
+                                           JsonGetter *out_jg,
+                                           JsonTokBuf *out_tok_buf,
+                                           McpId *id_out,
+                                           McpServerReqKind *out_kind) {
+  if (!s || !req || !out_jg || !out_tok_buf || !id_out || !out_kind)
+    return ERR;
+
+  memset(out_jg, 0, sizeof(*out_jg));
+  memset(id_out, 0, sizeof(*id_out));
+  *out_kind = MCPSER_REQ_ERR;
+
+  AdbxStatus irc = jsget_init(out_jg, req->data, req->len, out_tok_buf);
   if (irc != OK) {
-    TLOG("ERROR - handshake parse failed (invalid JSON or token overflow, "
-         "len=%zu)",
-         req.len);
-  }
-  // if it's not a valid JSON-RPC, we still try to find a top-leve "id" key
-  // before returning the error
-  AdbxTriStatus vrc = (irc == OK) ? jsget_simple_rpc_validation(&jg) : ERR;
-
-  McpId id = {0};
-  const McpId *idp = NULL;
-  if (irc == OK) {
-    if (jsget_u32(&jg, "id", &id.u32) == YES) {
-      id.kind = MCP_ID_INT;
-      idp = &id;
-    } else {
-      char *id_str = NULL;
-      AdbxTriStatus src = jsget_string_decode_alloc(&jg, "id", &id_str);
-      if (src == YES) {
-        id.kind = MCP_ID_STR;
-        id.str = id_str;
-        idp = &id;
-      }
+    fprintf(stderr, "McpServer: malformed input\n");
+    TLOG("ERROR - invalid JSON in MCP input or token overflow (len=%zu)",
+         req->len);
+    if (mcpser_send_error(s, NULL, -32600, "Malformed JSON-RPC request.",
+                          NULL) != OK) {
+      mcpser_set_err(s, "failed to write error response");
+      return ERR;
     }
-  }
-
-  if (vrc != YES) {
-    sb_clean(&req);
-    (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
-    TLOG("ERROR - handshake: invalid JSON-RPC");
-    mcpser_set_err(s, "handshake rejected invalid request");
-    if (idp)
-      mcp_id_clean(&id);
-    return ERR;
+    return NO;
   }
 
   JsonStrSpan method = {0};
-  JsonStrSpan proto = {0};
-  JsonStrSpan client_name = {0};
-  JsonStrSpan client_version = {0};
-  JsonGetter caps = {0};
-  JsonGetter client = {0};
-  AdbxTriStatus mrc = jsget_string_span(&jg, "method", &method);
-  // If the server supports the requested protocol version, it MUST respond
-  // with the same version. Otherwise, the server MUST respond with another
-  // protocol version it supports.
-  AdbxTriStatus prc = jsget_string_span(&jg, "params.protocolVersion", &proto);
-  AdbxTriStatus crc = jsget_object(&jg, "params.capabilities", &caps);
-  AdbxTriStatus circ = jsget_object(&jg, "params.clientInfo", &client);
-  AdbxTriStatus cnrc =
-      jsget_string_span(&jg, "params.clientInfo.name", &client_name);
-  AdbxTriStatus cvrc =
-      jsget_string_span(&jg, "params.clientInfo.version", &client_version);
-  if (mrc != YES || prc != YES || method.len == 0 ||
-      crc != YES || circ != YES || cnrc != YES || cvrc != YES ||
-      client_name.len == 0 || client_version.len == 0 ||
-      method.len != strlen("initialize") ||
-      memcmp(method.ptr, "initialize", method.len) != 0) {
-    sb_clean(&req);
-    (void)mcpser_send_error(s, idp, -32600, "Invalid Request.", NULL);
-    TLOG("ERROR - handshake: invalid initialize request");
-    mcpser_set_err(s, "handshake rejected invalid initialize");
-    if (idp)
-      mcp_id_clean(&id);
-    return ERR;
+  int has_id01 = 0;
+  AdbxTriStatus prc =
+      mcpser_parse_rpc_envelope(out_jg, &method, id_out, &has_id01);
+  if (prc != YES) {
+    TLOG("ERROR - invalid JSON-RPC envelope");
+    if (mcpser_send_error(s, NULL, -32600, "Invalid JSON-RPC request.", NULL) !=
+        OK) {
+      mcpser_set_err(s, "failed to write error response");
+      return ERR;
+    }
+    return NO;
   }
 
-  sb_clean(&req);
+  if (has_id01 != YES) {
+    // in v1 we don't give much importance to notification, if a request is a
+    // valida JSON and doesn't have an id we treat it a notification
+    *out_kind = MCPSER_REQ_NOTIFICATION;
+    return YES;
+  }
+
+  if (STREQ(method.ptr, method.len, "ping")) {
+    *out_kind = MCPSER_REQ_PING;
+    return YES;
+  }
+  if (STREQ(method.ptr, method.len, "initialize")) {
+    *out_kind = MCPSER_REQ_INITIALIZE;
+    return YES;
+  }
+  *out_kind = MCPSER_REQ_BROKER_FORWARD;
+  return YES;
+}
+
+/* Validates and answers one parsed user-facing MCP "initialize" request with
+ * 'id'. It requires 'jg' to have already consumed the request On success it
+ * marks the user-facing session as initialized. Side effects: writes one framed
+ * response (or error) to stdout and sets MCPSER_F_USER_INITIALIZED. Returns YES
+ * on successful initialize response, NO when the request is rejected with a
+ * JSON-RPC error, ERR on invalid input or write failure.
+ */
+static AdbxTriStatus mcpser_user_initialize_handshake(McpServer *s,
+                                                      const JsonGetter *jg,
+                                                      const McpId *id) {
+  if (!s || !jg || !id)
+    return ERR;
+
+  if ((s->flags & MCPSER_F_USER_INITIALIZED) != 0) {
+    if (mcpser_send_error(s, id, -32600,
+                          "Invalid Request: initialize may only be sent once.",
+                          NULL) != OK) {
+      mcpser_set_err(s, "failed to write error response");
+      return ERR;
+    }
+    return NO;
+  }
+
+  JsonStrSpan proto;
+  JsonStrSpan client_name;
+  JsonStrSpan client_version;
+  JsonGetter caps;
+  JsonGetter client;
+  AdbxTriStatus prc = jsget_string_span(jg, "params.protocolVersion", &proto);
+  AdbxTriStatus crc = jsget_object(jg, "params.capabilities", &caps);
+  AdbxTriStatus circ = jsget_object(jg, "params.clientInfo", &client);
+  AdbxTriStatus cnrc =
+      jsget_string_span(jg, "params.clientInfo.name", &client_name);
+  AdbxTriStatus cvrc =
+      jsget_string_span(jg, "params.clientInfo.version", &client_version);
+  if (prc != YES || crc != YES || circ != YES || cnrc != YES || cvrc != YES ||
+      client_name.len == 0 || client_version.len == 0) {
+    if (mcpser_send_error(s, id, -32600, "Invalid Request.", NULL) != OK) {
+      mcpser_set_err(s, "failed to write error response");
+      return ERR;
+    }
+    TLOG("ERROR - handshake: invalid initialize request");
+    return NO;
+  }
 
   StrBuf sb;
   sb_init(&sb);
   if (json_rpc_begin(&sb) != OK)
     goto fail;
-  if (id.kind == MCP_ID_STR) {
-    if (json_kv_str(&sb, "id", id.str ? id.str : "") != OK)
+  if (id->kind == MCP_ID_STR) {
+    if (json_kv_str(&sb, "id", id->str ? id->str : "") != OK)
       goto fail;
   } else {
-    if (json_kv_u64(&sb, "id", id.u32) != OK)
+    if (json_kv_u64(&sb, "id", id->u32) != OK)
       goto fail;
   }
   if (json_kv_obj_begin(&sb, "result") != OK)
@@ -507,126 +626,21 @@ static AdbxStatus mcpser_user_initialize_handshake(McpServer *s) {
 
   AdbxStatus wrc = frame_write_cl(&s->out_bc, sb.data, sb.len);
   sb_clean(&sb);
-  if (id.kind == MCP_ID_STR)
-    mcp_id_clean(&id);
-  return wrc;
+  if (wrc != OK)
+    return ERR;
+  s->flags |= MCPSER_F_USER_INITIALIZED;
+  return YES;
 
 fail:
   sb_clean(&sb);
-  if (id.kind == MCP_ID_STR)
-    mcp_id_clean(&id);
   return ERR;
 }
 
-/* Validates one user JSON-RPC request frame before broker forwarding.
- * Ownership: borrows 's' and 'req'; writes parsed id to caller-owned 'id_out'
- * (string id ownership transfers to caller when return is YES).
- * Side effects: may write JSON-RPC error replies to 's->out_bc' for invalid
- * requests.
- * Error semantics: returns YES for valid request, NO for non-fatal
- * reject/ignore (error already sent or notification without id), ERR when
- * processing must stop (typically failed error-response write or invalid input
- * pointers).
- */
-static AdbxTriStatus mcpser_validate_user_req(McpServer *s, const StrBuf *req,
-                                              McpId *id_out,
-                                              const McpId **idp_out) {
-  if (!s || !req || !id_out || !idp_out)
-    return ERR;
-
-  memset(id_out, 0, sizeof(*id_out));
-  *idp_out = NULL;
-
-  JsonGetter jg;
-  JsonTokBuf tok_buf = {0};
-  AdbxStatus irc = jsget_init(&jg, req->data, req->len, &tok_buf);
-  if (irc != OK) {
-    fprintf(stderr, "McpServer: malformed input\n");
-    TLOG("ERROR - invalid JSON in MCP input or token overflow (len=%zu)",
-         req->len);
-    if (mcpser_send_error(s, NULL, -32600, "Malformed JSON-RPC request",
-                          NULL) != OK) {
-      mcpser_set_err(s, "failed to write error response");
-      return ERR;
-    }
-    return NO;
-  }
-
-  if (jsget_u32(&jg, "id", &id_out->u32) == YES) {
-    id_out->kind = MCP_ID_INT;
-    *idp_out = id_out;
-  } else {
-    char *id_str = NULL;
-    AdbxTriStatus src = jsget_string_decode_alloc(&jg, "id", &id_str);
-    if (src == YES) {
-      id_out->kind = MCP_ID_STR;
-      id_out->str = id_str;
-      *idp_out = id_out;
-    } else if (src == NO) {
-      // Notifications have no id; ignore them for now.
-      return NO;
-    } else {
-      TLOG("ERROR - invalid id in JSON-RPC request");
-      if (mcpser_send_error(s, NULL, -32600, "Invalid JSON-RPC request.",
-                            NULL) != OK) {
-        mcpser_set_err(s, "failed to write error response");
-        return ERR;
-      }
-      return NO;
-    }
-  }
-
-  AdbxTriStatus vrc = jsget_simple_rpc_validation(&jg);
-  if (vrc != YES) {
-    fprintf(stderr, "McpServer: invalid input\n");
-    TLOG("ERROR - invalid JSON-RPC envelope");
-    if (mcpser_send_error(s, *idp_out, -32600, "Invalid JSON-RPC request.",
-                          NULL) != OK) {
-      mcpser_set_err(s, "failed to write error response");
-      if (id_out->kind == MCP_ID_STR)
-        mcp_id_clean(id_out);
-      return ERR;
-    }
-    if (id_out->kind == MCP_ID_STR)
-      mcp_id_clean(id_out);
-    *idp_out = NULL;
-    return NO;
-  }
-
-  // Overflow guard before narrowing request length to uint32 for broker frame.
-  if (req->len > UINT32_MAX) {
-    fprintf(stderr, "McpServer: request too large\n");
-    TLOG("ERROR - request too large: len=%zu", req->len);
-    if (mcpser_send_error(s, *idp_out, -32600, "Request too large.", NULL) !=
-        OK) {
-      mcpser_set_err(s, "failed to write error response");
-      if (id_out->kind == MCP_ID_STR)
-        mcp_id_clean(id_out);
-      return ERR;
-    }
-    if (id_out->kind == MCP_ID_STR)
-      mcp_id_clean(id_out);
-    *idp_out = NULL;
-    return NO;
-  }
-
-  return YES;
-}
-
 AdbxStatus mcpser_run(McpServer *s) {
-  // This is the flow of McpServer:
-  // handshake -> read JSON-RPC -> validate -> write to broker -> read from
-  // broker -> write to out channel
   if (!s || !s->in_bc.ch || !s->out_bc.ch || !s->privd)
     return ERR;
 
-  AdbxStatus hrc = mcpser_user_initialize_handshake(s);
-  if (hrc != OK)
-    return ERR;
-  TLOG("INFO - handshake complete, entering main loop");
-
   for (;;) {
-    // McpServer reads JSON-RPC request
     StrBuf req;
     sb_init(&req);
     AdbxTriStatus rc = frame_read_cl(&s->in_bc, &req);
@@ -644,9 +658,13 @@ AdbxStatus mcpser_run(McpServer *s) {
       return ERR;
     }
 
-    McpId id = {0};
-    const McpId *idp = NULL;
-    AdbxTriStatus vrc = mcpser_validate_user_req(s, &req, &id, &idp);
+    JsonGetter jg; // this will read from req, so we must not use it after free
+                   // clean/destroy req
+    JsonTokBuf tok_buf;
+    McpId id;
+    McpServerReqKind kind;
+    AdbxTriStatus vrc =
+        mcpser_parse_user_req(s, &req, &jg, &tok_buf, &id, &kind);
     if (vrc == ERR) {
       sb_clean(&req);
       return ERR;
@@ -656,20 +674,72 @@ AdbxStatus mcpser_run(McpServer *s) {
       continue;
     }
 
+    // in v1 we just ignore notifications
+    if (kind == MCPSER_REQ_NOTIFICATION) {
+      sb_clean(&req);
+      mcp_id_clean(&id);
+      continue;
+    }
+
+    if (kind == MCPSER_REQ_PING) {
+      sb_clean(&req);
+      if (mcpser_send_empty_result(s, &id) != OK) {
+        mcp_id_clean(&id);
+        mcpser_set_err(s, "failed to write ping response");
+        return ERR;
+      }
+      mcp_id_clean(&id);
+      continue;
+    }
+
+    if (kind == MCPSER_REQ_INITIALIZE) {
+      AdbxTriStatus hrc = mcpser_user_initialize_handshake(s, &jg, &id);
+      sb_clean(&req);
+      mcp_id_clean(&id);
+      if (hrc == ERR)
+        return ERR;
+      continue;
+    }
+
+    if (req.len > UINT32_MAX) {
+      sb_clean(&req);
+      if (mcpser_send_error(s, &id, -32600, "Request too large.", NULL) != OK) {
+        mcp_id_clean(&id);
+        mcpser_set_err(s, "failed to write error response");
+        return ERR;
+      }
+      mcp_id_clean(&id);
+      continue;
+    }
+
+    /* Here we have requests that have to be forwarded to the broker. */
+
+    if ((s->flags & MCPSER_F_USER_INITIALIZED) == 0) {
+      sb_clean(&req);
+      if (mcpser_send_error(s, &id, -32600,
+                            "Server not initialized: expected initialize "
+                            "request before normal operations.",
+                            NULL) != OK) {
+        mcp_id_clean(&id);
+        mcpser_set_err(s, "failed to write error response");
+        return ERR;
+      }
+      mcp_id_clean(&id);
+      continue;
+    }
+
     // Keep fail-closed semantics: never process requests without a live broker
     // handshake, but keep MCP server alive and reply with explicit errors.
     if (mcpser_connect_and_handshake_broker(s) != OK) {
       fprintf(stderr, "McpServer: broker unavailable\n");
       TLOG("ERROR - broker connect+handshake failed for request");
       sb_clean(&req);
-      if (mcpser_send_broker_unavailable(s, idp) != OK) {
+      if (mcpser_send_broker_unavailable(s, &id) != OK) {
         mcpser_set_err(s, "failed to write error response");
-        if (idp)
-          mcp_id_clean(&id);
+        mcp_id_clean(&id);
         return ERR;
       }
-      if (idp)
-        mcp_id_clean(&id);
+      mcp_id_clean(&id);
       continue;
     }
 
@@ -679,14 +749,12 @@ AdbxStatus mcpser_run(McpServer *s) {
       sb_clean(&req);
       TLOG("ERROR - failed to write request to broker");
       (void)mcpser_invalidate_broker(s);
-      if (mcpser_send_broker_unavailable(s, idp) != OK) {
+      if (mcpser_send_broker_unavailable(s, &id) != OK) {
         mcpser_set_err(s, "failed to write error response");
-        if (idp)
-          mcp_id_clean(&id);
+        mcp_id_clean(&id);
         return ERR;
       }
-      if (idp)
-        mcp_id_clean(&id);
+      mcp_id_clean(&id);
       continue;
     }
     sb_clean(&req);
@@ -700,14 +768,12 @@ AdbxStatus mcpser_run(McpServer *s) {
       sb_clean(&resp);
       TLOG("ERROR - failed to read response from broker");
       (void)mcpser_invalidate_broker(s);
-      if (mcpser_send_broker_unavailable(s, idp) != OK) {
+      if (mcpser_send_broker_unavailable(s, &id) != OK) {
         mcpser_set_err(s, "failed to write error response");
-        if (idp)
-          mcp_id_clean(&id);
+        mcp_id_clean(&id);
         return ERR;
       }
-      if (idp)
-        mcp_id_clean(&id);
+      mcp_id_clean(&id);
       continue;
     }
 
@@ -717,14 +783,12 @@ AdbxStatus mcpser_run(McpServer *s) {
       sb_clean(&resp);
       TLOG("ERROR - failed to write response to stdout");
       mcpser_set_err(s, "failed to write to stdout");
-      if (idp)
-        mcp_id_clean(&id);
+      mcp_id_clean(&id);
       return ERR;
     }
 
     sb_clean(&resp);
-    if (idp)
-      mcp_id_clean(&id);
+    mcp_id_clean(&id);
   }
 }
 
