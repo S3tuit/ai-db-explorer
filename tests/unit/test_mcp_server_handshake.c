@@ -11,11 +11,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "app_dir.h"
 #include "file_io.h"
 #include "frame_codec.h"
 #include "handshake_codec.h"
 #include "mcp_server.h"
-#include "private_dir.h"
 #include "resume_token.h"
 #include "stdio_byte_channel.h"
 #include "test.h"
@@ -272,33 +272,33 @@ assert_persisted_token_eq(const uint8_t expected[RESUME_TOKEN_LEN]) {
   restok_clean(&store);
 }
 
-/* Opens one private-dir runtime so run/ and secret/ exist for client-side
+/* Opens one app-dir runtime so run/ and secret/ exist for client-side
  * handshake tests.
- * Ownership: borrows 'pd' and returns owned runtime to caller.
- * Side effects: creates the broker private-dir layout and writes an initial
+ * Ownership: borrows 'appd' and returns owned runtime to caller.
+ * Side effects: creates the broker app-dir layout and writes an initial
  * token file.
  * Error semantics: asserts on setup failures and returns non-NULL runtime.
  */
-static PrivDirBrokerRuntime *setup_private_runtime(const PrivDir *pd) {
-  ASSERT_TRUE(pd != NULL);
-  PrivDirBrokerRuntime *rt = privdir_broker_runtime_open(pd, NULL);
+static AppDirBrokerRuntime *setup_appdir_runtime(const AppDir *appd) {
+  ASSERT_TRUE(appd != NULL);
+  AppDirBrokerRuntime *rt = appdir_broker_runtime_open(appd, NULL, NULL);
   ASSERT_TRUE(rt != NULL);
   return rt;
 }
 
-/* Writes broker shared secret token file into resolved private directory.
- * Ownership: borrows 'pd' and token bytes.
+/* Writes broker shared secret token file into resolved app directory.
+ * Ownership: borrows 'appd' and token bytes.
  * Side effects: replaces the shared secret token file used by mcp_server tests.
  * Error semantics: asserts on setup failures.
  */
-static void setup_secret_token_file(const PrivDir *pd,
+static void setup_secret_token_file(const AppDir *appd,
                                     const uint8_t secret[SECRET_TOKEN_LEN]) {
-  ASSERT_TRUE(pd != NULL);
-  ASSERT_TRUE(pd->token_path != NULL);
+  ASSERT_TRUE(appd != NULL);
+  ASSERT_TRUE(appd->token_path != NULL);
   ASSERT_TRUE(secret != NULL);
 
-  ASSERT_TRUE(
-      fileio_write_exact(pd->token_path, secret, SECRET_TOKEN_LEN, 0600) == OK);
+  ASSERT_TRUE(fileio_write_exact(appd->token_path, secret, SECRET_TOKEN_LEN,
+                                 0600) == OK);
 }
 
 /* Verifies first-time broker handshake stores returned resume token. */
@@ -306,15 +306,18 @@ static void test_handshake_new_session_persists_token(void) {
   char *tmpdir = make_tmpdir();
   set_runtime_env(tmpdir);
 
-  PrivDir *pd = privdir_resolve(tmpdir, NULL);
-  ASSERT_TRUE(pd != NULL);
-  PrivDirBrokerRuntime *rt = setup_private_runtime(pd);
+  char *app_dir = path_join(tmpdir, APPDIR_APP_DIRNAME);
+  ASSERT_TRUE(app_dir != NULL);
+  AppDir *appd = appdir_resolve(app_dir, NULL);
+  free(app_dir);
+  ASSERT_TRUE(appd != NULL);
+  AppDirBrokerRuntime *rt = setup_appdir_runtime(appd);
 
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
   for (size_t i = 0; i < SECRET_TOKEN_LEN; i++) {
     secret[i] = (uint8_t)(i + 1);
   }
-  setup_secret_token_file(pd, secret);
+  setup_secret_token_file(appd, secret);
 
   uint8_t issued[RESUME_TOKEN_LEN] = {0};
   for (size_t i = 0; i < RESUME_TOKEN_LEN; i++) {
@@ -322,7 +325,7 @@ static void test_handshake_new_session_persists_token(void) {
   }
 
   MockBrokerCtx ctx = {0};
-  ctx.sock_path = pd->sock_path;
+  ctx.sock_path = appd->sock_path;
   memcpy(ctx.expected_secret, secret, SECRET_TOKEN_LEN);
   ctx.n_steps = 1;
   ctx.steps[0].expect_resume = NO;
@@ -331,7 +334,7 @@ static void test_handshake_new_session_persists_token(void) {
 
   pthread_t tid;
   ASSERT_TRUE(pthread_create(&tid, NULL, mock_broker_thread, &ctx) == 0);
-  ASSERT_TRUE(wait_for_path(pd->sock_path, 1000) == OK);
+  ASSERT_TRUE(wait_for_path(appd->sock_path, 1000) == OK);
 
   FILE *in = MEMFILE_OUT();
   FILE *out = MEMFILE_OUT();
@@ -339,7 +342,7 @@ static void test_handshake_new_session_persists_token(void) {
   McpServerInit init = {
       .in = in,
       .out = out,
-      .privd = pd,
+      .appd = appd,
   };
   int init_rc = mcpser_init(&server, &init);
   if (init_rc != OK)
@@ -354,9 +357,9 @@ static void test_handshake_new_session_persists_token(void) {
 
   assert_persisted_token_eq(issued);
 
-  privdir_broker_runtime_clean(rt);
-  ASSERT_TRUE(rmdir(pd->app_dir) == 0);
-  privdir_clean(pd);
+  appdir_broker_runtime_clean(rt);
+  ASSERT_TRUE(rmdir(appd->app_dir) == 0);
+  appdir_clean(appd);
   (void)rmdir(tmpdir);
   free(tmpdir);
 }
@@ -366,15 +369,18 @@ static void test_handshake_retry_after_unknown_resume(void) {
   char *tmpdir = make_tmpdir();
   set_runtime_env(tmpdir);
 
-  PrivDir *pd = privdir_resolve(tmpdir, NULL);
-  ASSERT_TRUE(pd != NULL);
-  PrivDirBrokerRuntime *rt = setup_private_runtime(pd);
+  char *app_dir = path_join(tmpdir, APPDIR_APP_DIRNAME);
+  ASSERT_TRUE(app_dir != NULL);
+  AppDir *appd = appdir_resolve(app_dir, NULL);
+  free(app_dir);
+  ASSERT_TRUE(appd != NULL);
+  AppDirBrokerRuntime *rt = setup_appdir_runtime(appd);
 
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
   for (size_t i = 0; i < SECRET_TOKEN_LEN; i++) {
     secret[i] = (uint8_t)(0x11u + i);
   }
-  setup_secret_token_file(pd, secret);
+  setup_secret_token_file(appd, secret);
 
   uint8_t stale[RESUME_TOKEN_LEN] = {0};
   for (size_t i = 0; i < RESUME_TOKEN_LEN; i++) {
@@ -392,7 +398,7 @@ static void test_handshake_retry_after_unknown_resume(void) {
   }
 
   MockBrokerCtx ctx = {0};
-  ctx.sock_path = pd->sock_path;
+  ctx.sock_path = appd->sock_path;
   memcpy(ctx.expected_secret, secret, SECRET_TOKEN_LEN);
   ctx.n_steps = 2;
   ctx.steps[0].expect_resume = YES;
@@ -404,7 +410,7 @@ static void test_handshake_retry_after_unknown_resume(void) {
 
   pthread_t tid;
   ASSERT_TRUE(pthread_create(&tid, NULL, mock_broker_thread, &ctx) == 0);
-  ASSERT_TRUE(wait_for_path(pd->sock_path, 1000) == OK);
+  ASSERT_TRUE(wait_for_path(appd->sock_path, 1000) == OK);
 
   FILE *in = MEMFILE_OUT();
   FILE *out = MEMFILE_OUT();
@@ -412,7 +418,7 @@ static void test_handshake_retry_after_unknown_resume(void) {
   McpServerInit init = {
       .in = in,
       .out = out,
-      .privd = pd,
+      .appd = appd,
   };
   int init_rc = mcpser_init(&server, &init);
   if (init_rc != OK) {
@@ -428,9 +434,9 @@ static void test_handshake_retry_after_unknown_resume(void) {
 
   assert_persisted_token_eq(fresh);
 
-  privdir_broker_runtime_clean(rt);
-  ASSERT_TRUE(rmdir(pd->app_dir) == 0);
-  privdir_clean(pd);
+  appdir_broker_runtime_clean(rt);
+  ASSERT_TRUE(rmdir(appd->app_dir) == 0);
+  appdir_clean(appd);
   (void)rmdir(tmpdir);
   free(tmpdir);
 }

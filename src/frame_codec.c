@@ -50,7 +50,11 @@ AdbxStatus frame_read_len(BufChannel *bc, StrBuf *out_payload) {
   return OK;
 }
 
-AdbxStatus frame_write_cl(BufChannel *bc, const void *payload, size_t n) {
+/* Writes Content-Length framed payload:
+ * "Content-Length: <n>\r\n\r\n" + payload.
+ * NOTE: use this only to write things the user should see. */
+static AdbxStatus frame_write_cl(BufChannel *bc, const void *payload,
+                                 size_t n) {
   if (!bc)
     return ERR;
   if (!payload && n != 0)
@@ -65,28 +69,98 @@ AdbxStatus frame_write_cl(BufChannel *bc, const void *payload, size_t n) {
   return bufch_write2v(bc, hdr, (size_t)rc, payload, n);
 }
 
-/* Parses Content-Length from a header. */
-static AdbxStatus parse_content_length(const char *hdr, size_t len,
-                                       size_t *out_len) {
-  if (!hdr || !out_len)
+/* Writes one newline-delimited JSON payload.
+ * It borrows 'bc' and 'payload'.
+ * Side effects: writes 'payload' plus one trailing '\n'.
+ * Return conventions: returns OK on success, ERR on invalid input or write
+ * failure.
+ */
+static AdbxStatus frame_write_jsonl(BufChannel *bc, const void *payload,
+                                    size_t n) {
+  static const char nl = '\n';
+
+  if (!bc)
+    return ERR;
+  if (!payload && n != 0)
+    return ERR;
+
+  return bufch_write2v(bc, payload, n, &nl, sizeof(nl));
+}
+
+/* Returns YES when 'ch' is optional HTTP-style whitespace accepted around
+ * header values, NO otherwise.
+ */
+static int frame_is_header_ws(char ch) {
+  return (ch == ' ' || ch == '\t') ? YES : NO;
+}
+
+/* Lowercases one ASCII byte without locale effects so header matching stays
+ * deterministic across environments.
+ * Returns the lowercased ASCII byte, or 'ch' unchanged for non-uppercase bytes.
+ */
+static char frame_ascii_tolower(char ch) {
+  if (ch >= 'A' && ch <= 'Z')
+    return (char)(ch - 'A' + 'a');
+  return ch;
+}
+
+/* Compares one header name span against 'expected' using ASCII-only
+ * case-insensitive matching.
+ * Return conventions: YES when the spans match, NO when they differ or inputs
+ * are invalid.
+ */
+static int frame_header_name_eq(const char *name, size_t name_len,
+                                const char *expected) {
+  if (!name || !expected)
+    return NO;
+
+  size_t expected_len = strlen(expected);
+  if (name_len != expected_len)
+    return NO;
+
+  for (size_t i = 0; i < name_len; i++) {
+    if (frame_ascii_tolower(name[i]) != frame_ascii_tolower(expected[i]))
+      return NO;
+  }
+  return YES;
+}
+
+/* Parses one decimal Content-Length value from a single header line value span.
+ * It borrows 'src' and writes the validated payload size into caller-owned
+ * 'out_len'.
+ * Returns OK on a valid non-negative decimal length that fits local limits, ERR
+ * on malformed syntax, overflow, or unsupported size.
+ */
+static AdbxStatus frame_parse_content_length_value(const char *src, size_t len,
+                                                   size_t *out_len) {
+  if (!src || !out_len)
     return ERR;
   *out_len = 0;
-  (void)len;
 
-  const char *needle = "Content-Length:";
-  const char *p = strstr(hdr, needle);
-  if (!p)
-    return ERR;
-  p += strlen(needle);
-  while (*p == ' ' || *p == '\t')
-    p++;
-
-  char *endptr = NULL;
-  unsigned long long v = strtoull(p, &endptr, 10);
-  if (endptr == p)
+  size_t i = 0;
+  while (i < len && frame_is_header_ws(src[i]) == YES)
+    i++;
+  if (i == len)
     return ERR;
 
-  // we can't handle these much bytes and makes no sense doing it
+  unsigned long long v = 0;
+  int saw_digit = NO;
+  while (i < len && src[i] >= '0' && src[i] <= '9') {
+    unsigned digit = (unsigned)(src[i] - '0');
+    if (v > (ULLONG_MAX - digit) / 10ULL)
+      return ERR;
+    v = (v * 10ULL) + digit;
+    saw_digit = YES;
+    i++;
+  }
+  if (saw_digit != YES)
+    return ERR;
+
+  while (i < len && frame_is_header_ws(src[i]) == YES)
+    i++;
+  if (i != len)
+    return ERR;
+
   if (v > STRBUF_MAX_BYTES)
     return ERR;
   if (v > SIZE_MAX)
@@ -96,20 +170,166 @@ static AdbxStatus parse_content_length(const char *hdr, size_t len,
   return OK;
 }
 
-AdbxTriStatus frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
+/* Parses one complete Content-Length header block terminated by CRLFCRLF.
+ * It borrows 'hdr' and writes the unique validated payload size into
+ * caller-owned 'out_len'.
+ * Returns OK on exactly one valid Content-Length header, ERR on malformed
+ * lines, missing/duplicate Content-Length, overflow, or other framing
+ * violations.
+ */
+static AdbxStatus parse_content_length(const char *hdr, size_t len,
+                                       size_t *out_len) {
+  if (!hdr || !out_len)
+    return ERR;
+  *out_len = 0;
+  if (len < 4)
+    return ERR;
+
+  int seen_content_length = NO;
+  size_t pos = 0;
+  while (pos < len) {
+    size_t line_end = pos;
+    while ((line_end + 1) < len &&
+           !(hdr[line_end] == '\r' && hdr[line_end + 1] == '\n')) {
+      line_end++;
+    }
+    if ((line_end + 1) >= len)
+      return ERR;
+
+    // The first blank line must be the CRLF that terminates the header block.
+    if (line_end == pos)
+      return ((pos + 2) == len && seen_content_length == YES) ? OK : ERR;
+
+    size_t colon = pos;
+    while (colon < line_end && hdr[colon] != ':')
+      colon++;
+    if (colon == pos || colon == line_end)
+      return ERR;
+
+    if (frame_header_name_eq(hdr + pos, colon - pos, "Content-Length") == YES) {
+      if (seen_content_length == YES)
+        return ERR;
+      if (frame_parse_content_length_value(
+              hdr + colon + 1, line_end - (colon + 1), out_len) != OK) {
+        return ERR;
+      }
+      seen_content_length = YES;
+    }
+
+    pos = line_end + 2;
+  }
+
+  return ERR;
+}
+
+/* Reads one newline-delimited JSON payload, trimming the trailing line ending.
+ * It borrows 'bc' and writes payload bytes into caller-owned 'out_payload'.
+ * Side effects: reads from the underlying channel, consumes exactly one
+ * newline-terminated frame, and skips blank lines.
+ * Return conventions: returns YES on a non-empty line payload, NO on clean EOF
+ * before a new frame, ERR on oversized or truncated lines.
+ */
+static AdbxTriStatus frame_read_jsonl(BufChannel *bc, StrBuf *out_payload) {
+  if (!bc || !out_payload)
+    return ERR;
+
+  out_payload->len = 0;
+  sb_clean(out_payload);
+
+  const size_t max_line_bytes = 1u << 20;
+  for (;;) {
+    ssize_t idx = bufch_find_buffered(bc, "\n", 1);
+    if (idx >= 0) {
+      size_t line_len = (size_t)idx + 1u;
+      char *dst = NULL;
+      if (sb_prepare_for_write(out_payload, line_len, &dst) != OK)
+        return ERR;
+      if (bufch_read_exact(bc, dst, line_len) != OK) {
+        sb_clean(out_payload);
+        return ERR;
+      }
+
+      size_t payload_len = line_len;
+      if (payload_len > 0 && dst[payload_len - 1] == '\n')
+        payload_len--;
+      if (payload_len > 0 && dst[payload_len - 1] == '\r')
+        payload_len--;
+
+      out_payload->len = payload_len;
+      if (payload_len == 0) {
+        sb_clean(out_payload);
+        continue;
+      }
+      return YES;
+    }
+
+    size_t avail = 0;
+    (void)bufch_peek(bc, &avail);
+    if (avail >= max_line_bytes)
+      return ERR;
+
+    AdbxTriStatus rc = bufch_ensure(bc, avail + 1u);
+    if (rc == YES)
+      continue;
+    if (rc == NO)
+      return (avail == 0) ? NO : ERR;
+    return ERR;
+  }
+}
+
+/* Detects whether the next MCP stdio frame uses JSONL or Content-Length
+ * framing.
+ * It borrows 'bc' and peeks buffered bytes without consuming them.
+ * Side effects: may read from the underlying channel to inspect the first
+ * payload byte.
+ * Return conventions: returns YES on successful detection and writes the style
+ * into 'out_style', NO on clean EOF before a frame, ERR on invalid input or
+ * read failure.
+ */
+static AdbxTriStatus frame_detect_rpc_style(BufChannel *bc,
+                                            FrameRpcStyle *out_style) {
+  if (!bc || !out_style)
+    return ERR;
+  *out_style = FRAME_RPC_STYLE_UNKNOWN;
+
+  AdbxTriStatus rc = bufch_ensure(bc, 1);
+  if (rc != YES)
+    return rc;
+
+  size_t avail = 0;
+  const uint8_t *buf = bufch_peek(bc, &avail);
+  if (!buf || avail == 0)
+    return ERR;
+
+  if (buf[0] == '{' || buf[0] == '[') {
+    *out_style = FRAME_RPC_STYLE_JSONL;
+    return YES;
+  }
+
+  *out_style = FRAME_RPC_STYLE_CONTENT_LENGTH;
+  return YES;
+}
+
+/* Reads Content-Length framed payload into out_payload.
+ * Returns YES on success, NO on clean EOF before header, ERR on framing error.
+ */
+static AdbxTriStatus frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
   if (!bc || !out_payload)
     return ERR;
   out_payload->len = 0;
   // Ensure no previous allocation leaks when reusing the StrBuf.
   sb_clean(out_payload);
 
-  // Header is short: "Content-Length: " + up to 20 digits + "\r\n\r\n".
-  // 52 bytes is a strict cap to avoid unbounded scanning.
-  const size_t max_hdr_scan = 52;
+  // Allow reasonable stdio header growth (for example Content-Type or trace
+  // headers) while still bounding memory and scan work.
+  const size_t max_hdr_scan = 4096;
   ssize_t idx = bufch_findn(bc, "\r\n\r\n", 4, max_hdr_scan);
   if (idx < 0) {
-    // bufch_findn doesn't expose EOF vs "not found"; consult bc->eof.
-    return bc->eof ? NO : ERR;
+    // A clean EOF with no buffered bytes means the peer closed before the next
+    // frame started. Any buffered partial header is malformed.
+    size_t avail = 0;
+    (void)bufch_peek(bc, &avail);
+    return (bc->eof && avail == 0) ? NO : ERR;
   }
   size_t hdr_len = (size_t)idx + 4;
 
@@ -138,4 +358,27 @@ AdbxTriStatus frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
     return ERR;
   }
   return YES;
+}
+
+AdbxStatus frame_write_rpc(BufChannel *bc, const void *payload, size_t n,
+                           FrameRpcStyle style) {
+  if (style == FRAME_RPC_STYLE_JSONL)
+    return frame_write_jsonl(bc, payload, n);
+  return frame_write_cl(bc, payload, n);
+}
+
+AdbxTriStatus frame_read_rpc(BufChannel *bc, StrBuf *out_payload,
+                             FrameRpcStyle *out_style) {
+  if (!bc || !out_payload || !out_style)
+    return ERR;
+
+  FrameRpcStyle style = FRAME_RPC_STYLE_UNKNOWN;
+  AdbxTriStatus rc = frame_detect_rpc_style(bc, &style);
+  if (rc != YES)
+    return rc;
+
+  *out_style = style;
+  if (style == FRAME_RPC_STYLE_JSONL)
+    return frame_read_jsonl(bc, out_payload);
+  return frame_read_cl(bc, out_payload);
 }

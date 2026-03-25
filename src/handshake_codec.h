@@ -8,8 +8,8 @@
 
 #define MCP_PROTOCOL_VERSION "2025-11-25"
 
-/* Shared token length used by broker handshake secret and private-dir token
- * file representation. */
+/* Shared token length used by broker handshake secret and app-dir token file
+ * representation. */
 #define ADBX_SHARED_TOKEN_LEN 32u
 
 /* Shared resume-token length used by broker and MCP-side token cache. */

@@ -1,10 +1,10 @@
+#include "app_dir.h"
 #include "broker.h"
 #include "config_dir.h"
 #include "conn_catalog.h"
 #include "cred_manager.h"
 #include "log.h"
 #include "mcp_server.h"
-#include "private_dir.h"
 #include "secret_store.h"
 #include "utils.h"
 
@@ -24,7 +24,7 @@ typedef enum {
 static void print_usage(const char *prog) {
   fprintf(stderr,
           "Usage:\n"
-          "  %s [-client|-broker] [-privdir <path>] [-config <path>]\n"
+          "  %s [-client|-broker] [-appdir <path>] [-config <path>]\n"
           "  %s -cred (--sync|-s [connection] | --test|-t [connection] |\n"
           "           --reset|-r (<namespace> | --everything))\n"
           "           [-config <path>]\n",
@@ -105,12 +105,8 @@ static AdbxStatus finalize_cred_req(CredManagerReq *req, int seen_cmd,
   }
 }
 
-/* Runs one credential-manager command selected from the CLI.
- * It borrows 'req' and 'config_input'. The cred manager owns any internal
- * allocations; this wrapper frees only the returned heap error string.
- * Side effects: may prompt on the terminal, read config, and update secret
- * store / credential state depending on the selected command.
- * Returns 0 on success, 1 on failure or invalid input.
+/* Runs one credential-manager command selected from the CLI and prints any
+ * error. Returns 0 on success, 1 on failure or invalid input.
  */
 static int run_cred_mode(const CredManagerReq *req, const char *config_input) {
   char *err = NULL;
@@ -124,26 +120,14 @@ static int run_cred_mode(const CredManagerReq *req, const char *config_input) {
   return 0;
 }
 
-/* Prints one broker-init error tailored for the most common private-dir
- * misconfiguration.
- * It borrows 'pd' and reads process errno and filesystem existence state.
+/* Prints one startup error derived from 'err'. Falls back to strerror(errno)
+ * when no typed message is available.
  */
-static void print_broker_init_error(const PrivDir *pd) {
-  if (!pd || !pd->base) {
-    fprintf(stderr, "ERROR: broker init failed: %s\n", strerror(errno));
-    return;
-  }
-
-  if (errno == ENOENT && access(pd->base, F_OK) != 0) {
-    fprintf(stderr,
-            "ERROR: broker init failed: private-dir base '%s' does not exist. "
-            "-privdir expects an existing parent directory; the broker will "
-            "create '%s/' under it.\n",
-            pd->base, PRIVDIR_APP_DIRNAME);
-    return;
-  }
-
-  fprintf(stderr, "ERROR: broker init failed: %s\n", strerror(errno));
+static void print_appdir_error(const char *prefix, const AppDirErr *err) {
+  const char *msg = strerror(errno);
+  if (err && err->msg[0] != '\0')
+    msg = err->msg;
+  fprintf(stderr, "ERROR: %s: %s\n", prefix ? prefix : "startup failed", msg);
 }
 
 int main(int argc, char **argv) {
@@ -152,7 +136,7 @@ int main(int argc, char **argv) {
   // Ignore SIGPIPE so write failures return -1 instead of terminating the
   // process. This makes test failures observable via error handling/logging.
   (void)signal(SIGPIPE, SIG_IGN);
-  const char *privdir_base = NULL;
+  const char *app_dir_input = NULL;
   const char *config_input = NULL;
   const char *cred_operand = NULL;
   AppMode mode = APP_MODE_CLIENT;
@@ -199,12 +183,12 @@ int main(int argc, char **argv) {
       }
     } else if (strcmp(argv[i], "--everything") == 0) {
       cred_use_everything = 1;
-    } else if (strcmp(argv[i], "-privdir") == 0) {
+    } else if (strcmp(argv[i], "-appdir") == 0) {
       if (i + 1 >= argc) {
         print_usage(argv[0]);
         return 1;
       }
-      privdir_base = argv[++i];
+      app_dir_input = argv[++i];
     } else if (strcmp(argv[i], "-config") == 0) {
       if (i + 1 >= argc) {
         print_usage(argv[0]);
@@ -224,7 +208,7 @@ int main(int argc, char **argv) {
   }
 
   if (mode == APP_MODE_CRED) {
-    if (privdir_base ||
+    if (app_dir_input ||
         finalize_cred_req(&cred_req, seen_cred_cmd, cred_use_everything,
                           cred_operand) != OK) {
       print_usage(argv[0]);
@@ -240,12 +224,10 @@ int main(int argc, char **argv) {
   }
 
   if (mode == APP_MODE_CLIENT) {
-    char *privdir_err = NULL;
-    PrivDir *pd = privdir_resolve(privdir_base, &privdir_err);
-    if (!pd) {
-      fprintf(stderr, "ERROR: failed to resolve private directory: %s\n",
-              privdir_err ? privdir_err : "unknown error");
-      free(privdir_err);
+    AppDirErr appdir_err;
+    AppDir *appd = appdir_resolve(app_dir_input, &appdir_err);
+    if (!appd) {
+      print_appdir_error("failed to resolve app directory", &appdir_err);
       return 1;
     }
 
@@ -253,11 +235,11 @@ int main(int argc, char **argv) {
     McpServerInit init = {
         .in = stdin,
         .out = stdout,
-        .privd = pd,
+        .appd = appd,
     };
     if (mcpser_init(&s, &init) != OK) {
       fprintf(stderr, "ERROR: server init failed\n");
-      privdir_clean(pd);
+      appdir_clean(appd);
       return 1;
     }
 
@@ -267,20 +249,16 @@ int main(int argc, char **argv) {
     if (rc != OK)
       fprintf(stderr, "ERROR: %s\n", mcpser_last_error(&s));
     mcpser_clean(&s);
-    privdir_clean(pd);
-    free(privdir_err);
+    appdir_clean(appd);
     return (rc == OK) ? 0 : 1;
   }
 
-  char *privdir_err = NULL;
-  PrivDir *pd = privdir_resolve(privdir_base, &privdir_err);
-  if (!pd) {
-    fprintf(stderr, "ERROR: failed to resolve private directory: %s\n",
-            privdir_err ? privdir_err : "unknown error");
-    free(privdir_err);
+  AppDirErr appdir_err;
+  AppDir *appd = appdir_resolve(app_dir_input, &appdir_err);
+  if (!appd) {
+    print_appdir_error("failed to resolve app directory", &appdir_err);
     return 1;
   }
-  free(privdir_err);
 
   ConfFile config = {.fd = -1, .path = NULL};
   char *config_path_err = NULL;
@@ -288,7 +266,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ERROR: config path setup failed: %s\n",
             config_path_err ? config_path_err : "unknown error");
     free(config_path_err);
-    privdir_clean(pd);
+    appdir_clean(appd);
     return 1;
   }
 
@@ -299,7 +277,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ERROR: catalog init failed: %s\n",
             cat_err ? cat_err : "unknown error");
     free(cat_err);
-    privdir_clean(pd);
+    appdir_clean(appd);
     return 1;
   }
 
@@ -310,7 +288,7 @@ int main(int argc, char **argv) {
     catalog_destroy(cat);
     fprintf(stderr, "ERROR: secret store init failed: %s\n",
             ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
-    privdir_clean(pd);
+    appdir_clean(appd);
     return 1;
   }
 
@@ -320,15 +298,16 @@ int main(int argc, char **argv) {
     catalog_destroy(cat);
     secret_store_destroy(secrets);
     fprintf(stderr, "ERROR: conn manager init failed\n");
-    privdir_clean(pd);
+    appdir_clean(appd);
     return 1;
   }
 
-  Broker *b = broker_create(pd, cm);
+  AppDirErr broker_err;
+  Broker *b = broker_create(appd, cm, &broker_err);
   if (!b) {
     connm_destroy(cm);
-    print_broker_init_error(pd);
-    privdir_clean(pd);
+    print_appdir_error("broker init failed", &broker_err);
+    appdir_clean(appd);
     return 1;
   }
 
@@ -337,6 +316,6 @@ int main(int argc, char **argv) {
   if (rc != OK)
     fprintf(stderr, "ERROR: broker run failed\n");
   broker_destroy(b);
-  privdir_clean(pd);
+  appdir_clean(appd);
   return (rc == OK) ? 0 : 1;
 }

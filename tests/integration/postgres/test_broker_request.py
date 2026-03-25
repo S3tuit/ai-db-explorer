@@ -15,15 +15,20 @@ from test_broker_mcp_handshake import (
     HANDSHAKE_MAGIC,
     HANDSHAKE_VERSION,
 )
-from test_user_mcp_handshake import make_runtime_dir, make_temp_privdir, start_broker, stop_proc
+from test_user_mcp_handshake import (
+    make_runtime_dir,
+    make_temp_appdir,
+    start_broker,
+    stop_proc,
+)
 
 HS_OK = 0
 
 
-def _open_broker_session(privdir):
-    secret = _read_broker_secret_token(privdir)
+def _open_broker_session(appdir):
+    secret = _read_broker_secret_token(appdir)
     req = _build_handshake_req_bytes(secret)
-    client = _connect_raw_broker_client(privdir)
+    client = _connect_raw_broker_client(appdir)
 
     _send_len_prefixed(client, len(req), req)
     payload = _read_len_prefixed(client, timeout_sec=6.0)
@@ -37,14 +42,14 @@ def _open_broker_session(privdir):
 
 
 def test_post_handshake_truncated_request_frame_drops_session():
-    privdir = make_temp_privdir("post-req-truncated")
+    appdir = make_temp_appdir("post-req-truncated")
     runtime_dir = make_runtime_dir("post-req-truncated-rt")
     broker = None
     raw = None
     try:
-        broker = start_broker(privdir)
+        broker = start_broker(appdir)
 
-        raw = _open_broker_session(privdir)
+        raw = _open_broker_session(appdir)
         payload = b'{"jsonrpc":"2.0","id":1,"method":"tools/call"'
         _send_len_prefixed(raw, len(payload) + 2, payload)
 
@@ -52,39 +57,39 @@ def test_post_handshake_truncated_request_frame_drops_session():
         raw.close()
         raw = None
 
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+        _assert_broker_usable(appdir)
+        _assert_server_usable(appdir, {"XDG_RUNTIME_DIR": runtime_dir})
     finally:
         if raw is not None:
             raw.close()
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_post_handshake_oversized_request_frame_drops_session():
-    privdir = make_temp_privdir("post-req-oversized")
+    appdir = make_temp_appdir("post-req-oversized")
     runtime_dir = make_runtime_dir("post-req-oversized-rt")
     broker = None
     raw = None
     try:
-        broker = start_broker(privdir)
+        broker = start_broker(appdir)
 
-        raw = _open_broker_session(privdir)
+        raw = _open_broker_session(appdir)
         _send_len_prefixed(raw, 0xFFFFFFFF, b"")
 
         _wait_broker_close(raw)
         raw.close()
         raw = None
 
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+        _assert_broker_usable(appdir)
+        _assert_server_usable(appdir, {"XDG_RUNTIME_DIR": runtime_dir})
     finally:
         if raw is not None:
             raw.close()
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def main():

@@ -4,18 +4,18 @@
 #include <pthread.h>
 #include <stdint.h>
 
+#include "app_dir.h"
 #include "broker.h"
 #include "conn_catalog.h"
 #include "conn_manager.h"
 #include "handshake_codec.h"
-#include "private_dir.h"
 #include "string_op.h"
 #include "utils.h"
 
 typedef struct BrokerRunTestCtx {
   Broker *broker;
   pthread_t tid;
-  PrivDir *priv_dir;
+  AppDir *app_dir;
   char *tmpdir;
   uint8_t secret[SECRET_TOKEN_LEN];
 } BrokerRunTestCtx;

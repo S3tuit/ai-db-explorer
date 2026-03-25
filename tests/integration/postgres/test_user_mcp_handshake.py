@@ -9,32 +9,32 @@ import time
 # root is not '/', but is the root of our repo copied inside the docker
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 BIN = os.path.join(ROOT, "build", "adbxplorer-asan")
-DEFAULT_PRIVDIR = os.path.join(ROOT, "build", "privdir")
+DEFAULT_APPDIR = os.path.join(ROOT, "build", "appdir")
 CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
 MCP_PROTOCOL_VERSION = "2025-11-25"
 
 
-def privdir_app_dir(privdir):
-    return os.path.join(privdir, "adbxplorer")
+def appdir_root(appdir):
+    return appdir
 
 
-def broker_sock_path(privdir):
-    return os.path.join(privdir_app_dir(privdir), "run", "broker.sock")
+def broker_sock_path(appdir):
+    return os.path.join(appdir_root(appdir), "run", "broker.sock")
 
 
-def secret_token_path(privdir):
-    return os.path.join(privdir_app_dir(privdir), "secret", "token")
+def secret_token_path(appdir):
+    return os.path.join(appdir_root(appdir), "secret", "token")
 
 
-def make_temp_privdir(prefix="mcp-it"):
+def make_temp_appdir(prefix="mcp-it"):
     build_dir = os.path.join(ROOT, "build")
     os.makedirs(build_dir, exist_ok=True)
     return tempfile.mkdtemp(prefix=f"{prefix}-", dir=build_dir)
 
 
-def ensure_privdir_base(privdir):
-    os.makedirs(privdir, mode=0o700, exist_ok=True)
-    os.chmod(privdir, 0o700)
+def ensure_appdir_base(appdir):
+    os.makedirs(appdir, mode=0o700, exist_ok=True)
+    os.chmod(appdir, 0o700)
 
 
 def make_runtime_dir(prefix="mcp-rt"):
@@ -90,17 +90,17 @@ def read_frame(proc):
 
 
 def start_broker(
-    privdir=DEFAULT_PRIVDIR,
+    appdir=DEFAULT_APPDIR,
     env=None,
     config_path=None,
     capture_stderr=False,
 ):
-    ensure_privdir_base(privdir)
-    sock = broker_sock_path(privdir)
+    ensure_appdir_base(appdir)
+    sock = broker_sock_path(appdir)
     if os.path.exists(sock):
         os.unlink(sock)
 
-    cmd = [BIN, "-broker", "-privdir", privdir]
+    cmd = [BIN, "-broker", "-appdir", appdir]
     if config_path:
         cmd.extend(["-config", config_path])
     proc_env = merge_env(env)
@@ -127,9 +127,9 @@ def start_broker(
     raise RuntimeError("broker did not create socket")
 
 
-def start_server(privdir=DEFAULT_PRIVDIR, env=None):
+def start_server(appdir=DEFAULT_APPDIR, env=None):
     return subprocess.Popen(
-        [BIN, "-privdir", privdir],
+        [BIN, "-appdir", appdir],
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

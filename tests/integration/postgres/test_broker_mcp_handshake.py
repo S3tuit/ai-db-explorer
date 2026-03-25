@@ -11,8 +11,8 @@ from test_user_mcp_handshake import (
     MCP_PROTOCOL_VERSION,
     do_user_handshake,
     make_runtime_dir,
-    make_temp_privdir,
-    privdir_app_dir,
+    make_temp_appdir,
+    appdir_root,
     secret_token_path,
     start_broker,
     start_server,
@@ -78,21 +78,21 @@ def _read_resume_token_file(runtime_dir):
         return f.read()
 
 
-def _prepare_privdir_for_server_start(privdir, token):
+def _prepare_appdir_for_server_start(appdir, token):
     if len(token) != SECRET_TOKEN_LEN:
         raise ValueError("secret token must be exactly 32 bytes")
 
-    app_dir = privdir_app_dir(privdir)
-    run_dir = os.path.join(app_dir, "run")
-    sec_dir = os.path.join(app_dir, "secret")
-    os.makedirs(app_dir, mode=0o700, exist_ok=True)
+    app_root = appdir_root(appdir)
+    run_dir = os.path.join(app_root, "run")
+    sec_dir = os.path.join(app_root, "secret")
+    os.makedirs(app_root, mode=0o700, exist_ok=True)
     os.makedirs(run_dir, mode=0o700, exist_ok=True)
     os.makedirs(sec_dir, mode=0o700, exist_ok=True)
-    os.chmod(app_dir, 0o700)
+    os.chmod(app_root, 0o700)
     os.chmod(run_dir, 0o700)
     os.chmod(sec_dir, 0o700)
 
-    tok_path = secret_token_path(privdir)
+    tok_path = secret_token_path(appdir)
     with open(tok_path, "wb") as f:
         f.write(token)
     os.chmod(tok_path, 0o600)
@@ -130,8 +130,8 @@ def _assert_broker_unavailable_error(resp, req_id):
     assert "Unable to reach broker" in msg
 
 
-def _assert_server_usable(privdir, server_env):
-    server = start_server(privdir, env=server_env)
+def _assert_server_usable(appdir, server_env):
+    server = start_server(appdir, env=server_env)
     try:
         resp = do_user_handshake(server, "healthy", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
@@ -140,10 +140,10 @@ def _assert_server_usable(privdir, server_env):
         stop_proc(server)
 
 
-def _assert_broker_usable(privdir):
-    secret = _read_broker_secret_token(privdir)
+def _assert_broker_usable(appdir):
+    secret = _read_broker_secret_token(appdir)
     req = _build_handshake_req_bytes(secret)
-    client = _connect_raw_broker_client(privdir)
+    client = _connect_raw_broker_client(appdir)
     try:
         _send_len_prefixed(client, len(req), req)
         payload = _read_len_prefixed(client, timeout_sec=6.0)
@@ -156,8 +156,8 @@ def _assert_broker_usable(privdir):
         client.close()
 
 
-def _read_broker_secret_token(privdir):
-    token_path = secret_token_path(privdir)
+def _read_broker_secret_token(appdir):
+    token_path = secret_token_path(appdir)
     with open(token_path, "rb") as f:
         token = f.read()
     assert len(token) == SECRET_TOKEN_LEN
@@ -198,8 +198,8 @@ def _send_len_prefixed(sock, declared_len, payload):
         _write_all(sock, payload)
 
 
-def _connect_raw_broker_client(privdir):
-    sock_path = os.path.join(privdir_app_dir(privdir), "run", "broker.sock")
+def _connect_raw_broker_client(appdir):
+    sock_path = os.path.join(appdir_root(appdir), "run", "broker.sock")
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(sock_path)
     return client
@@ -240,15 +240,15 @@ def _read_len_prefixed(client, timeout_sec=6.0):
 def do_full_handshake(
     req_id=1,
     protocol_version=MCP_PROTOCOL_VERSION,
-    privdir=None,
+    appdir=None,
     broker_env=None,
     server_env=None,
     capture_broker_stderr=False,
 ):
     created_privdir = False
     created_runtime = False
-    if privdir is None:
-        privdir = make_temp_privdir("full-hs")
+    if appdir is None:
+        appdir = make_temp_appdir("full-hs")
         created_privdir = True
 
     merged_server_env = dict(server_env or {})
@@ -262,28 +262,28 @@ def do_full_handshake(
     server = None
     try:
         broker = start_broker(
-            privdir, env=broker_env, capture_stderr=capture_broker_stderr
+            appdir, env=broker_env, capture_stderr=capture_broker_stderr
         )
-        server = start_server(privdir, env=merged_server_env)
+        server = start_server(appdir, env=merged_server_env)
         resp = do_user_handshake(server, req_id, protocol_version)
-        return broker, server, privdir, runtime_dir, resp
+        return broker, server, appdir, runtime_dir, resp
     except Exception:
         stop_proc(server)
         stop_proc(broker)
         if created_privdir:
-            shutil.rmtree(privdir, ignore_errors=True)
+            shutil.rmtree(appdir, ignore_errors=True)
         if created_runtime:
             shutil.rmtree(runtime_dir, ignore_errors=True)
         raise
 
 
 def test_broker_absent_server_reports_unavailable_on_tools_call():
-    privdir = make_temp_privdir("broker-absent")
+    appdir = make_temp_appdir("broker-absent")
     runtime_dir = make_runtime_dir("restok-absent")
     server = None
     try:
-        _prepare_privdir_for_server_start(privdir, os.urandom(SECRET_TOKEN_LEN))
-        server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        _prepare_appdir_for_server_start(appdir, os.urandom(SECRET_TOKEN_LEN))
+        server = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server, "no-broker", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
 
@@ -292,16 +292,16 @@ def test_broker_absent_server_reports_unavailable_on_tools_call():
     finally:
         stop_proc(server)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_broker_absent_server_still_answers_ping():
-    privdir = make_temp_privdir("broker-absent-ping")
+    appdir = make_temp_appdir("broker-absent-ping")
     runtime_dir = make_runtime_dir("restok-absent-ping")
     server = None
     try:
-        _prepare_privdir_for_server_start(privdir, os.urandom(SECRET_TOKEN_LEN))
-        server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        _prepare_appdir_for_server_start(appdir, os.urandom(SECRET_TOKEN_LEN))
+        server = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
 
         resp = send_ping_request(server, "pre-init-ping")
         assert resp["jsonrpc"] == "2.0"
@@ -318,18 +318,18 @@ def test_broker_absent_server_still_answers_ping():
     finally:
         stop_proc(server)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_secret_token_mismatch_reports_unavailable_then_recovers():
-    privdir = make_temp_privdir("secret-mismatch")
+    appdir = make_temp_appdir("secret-mismatch")
     runtime_dir = make_runtime_dir("restok-mismatch")
     broker = None
     server = None
     try:
-        broker = start_broker(privdir)
+        broker = start_broker(appdir)
 
-        token_path = secret_token_path(privdir)
+        token_path = secret_token_path(appdir)
         with open(token_path, "rb") as f:
             good_secret = f.read()
         assert len(good_secret) == SECRET_TOKEN_LEN
@@ -338,7 +338,7 @@ def test_secret_token_mismatch_reports_unavailable_then_recovers():
             f.write(os.urandom(SECRET_TOKEN_LEN))
         os.chmod(token_path, 0o600)
 
-        server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        server = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server, "mismatch", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
 
@@ -358,21 +358,21 @@ def test_secret_token_mismatch_reports_unavailable_then_recovers():
         stop_proc(server)
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_unknown_resume_token_fallback_still_starts():
-    privdir = make_temp_privdir("resume-unknown")
+    appdir = make_temp_appdir("resume-unknown")
     runtime_dir = make_runtime_dir("restok-unknown")
     broker = None
     server = None
     try:
-        broker = start_broker(privdir)
+        broker = start_broker(appdir)
 
         unknown = os.urandom(RESUME_TOKEN_LEN)
         _seed_resume_token_file(runtime_dir, unknown)
 
-        server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        server = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server, "u-unknown", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
 
@@ -384,19 +384,19 @@ def test_unknown_resume_token_fallback_still_starts():
         stop_proc(server)
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_resume_happy_path_across_restart_rotates_token():
-    privdir = make_temp_privdir("resume-rotate")
+    appdir = make_temp_appdir("resume-rotate")
     runtime_dir = make_runtime_dir("restok-rotate")
     broker = None
     server1 = None
     server2 = None
     try:
-        broker = start_broker(privdir)
+        broker = start_broker(appdir)
 
-        server1 = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        server1 = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server1, "first", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
         token1 = _read_resume_token_file(runtime_dir)
@@ -408,7 +408,7 @@ def test_resume_happy_path_across_restart_rotates_token():
         # Give broker poll loop enough time to move active session into idle.
         time.sleep(0.2)
 
-        server2 = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        server2 = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server2, "second", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
         token2 = _read_resume_token_file(runtime_dir)
@@ -420,11 +420,11 @@ def test_resume_happy_path_across_restart_rotates_token():
         stop_proc(server1)
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_wrong_resume_dir_permissions_disable_resume_but_starts():
-    privdir = make_temp_privdir("resume-perms")
+    appdir = make_temp_appdir("resume-perms")
     runtime_dir = make_runtime_dir("restok-perms")
     broker = None
     server = None
@@ -432,8 +432,8 @@ def test_wrong_resume_dir_permissions_disable_resume_but_starts():
         os.makedirs(_resume_store_dir(runtime_dir), mode=0o755, exist_ok=True)
         os.chmod(_resume_store_dir(runtime_dir), 0o755)
 
-        broker = start_broker(privdir)
-        server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        broker = start_broker(appdir)
+        server = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server, "perms", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
 
@@ -443,18 +443,18 @@ def test_wrong_resume_dir_permissions_disable_resume_but_starts():
         stop_proc(server)
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_server_cannot_read_secret_token_reports_unavailable_then_recovers():
-    privdir = make_temp_privdir("secret-unreadable")
+    appdir = make_temp_appdir("secret-unreadable")
     runtime_dir = make_runtime_dir("restok-secret")
     broker = None
     server = None
     try:
-        broker = start_broker(privdir)
+        broker = start_broker(appdir)
 
-        token_path = secret_token_path(privdir)
+        token_path = secret_token_path(appdir)
         with open(token_path, "rb") as f:
             token = f.read()
         assert len(token) == SECRET_TOKEN_LEN
@@ -464,7 +464,7 @@ def test_server_cannot_read_secret_token_reports_unavailable_then_recovers():
         # read fail deterministically for all UIDs.
         os.unlink(token_path)
 
-        server = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        server = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server, "secret-missing", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
 
@@ -484,19 +484,19 @@ def test_server_cannot_read_secret_token_reports_unavailable_then_recovers():
         stop_proc(server)
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_expired_resume_token_fallback_still_starts():
-    privdir = make_temp_privdir("resume-expired")
+    appdir = make_temp_appdir("resume-expired")
     runtime_dir = make_runtime_dir("restok-expired")
     broker = None
     server1 = None
     server2 = None
     try:
-        broker = start_broker(privdir, env={"ADBX_TEST_IDLE_TTL_SEC": "1"})
+        broker = start_broker(appdir, env={"ADBX_TEST_IDLE_TTL_SEC": "1"})
 
-        server1 = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        server1 = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server1, "exp-1", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
         token1 = _read_resume_token_file(runtime_dir)
@@ -507,7 +507,7 @@ def test_expired_resume_token_fallback_still_starts():
         server1 = None
         time.sleep(2.2)
 
-        server2 = start_server(privdir, env={"XDG_RUNTIME_DIR": runtime_dir})
+        server2 = start_server(appdir, env={"XDG_RUNTIME_DIR": runtime_dir})
         resp = do_user_handshake(server2, "exp-2", MCP_PROTOCOL_VERSION)
         assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
         token2 = _read_resume_token_file(runtime_dir)
@@ -519,109 +519,109 @@ def test_expired_resume_token_fallback_still_starts():
         stop_proc(server1)
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_broker_survives_bad_magic_raw_handshake():
-    privdir = make_temp_privdir("raw-bad-magic")
+    appdir = make_temp_appdir("raw-bad-magic")
     runtime_dir = make_runtime_dir("raw-bad-magic-rt")
     broker = None
     raw = None
     try:
-        broker = start_broker(privdir)
-        secret = _read_broker_secret_token(privdir)
+        broker = start_broker(appdir)
+        secret = _read_broker_secret_token(appdir)
         req = _build_handshake_req_bytes(secret, magic=HANDSHAKE_MAGIC ^ 1)
 
-        raw = _connect_raw_broker_client(privdir)
+        raw = _connect_raw_broker_client(appdir)
         _send_len_prefixed(raw, len(req), req)
         _wait_broker_close(raw)
         raw.close()
         raw = None
 
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+        _assert_broker_usable(appdir)
+        _assert_server_usable(appdir, {"XDG_RUNTIME_DIR": runtime_dir})
     finally:
         if raw is not None:
             raw.close()
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_broker_survives_len_mismatch_raw_handshake():
-    privdir = make_temp_privdir("raw-len-mismatch")
+    appdir = make_temp_appdir("raw-len-mismatch")
     runtime_dir = make_runtime_dir("raw-len-mismatch-rt")
     broker = None
     raw = None
     try:
-        broker = start_broker(privdir)
-        secret = _read_broker_secret_token(privdir)
+        broker = start_broker(appdir)
+        secret = _read_broker_secret_token(appdir)
         req = _build_handshake_req_bytes(secret)
         short_payload = req[:-1]
 
-        raw = _connect_raw_broker_client(privdir)
+        raw = _connect_raw_broker_client(appdir)
         _send_len_prefixed(raw, len(short_payload), short_payload)
         _wait_broker_close(raw)
         raw.close()
         raw = None
 
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+        _assert_broker_usable(appdir)
+        _assert_server_usable(appdir, {"XDG_RUNTIME_DIR": runtime_dir})
     finally:
         if raw is not None:
             raw.close()
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_broker_survives_truncated_keep_open_raw_handshake():
-    privdir = make_temp_privdir("raw-truncated")
+    appdir = make_temp_appdir("raw-truncated")
     runtime_dir = make_runtime_dir("raw-truncated-rt")
     broker = None
     raw = None
     try:
-        broker = start_broker(privdir)
-        secret = _read_broker_secret_token(privdir)
+        broker = start_broker(appdir)
+        secret = _read_broker_secret_token(appdir)
         req = _build_handshake_req_bytes(secret)
         partial_payload = req[:-2]
 
-        raw = _connect_raw_broker_client(privdir)
+        raw = _connect_raw_broker_client(appdir)
         _send_len_prefixed(raw, len(req), partial_payload)
         _wait_broker_close(raw)
         raw.close()
         raw = None
 
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+        _assert_broker_usable(appdir)
+        _assert_server_usable(appdir, {"XDG_RUNTIME_DIR": runtime_dir})
     finally:
         if raw is not None:
             raw.close()
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def test_broker_survives_no_bytes_raw_handshake():
-    privdir = make_temp_privdir("raw-no-bytes")
+    appdir = make_temp_appdir("raw-no-bytes")
     runtime_dir = make_runtime_dir("raw-no-bytes-rt")
     broker = None
     raw = None
     try:
-        broker = start_broker(privdir)
-        raw = _connect_raw_broker_client(privdir)
+        broker = start_broker(appdir)
+        raw = _connect_raw_broker_client(appdir)
         _wait_broker_close(raw)
         raw.close()
         raw = None
 
-        _assert_broker_usable(privdir)
-        _assert_server_usable(privdir, {"XDG_RUNTIME_DIR": runtime_dir})
+        _assert_broker_usable(appdir)
+        _assert_server_usable(appdir, {"XDG_RUNTIME_DIR": runtime_dir})
     finally:
         if raw is not None:
             raw.close()
         stop_proc(broker)
         shutil.rmtree(runtime_dir, ignore_errors=True)
-        shutil.rmtree(privdir, ignore_errors=True)
+        shutil.rmtree(appdir, ignore_errors=True)
 
 
 def main():

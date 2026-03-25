@@ -13,12 +13,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "app_dir.h"
 #include "broker.h"
 #include "conn_manager.h"
 #include "file_io.h"
 #include "frame_codec.h"
 #include "handshake_codec.h"
-#include "private_dir.h"
 #include "secret_store.h"
 #include "stdio_byte_channel.h"
 #include "test.h"
@@ -91,13 +91,13 @@ static ConnManager *make_empty_cm(void) {
   return connm_create(cat, ss);
 }
 
-/* Creates one temporary private-dir root for broker tests.
- * Ownership: returns heap-owned PrivDir and writes heap-owned tmpdir into
- * 'out_tmpdir'.
+/* Creates one temporary app-dir path for broker tests.
+ * Ownership: returns heap-owned AppDir and writes heap-owned parent tmpdir
+ * into 'out_tmpdir'.
  * Side effects: creates one temporary directory under /tmp.
- * Error semantics: returns resolved PrivDir on success, NULL on setup failure.
+ * Error semantics: returns resolved AppDir on success, NULL on setup failure.
  */
-static PrivDir *make_test_privdir(char **out_tmpdir) {
+static AppDir *make_test_appdir(char **out_tmpdir) {
   if (!out_tmpdir)
     return NULL;
   *out_tmpdir = NULL;
@@ -110,28 +110,36 @@ static PrivDir *make_test_privdir(char **out_tmpdir) {
     return NULL;
   }
 
-  PrivDir *pd = privdir_resolve(tmpdir, NULL);
-  if (!pd) {
+  char *app_dir = path_join(tmpdir, APPDIR_APP_DIRNAME);
+  if (!app_dir) {
+    (void)rmdir(tmpdir);
+    free(tmpdir);
+    return NULL;
+  }
+
+  AppDir *appd = appdir_resolve(app_dir, NULL);
+  free(app_dir);
+  if (!appd) {
     (void)rmdir(tmpdir);
     free(tmpdir);
     return NULL;
   }
 
   *out_tmpdir = tmpdir;
-  return pd;
+  return appd;
 }
 
 /* Reads the broker shared secret token from one prepared private dir.
- * Ownership: borrows 'pd' and writes bytes into caller-owned 'out_secret'.
+ * Ownership: borrows 'appd' and writes bytes into caller-owned 'out_secret'.
  * Side effects: reads the token file from disk.
  * Error semantics: returns OK on exact read, ERR on invalid input or I/O
  * failure.
  */
-static int read_secret_token(const PrivDir *pd,
+static int read_secret_token(const AppDir *appd,
                              uint8_t out_secret[SECRET_TOKEN_LEN]) {
-  if (!pd || !pd->token_path || !out_secret)
+  if (!appd || !appd->token_path || !out_secret)
     return ERR;
-  return fileio_read_exact(pd->token_path, SECRET_TOKEN_LEN, out_secret);
+  return fileio_read_exact(appd->token_path, SECRET_TOKEN_LEN, out_secret);
 }
 
 /* Connects a client socket to 'sock_path'. Returns the fd or -1 on error. */
@@ -272,7 +280,7 @@ static void cleanup_tmpdir_root(const char *tmpdir) {
   if (!tmpdir)
     return;
 
-  char *app_dir = path_join(tmpdir, PRIVDIR_APP_DIRNAME);
+  char *app_dir = path_join(tmpdir, APPDIR_APP_DIRNAME);
   ASSERT_TRUE(app_dir != NULL);
   if (rmdir(app_dir) != 0)
     ASSERT_TRUE(errno == ENOENT);
@@ -283,36 +291,36 @@ static void cleanup_tmpdir_root(const char *tmpdir) {
 }
 
 /* Starts broker_run() in a background thread using a temporary socket path.
- * It allocates and returns tmpdir path plus resolved PrivDir owned by caller.
+ * It allocates and returns tmpdir path plus resolved AppDir owned by caller.
  * Side effects: creates Broker instance, starts background thread, and creates
  * filesystem entries under /tmp through broker_create().
  * Returns OK on success, ERR on setup failures.
  */
 static int start_running_broker(Broker **out_b, pthread_t *out_tid,
-                                char **out_tmpdir, PrivDir **out_pd,
+                                char **out_tmpdir, AppDir **out_appd,
                                 uint8_t out_secret[SECRET_TOKEN_LEN]) {
-  if (!out_b || !out_tid || !out_tmpdir || !out_pd || !out_secret)
+  if (!out_b || !out_tid || !out_tmpdir || !out_appd || !out_secret)
     return ERR;
   *out_b = NULL;
   *out_tmpdir = NULL;
-  *out_pd = NULL;
+  *out_appd = NULL;
 
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  if (!pd)
+  AppDir *appd = make_test_appdir(&tmpdir);
+  if (!appd)
     return ERR;
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(pd, cm);
+  Broker *b = broker_create(appd, cm, NULL);
   if (!b) {
     connm_destroy(cm);
-    privdir_clean(pd);
+    appdir_clean(appd);
     cleanup_tmpdir_root(tmpdir);
     free(tmpdir);
     return ERR;
   }
-  if (read_secret_token(pd, out_secret) != OK) {
+  if (read_secret_token(appd, out_secret) != OK) {
     broker_destroy(b);
-    privdir_clean(pd);
+    appdir_clean(appd);
     cleanup_tmpdir_root(tmpdir);
     free(tmpdir);
     return ERR;
@@ -321,7 +329,7 @@ static int start_running_broker(Broker **out_b, pthread_t *out_tid,
   int trc = pthread_create(out_tid, NULL, broker_run_thread, b);
   if (trc != 0) {
     broker_destroy(b);
-    privdir_clean(pd);
+    appdir_clean(appd);
     cleanup_tmpdir_root(tmpdir);
     free(tmpdir);
     return ERR;
@@ -330,7 +338,7 @@ static int start_running_broker(Broker **out_b, pthread_t *out_tid,
   msleep(50);
   *out_b = b;
   *out_tmpdir = tmpdir;
-  *out_pd = pd;
+  *out_appd = appd;
   return OK;
 }
 
@@ -339,14 +347,14 @@ static int start_running_broker(Broker **out_b, pthread_t *out_tid,
  * Side effects: cancels/joins thread, destroys broker, and removes temp dir.
  * Error semantics: none.
  */
-static void stop_running_broker(Broker *b, pthread_t tid, PrivDir *pd,
+static void stop_running_broker(Broker *b, pthread_t tid, AppDir *appd,
                                 char *tmpdir) {
   if (b) {
     pthread_cancel(tid);
     pthread_join(tid, NULL);
     broker_destroy(b);
   }
-  privdir_clean(pd);
+  appdir_clean(appd);
   if (tmpdir) {
     cleanup_tmpdir_root(tmpdir);
     free(tmpdir);
@@ -561,43 +569,43 @@ static void *broker_run_thread(void *arg) {
 static void test_create_null_args(void) {
   ConnManager *cm = make_empty_cm();
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  ASSERT_TRUE(pd != NULL);
+  AppDir *appd = make_test_appdir(&tmpdir);
+  ASSERT_TRUE(appd != NULL);
 
   /* NULL private dir */
-  ASSERT_TRUE(broker_create(NULL, cm) == NULL);
+  ASSERT_TRUE(broker_create(NULL, cm, NULL) == NULL);
 
   /* NULL cm */
-  ASSERT_TRUE(broker_create(pd, NULL) == NULL);
+  ASSERT_TRUE(broker_create(appd, NULL, NULL) == NULL);
 
   /* cm was not consumed above (broker_create returned NULL), free it. */
   connm_destroy(cm);
-  privdir_clean(pd);
+  appdir_clean(appd);
   cleanup_tmpdir_root(tmpdir);
   free(tmpdir);
 }
 
 static void test_create_and_destroy(void) {
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  ASSERT_TRUE(pd != NULL);
+  AppDir *appd = make_test_appdir(&tmpdir);
+  ASSERT_TRUE(appd != NULL);
   ConnManager *cm = make_empty_cm();
 
-  Broker *b = broker_create(pd, cm);
+  Broker *b = broker_create(appd, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
   /* Socket file should exist after creation. */
   struct stat st;
-  ASSERT_TRUE(stat(pd->sock_path, &st) == 0);
+  ASSERT_TRUE(stat(appd->sock_path, &st) == 0);
   ASSERT_TRUE((st.st_mode & 0777) == 0600);
 
   /* Destroy cleans up. */
   broker_destroy(b);
 
   /* Socket file should be removed after destroy. */
-  ASSERT_TRUE(stat(pd->sock_path, &st) != 0);
+  ASSERT_TRUE(stat(appd->sock_path, &st) != 0);
 
-  privdir_clean(pd);
+  appdir_clean(appd);
   cleanup_tmpdir_root(tmpdir);
   free(tmpdir);
 }
@@ -609,20 +617,20 @@ static void test_create_and_destroy(void) {
  */
 static void test_create_failure_does_not_consume_cm(void) {
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  ASSERT_TRUE(pd != NULL);
+  AppDir *appd = make_test_appdir(&tmpdir);
+  ASSERT_TRUE(appd != NULL);
   ConnManager *cm = make_empty_cm();
 
-  char *app_blocker = path_join(tmpdir, PRIVDIR_APP_DIRNAME);
+  char *app_blocker = path_join(tmpdir, APPDIR_APP_DIRNAME);
   ASSERT_TRUE(app_blocker != NULL);
   ASSERT_TRUE(fileio_write_exact(app_blocker, (const uint8_t *)"", 0, 0600) ==
               OK);
 
-  ASSERT_TRUE(broker_create(pd, cm) == NULL);
+  ASSERT_TRUE(broker_create(appd, cm, NULL) == NULL);
 
   /* If broker_create freed 'cm' on failure, ASan will flag this destroy. */
   connm_destroy(cm);
-  privdir_clean(pd);
+  appdir_clean(appd);
   ASSERT_TRUE(unlink(app_blocker) == 0);
   cleanup_tmpdir_root(tmpdir);
   free(app_blocker);
@@ -636,31 +644,31 @@ static void test_destroy_null(void) {
 
 static void test_client_connect(void) {
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  ASSERT_TRUE(pd != NULL);
+  AppDir *appd = make_test_appdir(&tmpdir);
+  ASSERT_TRUE(appd != NULL);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(pd, cm);
+  Broker *b = broker_create(appd, cm, NULL);
   ASSERT_TRUE(b != NULL);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   close(cfd);
   broker_destroy(b);
-  privdir_clean(pd);
+  appdir_clean(appd);
   cleanup_tmpdir_root(tmpdir);
   free(tmpdir);
 }
 
 static void test_disconnect_moves_to_idle(void) {
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  ASSERT_TRUE(pd != NULL);
+  AppDir *appd = make_test_appdir(&tmpdir);
+  ASSERT_TRUE(appd != NULL);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(pd, cm);
+  Broker *b = broker_create(appd, cm, NULL);
   ASSERT_TRUE(b != NULL);
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(read_secret_token(pd, secret) == OK);
+  ASSERT_TRUE(read_secret_token(appd, secret) == OK);
 
   /* Start broker_run in a background thread. */
   pthread_t tid;
@@ -672,7 +680,7 @@ static void test_disconnect_moves_to_idle(void) {
 
   /* Connect and complete initial handshake, capture resume token. */
   uint8_t tok1[RESUME_TOKEN_LEN] = {0};
-  int cfd = connect_client_hs_ok(pd->sock_path, secret, tok1);
+  int cfd = connect_client_hs_ok(appd->sock_path, secret, tok1);
   ASSERT_TRUE(cfd >= 0);
 
   /* Disconnect the client so session becomes resumable. */
@@ -681,7 +689,7 @@ static void test_disconnect_moves_to_idle(void) {
 
   /* Resume with the prior token; this proves the session moved to idle. */
   handshake_status st = HS_ERR_INTERNAL;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, tok1, &st,
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret, tok1, &st,
                                            NULL) == OK);
   ASSERT_TRUE(st == HS_OK);
 
@@ -690,20 +698,20 @@ static void test_disconnect_moves_to_idle(void) {
   pthread_join(tid, NULL);
 
   broker_destroy(b);
-  privdir_clean(pd);
+  appdir_clean(appd);
   cleanup_tmpdir_root(tmpdir);
   free(tmpdir);
 }
 
 static void test_multiple_disconnect_cycles(void) {
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  ASSERT_TRUE(pd != NULL);
+  AppDir *appd = make_test_appdir(&tmpdir);
+  ASSERT_TRUE(appd != NULL);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(pd, cm);
+  Broker *b = broker_create(appd, cm, NULL);
   ASSERT_TRUE(b != NULL);
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(read_secret_token(pd, secret) == OK);
+  ASSERT_TRUE(read_secret_token(appd, secret) == OK);
 
   pthread_t tid;
   int prc = pthread_create(&tid, NULL, broker_run_thread, b);
@@ -712,24 +720,24 @@ static void test_multiple_disconnect_cycles(void) {
 
   /* First connect/disconnect cycle. */
   uint8_t tok1[RESUME_TOKEN_LEN] = {0};
-  int cfd1 = connect_client_hs_ok(pd->sock_path, secret, tok1);
+  int cfd1 = connect_client_hs_ok(appd->sock_path, secret, tok1);
   ASSERT_TRUE(cfd1 >= 0);
   close(cfd1);
   msleep(50);
 
   /* Second connect/disconnect cycle creates another resumable token. */
   uint8_t tok2[RESUME_TOKEN_LEN] = {0};
-  int cfd2 = connect_client_hs_ok(pd->sock_path, secret, tok2);
+  int cfd2 = connect_client_hs_ok(appd->sock_path, secret, tok2);
   ASSERT_TRUE(cfd2 >= 0);
   close(cfd2);
   msleep(50);
 
   /* Both tokens should still be resumable. */
   handshake_status st = HS_ERR_INTERNAL;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, tok1, &st,
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret, tok1, &st,
                                            NULL) == OK);
   ASSERT_TRUE(st == HS_OK);
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, tok2, &st,
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret, tok2, &st,
                                            NULL) == OK);
   ASSERT_TRUE(st == HS_OK);
 
@@ -737,7 +745,7 @@ static void test_multiple_disconnect_cycles(void) {
   pthread_join(tid, NULL);
 
   broker_destroy(b);
-  privdir_clean(pd);
+  appdir_clean(appd);
   cleanup_tmpdir_root(tmpdir);
   free(tmpdir);
 }
@@ -747,13 +755,13 @@ static void test_multiple_disconnect_cycles(void) {
  */
 static void test_idle_sessions_cap(void) {
   char *tmpdir = NULL;
-  PrivDir *pd = make_test_privdir(&tmpdir);
-  ASSERT_TRUE(pd != NULL);
+  AppDir *appd = make_test_appdir(&tmpdir);
+  ASSERT_TRUE(appd != NULL);
   ConnManager *cm = make_empty_cm();
-  Broker *b = broker_create(pd, cm);
+  Broker *b = broker_create(appd, cm, NULL);
   ASSERT_TRUE(b != NULL);
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(read_secret_token(pd, secret) == OK);
+  ASSERT_TRUE(read_secret_token(appd, secret) == OK);
 
   pthread_t tid;
   int prc = pthread_create(&tid, NULL, broker_run_thread, b);
@@ -764,7 +772,7 @@ static void test_idle_sessions_cap(void) {
 
   /* Create more resumable sessions than idle capacity allows. */
   for (int i = 0; i < MAX_IDLE_SESSIONS + 2; i++) {
-    int cfd = connect_client_hs_ok(pd->sock_path, secret, tokens[i]);
+    int cfd = connect_client_hs_ok(appd->sock_path, secret, tokens[i]);
     ASSERT_TRUE(cfd >= 0);
     close(cfd);
     msleep(50);
@@ -772,12 +780,12 @@ static void test_idle_sessions_cap(void) {
 
   /* Oldest token should be evicted once cap is exceeded. */
   handshake_status st = HS_ERR_INTERNAL;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, tokens[0],
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret, tokens[0],
                                            &st, NULL) == OK);
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
 
   /* Most recent token should still be resumable. */
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret,
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret,
                                            tokens[MAX_IDLE_SESSIONS + 1], &st,
                                            NULL) == OK);
   ASSERT_TRUE(st == HS_OK);
@@ -786,7 +794,7 @@ static void test_idle_sessions_cap(void) {
   pthread_join(tid, NULL);
 
   broker_destroy(b);
-  privdir_clean(pd);
+  appdir_clean(appd);
   cleanup_tmpdir_root(tmpdir);
   free(tmpdir);
 }
@@ -798,11 +806,11 @@ static void test_hs_bad_magic_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   handshake_req_t req = {0};
@@ -820,8 +828,8 @@ static void test_hs_bad_magic_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies handshake rejects frames with unsupported version. */
@@ -829,11 +837,11 @@ static void test_hs_bad_version_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   handshake_req_t req = {0};
@@ -851,8 +859,8 @@ static void test_hs_bad_version_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies handshake rejects frames with invalid secret token. */
@@ -860,11 +868,11 @@ static void test_hs_bad_secret_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   handshake_req_t req = {0};
@@ -882,8 +890,8 @@ static void test_hs_bad_secret_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies handshake rejects frames whose declared size differs from the
@@ -893,11 +901,11 @@ static void test_hs_len_mismatch_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   handshake_req_t req = {0};
@@ -915,8 +923,8 @@ static void test_hs_len_mismatch_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies handshake rejects declared frame sizes that exceed codec limits. */
@@ -924,11 +932,11 @@ static void test_hs_declared_too_large_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   ASSERT_TRUE(write_len_frame_raw(cfd, UINT32_MAX, NULL, 0) == OK);
@@ -940,8 +948,8 @@ static void test_hs_declared_too_large_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies truncated payload + peer EOF is treated as malformed handshake. */
@@ -949,11 +957,11 @@ static void test_hs_truncated_then_eof_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   handshake_req_t req = {0};
@@ -972,8 +980,8 @@ static void test_hs_truncated_then_eof_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies truncated payload with socket left open is bounded by handshake
@@ -983,11 +991,11 @@ static void test_hs_truncated_keep_open_timeout_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   handshake_req_t req = {0};
@@ -1005,8 +1013,8 @@ static void test_hs_truncated_keep_open_timeout_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies partial frame header with open socket is bounded by handshake
@@ -1016,11 +1024,11 @@ static void test_hs_partial_header_keep_open_timeout_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   uint8_t hdr_prefix[2] = {0x00, 0x00};
@@ -1033,8 +1041,8 @@ static void test_hs_partial_header_keep_open_timeout_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies clients that send no handshake bytes are timed out and rejected. */
@@ -1042,11 +1050,11 @@ static void test_hs_no_payload_timeout_rejected(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
-  int cfd = connect_client(pd->sock_path);
+  int cfd = connect_client(appd->sock_path);
   ASSERT_TRUE(cfd >= 0);
 
   handshake_status st = HS_OK;
@@ -1056,8 +1064,8 @@ static void test_hs_no_payload_timeout_rejected(void) {
 
   close(cfd);
   msleep(50);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies that a post-handshake truncated request frame is dropped after a
@@ -1067,12 +1075,12 @@ static void test_post_hs_truncated_request_drops_session(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
   uint8_t resume_tok[RESUME_TOKEN_LEN] = {0};
-  int cfd = connect_client_hs_ok(pd->sock_path, secret, resume_tok);
+  int cfd = connect_client_hs_ok(appd->sock_path, secret, resume_tok);
   ASSERT_TRUE(cfd >= 0);
 
   static const uint8_t req_prefix[] =
@@ -1087,11 +1095,11 @@ static void test_post_hs_truncated_request_drops_session(void) {
 
   /* Dropped malformed sessions must not remain resumable in idle storage. */
   handshake_status st = HS_OK;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, resume_tok,
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret, resume_tok,
                                            &st, NULL) == OK);
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 /* Verifies that oversize post-handshake request frames are rejected and the
@@ -1101,12 +1109,12 @@ static void test_post_hs_oversized_request_drops_session(void) {
   Broker *b = NULL;
   pthread_t tid = {0};
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   uint8_t secret[SECRET_TOKEN_LEN] = {0};
-  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &pd, secret) == OK);
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
 
   uint8_t resume_tok[RESUME_TOKEN_LEN] = {0};
-  int cfd = connect_client_hs_ok(pd->sock_path, secret, resume_tok);
+  int cfd = connect_client_hs_ok(appd->sock_path, secret, resume_tok);
   ASSERT_TRUE(cfd >= 0);
 
   ASSERT_TRUE(write_len_frame_raw(cfd, UINT32_MAX, NULL, 0) == OK);
@@ -1115,11 +1123,11 @@ static void test_post_hs_oversized_request_drops_session(void) {
 
   close(cfd);
   handshake_status st = HS_OK;
-  ASSERT_TRUE(connect_client_resume_status(pd->sock_path, secret, resume_tok,
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret, resume_tok,
                                            &st, NULL) == OK);
   ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
-  assert_broker_accepts_new_client(pd->sock_path, secret);
-  stop_running_broker(b, tid, pd, tmpdir);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
 }
 
 int main(void) {

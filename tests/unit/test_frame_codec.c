@@ -88,7 +88,8 @@ static void test_frame_write_cl(void) {
   ASSERT_TRUE(bc != NULL);
 
   const char *payload = "abc";
-  ASSERT_TRUE(frame_write_cl(bc, payload, 3) == OK);
+  ASSERT_TRUE(frame_write_rpc(bc, payload, 3, FRAME_RPC_STYLE_CONTENT_LENGTH) ==
+              OK);
   bufch_destroy(bc);
 
   char *res = read_all(out);
@@ -96,6 +97,90 @@ static void test_frame_write_cl(void) {
 
   free(res);
   fclose(out);
+}
+
+static AdbxTriStatus frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
+  FrameRpcStyle style = FRAME_RPC_STYLE_UNKNOWN;
+  AdbxTriStatus rc = frame_read_rpc(bc, out_payload, &style);
+  ASSERT_TRUE(style == FRAME_RPC_STYLE_CONTENT_LENGTH);
+  return rc;
+}
+
+/* Reads one Content-Length framed payload from 'raw' and asserts successful
+ * decoding with payload bytes equal to 'expected_payload'. It allocates one
+ * temporary memfile, channel, and StrBuf, and frees them before returning.
+ * Side effects: consumes one frame through frame_read_cl().
+ * Error semantics: test helper; aborts when decoding fails or payload differs.
+ */
+static void assert_frame_read_cl_ok(const char *raw,
+                                    const char *expected_payload) {
+  FILE *in = MEMFILE_IN(raw);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
+
+  StrBuf payload;
+  sb_init(&payload);
+  ASSERT_TRUE(frame_read_cl(bc, &payload) == YES);
+  ASSERT_TRUE(expected_payload != NULL);
+  ASSERT_TRUE(payload.len == strlen(expected_payload));
+  ASSERT_TRUE(memcmp(payload.data, expected_payload, payload.len) == 0);
+
+  sb_clean(&payload);
+  bufch_destroy(bc);
+  fclose(in);
+}
+
+/* Reads one Content-Length framed payload from 'raw' and asserts decode
+ * rejection.
+ * It allocates one temporary memfile, channel, and StrBuf, and frees them
+ * before returning.
+ * Side effects: consumes one frame through frame_read_cl().
+ * Error semantics: test helper; aborts when frame_read_cl() does not return
+ * ERR.
+ */
+static void assert_frame_read_cl_err(const char *raw) {
+  FILE *in = MEMFILE_IN(raw);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
+
+  StrBuf payload;
+  sb_init(&payload);
+  ASSERT_TRUE(frame_read_cl(bc, &payload) == ERR);
+
+  sb_clean(&payload);
+  bufch_destroy(bc);
+  fclose(in);
+}
+
+/* Reads one auto-detected MCP stdio frame from 'raw' and asserts both payload
+ * bytes and detected framing style.
+ * It allocates one temporary memfile, channel, and StrBuf, and frees them
+ * before returning.
+ * Side effects: consumes exactly one frame through frame_read_rpc().
+ * Error semantics: test helper; aborts when decode or style detection differs
+ * from expectations.
+ */
+static void assert_frame_read_rpc_ok(const char *raw, FrameRpcStyle style,
+                                     const char *expected_payload) {
+  FILE *in = MEMFILE_IN(raw);
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
+
+  StrBuf payload;
+  sb_init(&payload);
+  FrameRpcStyle got_style = FRAME_RPC_STYLE_UNKNOWN;
+  ASSERT_TRUE(frame_read_rpc(bc, &payload, &got_style) == YES);
+  ASSERT_TRUE(got_style == style);
+  ASSERT_TRUE(expected_payload != NULL);
+  ASSERT_TRUE(payload.len == strlen(expected_payload));
+  ASSERT_TRUE(memcmp(payload.data, expected_payload, payload.len) == 0);
+
+  sb_clean(&payload);
+  bufch_destroy(bc);
+  fclose(in);
 }
 
 static void test_frame_read_cl(void) {
@@ -120,12 +205,111 @@ static void test_frame_read_cl(void) {
   fclose(in);
 }
 
+/* Accepts a lowercase content-length header name. */
+static void test_frame_read_cl_lowercase_content_length(void) {
+  assert_frame_read_cl_ok("content-length: 5\r\n\r\nhello", "hello");
+}
+
+/* Accepts a mixed-case Content-Length header name. */
+static void test_frame_read_cl_mixed_case_content_length(void) {
+  assert_frame_read_cl_ok("CoNtEnT-LeNgTh: 5\r\n\r\nhello", "hello");
+}
+
+/* Accepts Content-Type alongside Content-Length. */
+static void test_frame_read_cl_with_content_type(void) {
+  assert_frame_read_cl_ok(
+      "Content-Length: 5\r\n"
+      "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
+      "\r\n"
+      "hello",
+      "hello");
+}
+
+/* Accepts Content-Type before Content-Length. */
+static void test_frame_read_cl_content_type_before_length(void) {
+  assert_frame_read_cl_ok(
+      "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
+      "Content-Length: 5\r\n"
+      "\r\n"
+      "hello",
+      "hello");
+}
+
+/* Ignores one unknown header while decoding Content-Length frames. */
+static void test_frame_read_cl_with_unknown_header(void) {
+  assert_frame_read_cl_ok("Content-Length: 5\r\n"
+                          "X-Test-Trace: abc123\r\n"
+                          "\r\n"
+                          "hello",
+                          "hello");
+}
+
+/* Accepts headers that exceed the historical 52-byte scan cap. */
+static void test_frame_read_cl_header_longer_than_old_cap(void) {
+  assert_frame_read_cl_ok(
+      "Content-Length: 5\r\n"
+      "X-Really-Long-Debug-Header: 1234567890123456789012345678901234567890\r\n"
+      "\r\n"
+      "hello",
+      "hello");
+}
+
+/* Rejects duplicate Content-Length headers to avoid ambiguous framing. */
+static void test_frame_read_cl_duplicate_content_length_rejected(void) {
+  assert_frame_read_cl_err("Content-Length: 5\r\n"
+                           "Content-Length: 5\r\n"
+                           "\r\n"
+                           "hello");
+}
+
+/* Auto-detects Content-Length framing for header-prefixed payloads. */
+static void test_frame_read_rpc_content_length_style(void) {
+  assert_frame_read_rpc_ok("Content-Length: 5\r\n\r\nhello",
+                           FRAME_RPC_STYLE_CONTENT_LENGTH, "hello");
+}
+
+/* Auto-detects JSONL framing for line-delimited payloads. */
+static void test_frame_read_rpc_jsonl_style(void) {
+  assert_frame_read_rpc_ok("{\"jsonrpc\":\"2.0\",\"id\":1}\n",
+                           FRAME_RPC_STYLE_JSONL,
+                           "{\"jsonrpc\":\"2.0\",\"id\":1}");
+}
+
+/* Writes JSONL framing when requested by the caller. */
+static void test_frame_write_rpc_jsonl(void) {
+  FILE *out = MEMFILE_OUT();
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(-1, fileno(out));
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
+
+  const char *payload = "{\"jsonrpc\":\"2.0\",\"id\":1}";
+  ASSERT_TRUE(frame_write_rpc(bc, payload, strlen(payload),
+                              FRAME_RPC_STYLE_JSONL) == OK);
+  bufch_destroy(bc);
+
+  char *res = read_all(out);
+  ASSERT_STREQ(res, "{\"jsonrpc\":\"2.0\",\"id\":1}\n");
+
+  free(res);
+  fclose(out);
+}
+
 int main(void) {
   test_frame_write_len();
   test_frame_read_len();
   test_frame_read_len_too_large();
   test_frame_write_cl();
   test_frame_read_cl();
+  test_frame_read_cl_lowercase_content_length();
+  test_frame_read_cl_mixed_case_content_length();
+  test_frame_read_cl_with_content_type();
+  test_frame_read_cl_content_type_before_length();
+  test_frame_read_cl_with_unknown_header();
+  test_frame_read_cl_header_longer_than_old_cap();
+  test_frame_read_cl_duplicate_content_length_rejected();
+  test_frame_read_rpc_content_length_style();
+  test_frame_read_rpc_jsonl_style();
+  test_frame_write_rpc_jsonl();
 
   fprintf(stderr, "OK: test_frame_codec\n");
   return 0;

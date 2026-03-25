@@ -4,23 +4,25 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "app_dir.h"
 #include "bufio.h"
-#include "private_dir.h"
+#include "frame_codec.h"
 #include "resume_token.h"
 #include "utils.h"
 
 typedef struct McpServerInit {
-  FILE *in;             /* borrowed by McpServer */
-  FILE *out;            /* borrowed by McpServer */
-  const PrivDir *privd; /* borrowed */
+  FILE *in;           /* borrowed by McpServer */
+  FILE *out;          /* borrowed by McpServer */
+  const AppDir *appd; /* borrowed */
 } McpServerInit;
 
 typedef struct McpServer {
-  BufChannel in_bc;     // owned wrapper; underlying stdin fd is borrowed
-  BufChannel brok_bc;   // owned wrapper around broker socket
-  BufChannel out_bc;    // owned wrapper; underlying stdout fd is borrowed
-  const PrivDir *privd; /* borrowed runtime paths for lazy broker reconnect */
+  BufChannel in_bc;   // owned wrapper; underlying stdin fd is borrowed
+  BufChannel brok_bc; // owned wrapper around broker socket
+  BufChannel out_bc;  // owned wrapper; underlying stdout fd is borrowed
+  const AppDir *appd; /* borrowed runtime paths for lazy broker reconnect */
   ResumeTokenStore restok; /* owned process-scoped resume token store */
+  FrameRpcStyle user_rpc_style; /* detected stdio framing for current host */
   uint32_t flags;          /* runtime state bits */
   char last_err[256];      // last fatal error (best-effort)
 } McpServer;

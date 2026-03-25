@@ -196,7 +196,7 @@ static const char *mcpser_hs_status_desc(handshake_status st) {
 }
 
 /* Ensures broker channel is connected and handshake-complete for this server.
- * Ownership: borrows 's'; uses borrowed private-dir paths and owned resume
+ * Ownership: borrows 's'; uses borrowed app-dir paths and owned resume
  * token store contained in 's'.
  * Side effects: may read secret token from disk, open/close broker sockets,
  * perform framed handshake I/O, and update persisted resume token state.
@@ -204,7 +204,7 @@ static const char *mcpser_hs_status_desc(handshake_status st) {
  * connected), ERR on missing/invalid inputs or failed connect/handshake flow.
  */
 static AdbxStatus mcpser_connect_and_handshake_broker(McpServer *s) {
-  if (!s || !s->privd || !s->privd->sock_path)
+  if (!s || !s->appd || !s->appd->sock_path)
     return ERR;
 
   // Ready means we already have a connected channel that completed handshake.
@@ -214,8 +214,8 @@ static AdbxStatus mcpser_connect_and_handshake_broker(McpServer *s) {
     s->flags &= ~MCPSER_F_BROKER_READY;
 
   uint8_t secret_token[SECRET_TOKEN_LEN] = {0};
-  if (!s->privd->token_path ||
-      fileio_read_exact(s->privd->token_path, SECRET_TOKEN_LEN, secret_token) !=
+  if (!s->appd->token_path ||
+      fileio_read_exact(s->appd->token_path, SECRET_TOKEN_LEN, secret_token) !=
           OK) {
     TLOG("ERROR - failed to read broker secret token before reconnect");
     return ERR;
@@ -227,7 +227,7 @@ static AdbxStatus mcpser_connect_and_handshake_broker(McpServer *s) {
   for (int attempt = 0; attempt < 2; attempt++) {
     // Broker requires handshake as first frame, so each retry uses a fresh
     // socket/channel.
-    if (mcpser_connect_broker_channel(s, s->privd->sock_path) != OK)
+    if (mcpser_connect_broker_channel(s, s->appd->sock_path) != OK)
       return ERR;
 
     // try handshake once
@@ -289,8 +289,8 @@ static AdbxStatus mcpser_send_broker_unavailable(McpServer *s,
 /* Writes a JSON-RPC error response to the MCP host output channel.
  * Ownership: borrows 's', optional 'id', and message pointers; temporary JSON
  * buffer is internal and freed before return.
- * Side effects: serializes JSON and writes one Content-Length frame to
- * 's->out_bc'.
+ * Side effects: serializes JSON and writes one host-facing RPC frame using the
+ * currently detected stdio framing.
  * Error semantics: returns OK on successful serialization/write, ERR on invalid
  * input, allocation failure, or output I/O failure.
  */
@@ -342,7 +342,8 @@ static AdbxStatus mcpser_send_error(McpServer *s, const McpId *id, long code,
   if (json_obj_end(&sb) != OK)
     goto err;
 
-  AdbxStatus rc = frame_write_cl(&s->out_bc, sb.data, sb.len);
+  AdbxStatus rc =
+      frame_write_rpc(&s->out_bc, sb.data, sb.len, s->user_rpc_style);
   sb_clean(&sb);
   return rc;
 
@@ -353,7 +354,8 @@ err:
 
 /* Writes a successful JSON-RPC response with an empty object result.
  * It borrows 's' and 'id'; temporary JSON storage is freed before return.
- * Side effects: writes one Content-Length frame to 's->out_bc'.
+ * Side effects: writes one host-facing RPC frame using the current stdio
+ * framing to 's->out_bc'.
  * Returns OK on successful serialization/write, ERR on invalid input,
  * allocation failure, or output I/O failure.
  */
@@ -379,7 +381,8 @@ static AdbxStatus mcpser_send_empty_result(McpServer *s, const McpId *id) {
   if (json_obj_end(&sb) != OK)
     goto err;
 
-  AdbxStatus rc = frame_write_cl(&s->out_bc, sb.data, sb.len);
+  AdbxStatus rc =
+      frame_write_rpc(&s->out_bc, sb.data, sb.len, s->user_rpc_style);
   sb_clean(&sb);
   return rc;
 
@@ -389,7 +392,7 @@ err:
 }
 
 AdbxStatus mcpser_init(McpServer *s, const McpServerInit *init) {
-  if (!s || !init || !init->in || !init->out || !init->privd)
+  if (!s || !init || !init->in || !init->out || !init->appd)
     return ERR;
   memset(s, 0, sizeof(*s));
   s->last_err[0] = '\0';
@@ -408,7 +411,8 @@ AdbxStatus mcpser_init(McpServer *s, const McpServerInit *init) {
     return ERR;
   }
 
-  s->privd = init->privd;
+  s->appd = init->appd;
+  s->user_rpc_style = FRAME_RPC_STYLE_UNKNOWN;
   s->flags = 0;
 
   if (restok_init(&s->restok) == ERR) {
@@ -546,9 +550,10 @@ static AdbxTriStatus mcpser_parse_user_req(McpServer *s, const StrBuf *req,
 /* Validates and answers one parsed user-facing MCP "initialize" request with
  * 'id'. It requires 'jg' to have already consumed the request On success it
  * marks the user-facing session as initialized. Side effects: writes one framed
- * response (or error) to stdout and sets MCPSER_F_USER_INITIALIZED. Returns YES
- * on successful initialize response, NO when the request is rejected with a
- * JSON-RPC error, ERR on invalid input or write failure.
+ * response (or error) to stdout using the current host framing and sets
+ * MCPSER_F_USER_INITIALIZED. Returns YES on successful initialize response, NO
+ * when the request is rejected with a JSON-RPC error, ERR on invalid input or
+ * write failure.
  */
 static AdbxTriStatus mcpser_user_initialize_handshake(McpServer *s,
                                                       const JsonGetter *jg,
@@ -624,7 +629,8 @@ static AdbxTriStatus mcpser_user_initialize_handshake(McpServer *s,
   if (json_obj_end(&sb) != OK)
     goto fail;
 
-  AdbxStatus wrc = frame_write_cl(&s->out_bc, sb.data, sb.len);
+  AdbxStatus wrc =
+      frame_write_rpc(&s->out_bc, sb.data, sb.len, s->user_rpc_style);
   sb_clean(&sb);
   if (wrc != OK)
     return ERR;
@@ -637,14 +643,16 @@ fail:
 }
 
 AdbxStatus mcpser_run(McpServer *s) {
-  if (!s || !s->in_bc.ch || !s->out_bc.ch || !s->privd)
+  if (!s || !s->in_bc.ch || !s->out_bc.ch || !s->appd)
     return ERR;
 
   for (;;) {
     StrBuf req;
     sb_init(&req);
-    AdbxTriStatus rc = frame_read_cl(&s->in_bc, &req);
-    TLOG("INFO - frame_read_cl rc=%d len=%zu", rc, req.len);
+    FrameRpcStyle rpc_style = FRAME_RPC_STYLE_UNKNOWN;
+    AdbxTriStatus rc = frame_read_rpc(&s->in_bc, &req, &rpc_style);
+    TLOG("INFO - frame_read_rpc rc=%d style=%d len=%zu", rc, rpc_style,
+         req.len);
     if (rc == NO) {
       // EOF
       sb_clean(&req);
@@ -653,10 +661,11 @@ AdbxStatus mcpser_run(McpServer *s) {
     }
     if (rc == ERR) {
       sb_clean(&req);
-      TLOG("ERROR - frame_read_cl failed while reading MCP input");
+      TLOG("ERROR - frame_read_rpc failed while reading MCP input");
       mcpser_set_err(s, "failed to read input");
       return ERR;
     }
+    s->user_rpc_style = rpc_style;
 
     JsonGetter jg; // this will read from req, so we must not use it after free
                    // clean/destroy req
@@ -778,7 +787,8 @@ AdbxStatus mcpser_run(McpServer *s) {
     }
 
     // McpServer writes response to user
-    if (frame_write_cl(&s->out_bc, resp.data, resp.len) != OK) {
+    if (frame_write_rpc(&s->out_bc, resp.data, resp.len, s->user_rpc_style) !=
+        OK) {
       fprintf(stderr, "McpServer: stdout write failed\n");
       sb_clean(&resp);
       TLOG("ERROR - failed to write response to stdout");
@@ -799,7 +809,8 @@ void mcpser_clean(McpServer *s) {
   bufch_clean(&s->brok_bc);
   bufch_clean(&s->out_bc);
   restok_clean(&s->restok);
-  s->privd = NULL;
+  s->appd = NULL;
+  s->user_rpc_style = FRAME_RPC_STYLE_UNKNOWN;
   s->flags = 0;
   s->last_err[0] = '\0';
 }

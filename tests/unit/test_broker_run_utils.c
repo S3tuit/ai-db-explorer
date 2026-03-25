@@ -119,13 +119,13 @@ static SecretStore *fake_secret_store(void) {
   return (SecretStore *)s;
 }
 
-/* Creates one temporary private-dir root for broker tests.
- * It borrows 'out_tmpdir' and writes one owned tmpdir path into it.
+/* Creates one temporary app-dir path for broker tests.
+ * It borrows 'out_tmpdir' and writes one owned parent tmpdir path into it.
  * Side effects: creates one temporary directory under /tmp.
- * Returns a caller-owned PrivDir on success, NULL on invalid input or setup
+ * Returns a caller-owned AppDir on success, NULL on invalid input or setup
  * failure.
  */
-static PrivDir *make_test_privdir(char **out_tmpdir) {
+static AppDir *make_test_appdir(char **out_tmpdir) {
   if (!out_tmpdir)
     return NULL;
   *out_tmpdir = NULL;
@@ -138,15 +138,23 @@ static PrivDir *make_test_privdir(char **out_tmpdir) {
     return NULL;
   }
 
-  PrivDir *pd = privdir_resolve(tmpdir, NULL);
-  if (!pd) {
+  char *app_dir = path_join(tmpdir, APPDIR_APP_DIRNAME);
+  if (!app_dir) {
+    (void)rmdir(tmpdir);
+    free(tmpdir);
+    return NULL;
+  }
+
+  AppDir *appd = appdir_resolve(app_dir, NULL);
+  free(app_dir);
+  if (!appd) {
     (void)rmdir(tmpdir);
     free(tmpdir);
     return NULL;
   }
 
   *out_tmpdir = tmpdir;
-  return pd;
+  return appd;
 }
 
 /* Removes one temporary broker root directory when it still exists.
@@ -158,7 +166,7 @@ static void cleanup_tmpdir_root(const char *tmpdir) {
   if (!tmpdir)
     return;
 
-  char *app_dir = path_join(tmpdir, PRIVDIR_APP_DIRNAME);
+  char *app_dir = path_join(tmpdir, APPDIR_APP_DIRNAME);
   ASSERT_TRUE(app_dir != NULL);
   if (rmdir(app_dir) != 0)
     ASSERT_TRUE(errno == ENOENT);
@@ -169,15 +177,15 @@ static void cleanup_tmpdir_root(const char *tmpdir) {
 }
 
 /* Reads the broker shared secret token from one prepared private dir.
- * It borrows 'pd' and writes bytes into caller-owned 'out_secret'.
+ * It borrows 'appd' and writes bytes into caller-owned 'out_secret'.
  * Side effects: reads the token file from disk.
  * Returns OK on success, ERR on invalid input or I/O failure.
  */
-static AdbxStatus read_secret_token(const PrivDir *pd,
+static AdbxStatus read_secret_token(const AppDir *appd,
                                     uint8_t out_secret[SECRET_TOKEN_LEN]) {
-  if (!pd || !pd->token_path || !out_secret)
+  if (!appd || !appd->token_path || !out_secret)
     return ERR;
-  return fileio_read_exact(pd->token_path, SECRET_TOKEN_LEN, out_secret);
+  return fileio_read_exact(appd->token_path, SECRET_TOKEN_LEN, out_secret);
 }
 
 /* Connects one client socket to 'sock_path'.
@@ -276,10 +284,10 @@ done:
  * Side effects: performs framed handshake I/O.
  * Returns OK on success, ERR on invalid input or transport/decode failure.
  */
-static AdbxStatus client_handshake_on_fd(
-    int cfd, const uint8_t secret_token[SECRET_TOKEN_LEN],
-    handshake_status *out_status,
-    uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
+static AdbxStatus
+client_handshake_on_fd(int cfd, const uint8_t secret_token[SECRET_TOKEN_LEN],
+                       handshake_status *out_status,
+                       uint8_t out_resume_token[RESUME_TOKEN_LEN]) {
   if (cfd < 0 || !secret_token || !out_status)
     return ERR;
 
@@ -332,7 +340,7 @@ ConnManager *broker_test_make_cm_from_catalog(ConnCatalog *cat) {
 
 AdbxStatus broker_test_start(BrokerRunTestCtx *ctx, ConnManager *cm) {
   char *tmpdir = NULL;
-  PrivDir *pd = NULL;
+  AppDir *appd = NULL;
   Broker *b = NULL;
   int trc = 0;
 
@@ -340,24 +348,24 @@ AdbxStatus broker_test_start(BrokerRunTestCtx *ctx, ConnManager *cm) {
     return ERR;
   memset(ctx, 0, sizeof(*ctx));
 
-  pd = make_test_privdir(&tmpdir);
-  if (!pd) {
+  appd = make_test_appdir(&tmpdir);
+  if (!appd) {
     connm_destroy(cm);
     return ERR;
   }
 
-  b = broker_create(pd, cm);
+  b = broker_create(appd, cm, NULL);
   if (!b) {
     connm_destroy(cm);
-    privdir_clean(pd);
+    appdir_clean(appd);
     cleanup_tmpdir_root(tmpdir);
     free(tmpdir);
     return ERR;
   }
 
-  if (read_secret_token(pd, ctx->secret) != OK) {
+  if (read_secret_token(appd, ctx->secret) != OK) {
     broker_destroy(b);
-    privdir_clean(pd);
+    appdir_clean(appd);
     cleanup_tmpdir_root(tmpdir);
     free(tmpdir);
     return ERR;
@@ -366,7 +374,7 @@ AdbxStatus broker_test_start(BrokerRunTestCtx *ctx, ConnManager *cm) {
   trc = pthread_create(&ctx->tid, NULL, broker_run_thread, b);
   if (trc != 0) {
     broker_destroy(b);
-    privdir_clean(pd);
+    appdir_clean(appd);
     cleanup_tmpdir_root(tmpdir);
     free(tmpdir);
     memset(ctx, 0, sizeof(*ctx));
@@ -375,7 +383,7 @@ AdbxStatus broker_test_start(BrokerRunTestCtx *ctx, ConnManager *cm) {
 
   broker_test_msleep(50);
   ctx->broker = b;
-  ctx->priv_dir = pd;
+  ctx->app_dir = appd;
   ctx->tmpdir = tmpdir;
   return OK;
 }
@@ -389,7 +397,7 @@ void broker_test_stop(BrokerRunTestCtx *ctx) {
     pthread_join(ctx->tid, NULL);
     broker_destroy(ctx->broker);
   }
-  privdir_clean(ctx->priv_dir);
+  appdir_clean(ctx->app_dir);
   if (ctx->tmpdir) {
     cleanup_tmpdir_root(ctx->tmpdir);
     free(ctx->tmpdir);
@@ -405,11 +413,11 @@ AdbxStatus broker_test_request_json(const BrokerRunTestCtx *ctx,
   BufChannel *bc = NULL;
   handshake_status st = HS_ERR_INTERNAL;
 
-  if (!ctx || !ctx->priv_dir || !ctx->priv_dir->sock_path || !req_json ||
+  if (!ctx || !ctx->app_dir || !ctx->app_dir->sock_path || !req_json ||
       !out_resp_json)
     return ERR;
 
-  cfd = connect_client(ctx->priv_dir->sock_path);
+  cfd = connect_client(ctx->app_dir->sock_path);
   if (cfd < 0)
     goto err;
   if (client_handshake_on_fd(cfd, ctx->secret, &st, NULL) != OK || st != HS_OK)
@@ -425,8 +433,8 @@ AdbxStatus broker_test_request_json(const BrokerRunTestCtx *ctx,
   }
 
   sb_reset(out_resp_json);
-  if (frame_write_len(bc, (const uint8_t *)req_json, (uint32_t)strlen(req_json)) !=
-      OK)
+  if (frame_write_len(bc, (const uint8_t *)req_json,
+                      (uint32_t)strlen(req_json)) != OK)
     goto err;
   if (frame_read_len(bc, out_resp_json) != OK)
     goto err;

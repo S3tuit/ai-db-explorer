@@ -4,12 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "app_dir.h"
 #include "bufio.h"
 #include "byte_channel.h"
 #include "conn_manager.h"
 #include "db_backend.h"
 #include "handshake_codec.h"
-#include "private_dir.h"
 
 // This is an admission cap for the single threaded broker, not really a
 // concurrency option. Right now, the bottleneck of concurrency is probably db
@@ -32,10 +32,12 @@ typedef struct Broker Broker;
  */
 AdbxStatus broker_run(Broker *b);
 
-/* Creates a Broker rooted at 'pd'. On success the Broker takes ownership of
- * 'cm' and internally acquires an owned private-dir runtime plus shared secret
- * token. On failure ownership of 'cm' remains with caller. */
-Broker *broker_create(const PrivDir *pd, ConnManager *cm);
+/* Creates a Broker rooted at 'appd'. On success the Broker takes ownership of
+ * 'cm' and internally acquires an owned app-dir runtime plus shared secret
+ * token. On failure ownership of 'cm' remains with caller and 'out_err' may
+ * receive one startup error snapshot for app-dir/socket preparation.
+ */
+Broker *broker_create(const AppDir *appd, ConnManager *cm, AppDirErr *out_err);
 
 /* Frees 'b' and its owned entities. */
 void broker_destroy(Broker *b);

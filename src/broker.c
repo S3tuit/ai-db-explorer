@@ -50,10 +50,10 @@
 #define IDLE_TTL (20 * 60)         // 20 minutes
 
 struct Broker {
-  int listen_fd;            // file descriptor of the socket used to
-                            // accept incoming connection requets
-  ConnManager *cm;          // owned
-  PrivDirBrokerRuntime *rt; // owned private-dir runtime for socket/token paths
+  int listen_fd;           // file descriptor of the socket used to
+                           // accept incoming connection requets
+  ConnManager *cm;         // owned
+  AppDirBrokerRuntime *rt; // owned app-dir runtime for socket/token paths
 
   uint8_t secret_token[SECRET_TOKEN_LEN];
 
@@ -493,22 +493,19 @@ err_restore: {
   return -1;
 }
 
-/* Creates and initializes a Broker instance.
- * Takes ownership of 'cm' only on success and internally acquires a private-dir
- * runtime rooted at 'pd'.
- * Side effects: allocates Broker/session arrays, creates runtime directories,
- * writes the shared secret token, and creates the listen socket.
- * Returns a valid Broker* on success, NULL on any initialization failure.
- */
-Broker *broker_create(const PrivDir *pd, ConnManager *cm) {
-  if (!cm || !pd)
+Broker *broker_create(const AppDir *appd, ConnManager *cm, AppDirErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, APPDIR_ERR_NONE);
+  if (!cm || !appd) {
+    ADBX_ERR_SETF(out_err, APPDIR_ERR_INPUT,
+                  "broker init received invalid input.");
     return NULL;
+  }
 
   Broker *b = (Broker *)xcalloc(1, sizeof(Broker));
 
   b->listen_fd = -1;
   b->cm = NULL;
-  b->rt = privdir_broker_runtime_open(pd, b->secret_token);
+  b->rt = appdir_broker_runtime_open(appd, b->secret_token, out_err);
   if (!b->rt) {
     broker_destroy(b);
     return NULL;
@@ -525,8 +522,11 @@ Broker *broker_create(const PrivDir *pd, ConnManager *cm) {
   b->idle_sessions = parr_create(sizeof(BrokerMcpSession));
   parr_set_cleanup(b->idle_sessions, idle_sessions_cleanup, NULL);
 
-  b->listen_fd = make_listen_socket(b->rt->run_fd, PRIVDIR_SOCK_FILENAME);
+  b->listen_fd = make_listen_socket(b->rt->run_fd, APPDIR_SOCK_FILENAME);
   if (b->listen_fd < 0) {
+    ADBX_ERR_SETF(
+        out_err, APPDIR_ERR_RUNTIME, "failed to create broker socket '%s': %s.",
+        appd->sock_path ? appd->sock_path : "<unknown>", strerror(errno));
     broker_destroy(b);
     return NULL;
   }
@@ -535,13 +535,6 @@ Broker *broker_create(const PrivDir *pd, ConnManager *cm) {
   return b;
 }
 
-/* Destroys a Broker and all owned resources.
- * Owns and frees: session arrays, listen fd, owned private-dir runtime, and
- * ConnManager.
- * Side effects: closes file descriptors and removes broker private-dir
- * artifacts.
- * Error semantics: none (void destructor; safe on NULL).
- */
 void broker_destroy(Broker *b) {
   if (!b)
     return;
@@ -557,7 +550,7 @@ void broker_destroy(Broker *b) {
     b->listen_fd = -1;
   }
 
-  privdir_broker_runtime_clean(b->rt);
+  appdir_broker_runtime_clean(b->rt);
   b->rt = NULL;
 
   connm_destroy(b->cm);
