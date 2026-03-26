@@ -323,15 +323,28 @@ static AdbxTriStatus frame_read_cl(BufChannel *bc, StrBuf *out_payload) {
   // Allow reasonable stdio header growth (for example Content-Type or trace
   // headers) while still bounding memory and scan work.
   const size_t max_hdr_scan = 4096;
-  ssize_t idx = bufch_findn(bc, "\r\n\r\n", 4, max_hdr_scan);
-  if (idx < 0) {
-    // A clean EOF with no buffered bytes means the peer closed before the next
-    // frame started. Any buffered partial header is malformed.
+  size_t hdr_len = 0;
+  for (;;) {
+    ssize_t idx = bufch_find_buffered(bc, "\r\n\r\n", 4);
+    if (idx >= 0) {
+      hdr_len = (size_t)idx + 4;
+      break;
+    }
+
     size_t avail = 0;
     (void)bufch_peek(bc, &avail);
-    return (bc->eof && avail == 0) ? NO : ERR;
+    if (avail >= max_hdr_scan)
+      return ERR;
+
+    // Grow the buffered search window incrementally so live pipes do not block
+    // waiting for the entire max_hdr_scan quota before we scan for CRLFCRLF.
+    AdbxTriStatus rc = bufch_ensure(bc, avail + 1u);
+    if (rc == YES)
+      continue;
+    if (rc == NO)
+      return (avail == 0) ? NO : ERR;
+    return ERR;
   }
-  size_t hdr_len = (size_t)idx + 4;
 
   char *hdr = xmalloc(hdr_len + 1);
   if (bufch_read_exact(bc, hdr, hdr_len) != OK) {

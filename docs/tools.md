@@ -1,6 +1,10 @@
+<!-- Generated from docs/tools.json by py_utils/gen_tool_artifacts.py. Do not edit manually. -->
+
+# Tool Definitions
+
+Generated from `docs/tools.json` and aligned with MCP `2025-11-25`.
+
 ## list_database_connections
-Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
-`outputSchema` documents below explicitly target JSON Schema 2020-12:
 
 ```json
 {
@@ -30,7 +34,9 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
             },
             "type": {
               "type": "string",
-              "enum": ["postgres"],
+              "enum": [
+                "postgres"
+              ],
               "description": "Database backend type."
             },
             "readOnly": {
@@ -38,21 +44,24 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
               "description": "True when the effective safety policy enforces read-only access for this connection."
             }
           },
-          "required": ["connectionName", "type", "readOnly"],
+          "required": [
+            "connectionName",
+            "type",
+            "readOnly"
+          ],
           "additionalProperties": false
         }
       }
     },
-    "required": ["connections"],
+    "required": [
+      "connections"
+    ],
     "additionalProperties": false
   }
 }
 ```
 
 ## describe_relation
-
-Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
-`outputSchema` documents below explicitly target JSON Schema 2020-12:
 
 ```json
 {
@@ -79,7 +88,11 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
         "description": "Unqualified relation name."
       }
     },
-    "required": ["connectionName", "schemaName", "relationName"],
+    "required": [
+      "connectionName",
+      "schemaName",
+      "relationName"
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
@@ -98,7 +111,12 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
       },
       "relationKind": {
         "type": "string",
-        "enum": ["table", "view", "materialized_view", "foreign_table"],
+        "enum": [
+          "table",
+          "view",
+          "materialized_view",
+          "foreign_table"
+        ],
         "description": "Backend relation kind."
       },
       "columns": {
@@ -130,7 +148,10 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
               "description": "True when the column participates in at least one foreign-key constraint."
             },
             "references": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "description": "Referenced target for a foreign key, or null when the column is not a foreign key. When one column participates in multiple foreign-key constraints, returns only the first referenced target.",
               "properties": {
                 "schemaName": {
@@ -149,7 +170,11 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
                   "description": "Referenced column name."
                 }
               },
-              "required": ["schemaName", "relationName", "columnName"],
+              "required": [
+                "schemaName",
+                "relationName",
+                "columnName"
+              ],
               "additionalProperties": false
             }
           },
@@ -170,7 +195,9 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
                     "const": true
                   }
                 },
-                "required": ["isForeignKey"]
+                "required": [
+                  "isForeignKey"
+                ]
               },
               "then": {
                 "properties": {
@@ -191,16 +218,18 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
         }
       }
     },
-    "required": ["schemaName", "relationName", "relationKind", "columns"],
+    "required": [
+      "schemaName",
+      "relationName",
+      "relationKind",
+      "columns"
+    ],
     "additionalProperties": false
   }
 }
 ```
 
 ## run_sql_query
-
-Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
-`outputSchema` documents below explicitly target JSON Schema 2020-12:
 
 ```json
 {
@@ -222,7 +251,10 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
         "description": "SQL statement to validate and execute under broker safety policy."
       }
     },
-    "required": ["connectionName", "query"],
+    "required": [
+      "connectionName",
+      "query"
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
@@ -249,7 +281,10 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
               "description": "Database type name (for example: int4, text, date)."
             }
           },
-          "required": ["name", "type"],
+          "required": [
+            "name",
+            "type"
+          ],
           "additionalProperties": false
         }
       },
@@ -259,7 +294,10 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
         "items": {
           "type": "array",
           "items": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -294,9 +332,6 @@ Tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
 
 ## run_sql_query_tokens
 
-Future tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
-`outputSchema` documents below explicitly target JSON Schema 2020-12:
-
 ```json
 {
   "name": "run_sql_query_tokens",
@@ -325,7 +360,11 @@ Future tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
         }
       }
     },
-    "required": ["connectionName", "query", "parameters"],
+    "required": [
+      "connectionName",
+      "query",
+      "parameters"
+    ],
     "additionalProperties": false
   },
   "outputSchema": {
@@ -352,7 +391,10 @@ Future tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
               "description": "Database type name (for example: int4, text, date)."
             }
           },
-          "required": ["name", "type"],
+          "required": [
+            "name",
+            "type"
+          ],
           "additionalProperties": false
         }
       },
@@ -362,7 +404,10 @@ Future tool definition aligned with MCP `2025-11-25`. The `inputSchema` and
         "items": {
           "type": "array",
           "items": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

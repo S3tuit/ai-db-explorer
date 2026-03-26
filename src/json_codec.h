@@ -30,6 +30,12 @@ AdbxStatus json_arr_elem_u64(StrBuf *sb, uint64_t val);
 AdbxStatus json_arr_elem_l(StrBuf *sb, long val);
 AdbxStatus json_arr_elem_bool(StrBuf *sb, int val);
 AdbxStatus json_arr_elem_null(StrBuf *sb);
+/* Appends one trusted raw JSON value as an array element.
+ * The raw bytes are copied into 'sb' without  validation or escaping, so caller
+ * must guarantee 'raw_json' is a syntactically valid JSON value. Returns OK on
+ * success, ERR on invalid input or append failure.
+ */
+AdbxStatus json_arr_elem_raw_json(StrBuf *sb, const char *raw_json);
 
 // helper to init a json object and add "jsonrpc":"2.0"
 AdbxStatus json_rpc_begin(StrBuf *sb);

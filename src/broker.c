@@ -1088,6 +1088,38 @@ static void broker_list_database_connections(const BrokerRunArgs *args,
   return;
 }
 
+/* Handles the MCP 'tools/list' request and produces one BrokerResponse.
+ * It borrows 'args' and allocates one response object only.
+ * Side effects: none beyond response allocation; this method does not touch
+ * broker DB state. It is fail-soft and returns void; it sets '*out_resp' to a
+ * response object and leaves it NULL only on catastrophic allocation failure.
+ */
+static void broker_list_tools(const BrokerRunArgs *args,
+                              BrokerResponse **out_resp) {
+  assert(args != NULL);
+  assert(args->b != NULL);
+  assert(args->sess != NULL);
+  assert(args->jg != NULL);
+  assert(args->id != NULL);
+  assert(out_resp != NULL);
+
+  JsonGetter *jg = args->jg;
+  McpId *id = args->id;
+  (void)jg;
+
+  // MCP hosts may attach transport metadata or pagination hints we do not use
+  // to tools/list. This method only returns static broker-owned tool metadata,
+  // so ignoring params here preserves compatibility without relaxing
+  // validation on stateful methods such as tools/call.
+
+  *out_resp = bresp_create_tools_list(id);
+  if (!*out_resp) {
+    *out_resp =
+        bresp_create_err(id, BRESPERR_INTERNAL,
+                         "Internal error while serializing tools/list result.");
+  }
+}
+
 /* Handles the 'describe_relation' tool call and produces one BrokerResponse.
  * It borrows 'args' and allocates temporary decoded strings and one response
  * object. Side effects: acquires/uses one DB connection through ConnManager
@@ -1255,10 +1287,22 @@ static AdbxStatus broker_handle_request(Broker *b, BrokerMcpSession *sess,
     goto return_res;
   }
 
+  if (STREQ(method_sp.ptr, method_sp.len, "tools/list")) {
+    BrokerRunArgs run_args = {
+        .b = b,
+        .sess = sess,
+        .jg = &jg,
+        .id = &id,
+    };
+    broker_list_tools(&run_args, out_res);
+    goto return_res;
+  }
+
   if (!STREQ(method_sp.ptr, method_sp.len, "tools/call")) {
     *out_res = bresp_create_err(
         &id, BRESPERR_INMETHOD,
-        "Unsupported RPC method '%.*s'; only 'tools/call' is supported.",
+        "Unsupported RPC method '%.*s'; only 'tools/list' and 'tools/call' "
+        "are supported.",
         (int)method_sp.len, method_sp.ptr);
     goto return_res;
   }

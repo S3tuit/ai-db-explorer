@@ -1,4 +1,8 @@
+#include <signal.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "bufio.h"
 #include "frame_codec.h"
@@ -131,6 +135,77 @@ static void assert_frame_read_cl_ok(const char *raw,
   fclose(in);
 }
 
+/* Reads one Content-Length frame from a live pipe whose write end remains
+ * open after the full frame is written.
+ * It uses a child process so the parent can fail quickly if decoding blocks.
+ * Side effects: creates one pipe, forks one child, and keeps the writer open
+ * until the child completes or times out.
+ * Error semantics: test helper; aborts when decoding fails or blocks past the
+ * timeout.
+ */
+static void assert_frame_read_cl_ok_live_pipe(const char *raw,
+                                              const char *expected_payload) {
+  int pipefd[2] = {-1, -1};
+  ASSERT_TRUE(pipe(pipefd) == 0);
+
+  size_t raw_len = strlen(raw);
+  size_t off = 0;
+  while (off < raw_len) {
+    ssize_t nw = write(pipefd[1], raw + off, raw_len - off);
+    ASSERT_TRUE(nw > 0);
+    off += (size_t)nw;
+  }
+
+  pid_t pid = fork();
+  ASSERT_TRUE(pid >= 0);
+
+  if (pid == 0) {
+    ASSERT_TRUE(close(pipefd[1]) == 0);
+
+    ByteChannel *ch = stdio_bytechannel_wrap_fd(pipefd[0], -1);
+    BufChannel *bc = bufch_create(ch);
+    ASSERT_TRUE(bc != NULL);
+
+    StrBuf payload;
+    sb_init(&payload);
+
+    AdbxTriStatus rc = frame_read_cl(bc, &payload);
+    int ok = (rc == YES && expected_payload != NULL &&
+              payload.len == strlen(expected_payload) &&
+              memcmp(payload.data, expected_payload, payload.len) == 0);
+
+    sb_clean(&payload);
+    bufch_destroy(bc);
+    (void)close(pipefd[0]);
+    _exit(ok ? 0 : 1);
+  }
+
+  ASSERT_TRUE(close(pipefd[0]) == 0);
+
+  int status = 0;
+  int done = 0;
+  struct timespec delay = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
+  for (int i = 0; i < 200; i++) {
+    pid_t w = waitpid(pid, &status, WNOHANG);
+    ASSERT_TRUE(w >= 0);
+    if (w == pid) {
+      done = 1;
+      break;
+    }
+    ASSERT_TRUE(nanosleep(&delay, NULL) == 0);
+  }
+
+  if (!done) {
+    (void)kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    ASSERT_TRUE(!"frame_read_cl blocked on live pipe");
+  }
+
+  ASSERT_TRUE(close(pipefd[1]) == 0);
+  ASSERT_TRUE(WIFEXITED(status));
+  ASSERT_TRUE(WEXITSTATUS(status) == 0);
+}
+
 /* Reads one Content-Length framed payload from 'raw' and asserts decode
  * rejection.
  * It allocates one temporary memfile, channel, and StrBuf, and frees them
@@ -254,6 +329,18 @@ static void test_frame_read_cl_header_longer_than_old_cap(void) {
       "hello");
 }
 
+/* Accepts longer headers even when the peer keeps the pipe open after the
+ * request, matching stdio transports used by integration tests and MCP hosts.
+ */
+static void test_frame_read_cl_header_longer_than_old_cap_live_pipe(void) {
+  assert_frame_read_cl_ok_live_pipe(
+      "Content-Length: 5\r\n"
+      "X-Really-Long-Debug-Header: 1234567890123456789012345678901234567890\r\n"
+      "\r\n"
+      "hello",
+      "hello");
+}
+
 /* Rejects duplicate Content-Length headers to avoid ambiguous framing. */
 static void test_frame_read_cl_duplicate_content_length_rejected(void) {
   assert_frame_read_cl_err("Content-Length: 5\r\n"
@@ -306,6 +393,7 @@ int main(void) {
   test_frame_read_cl_content_type_before_length();
   test_frame_read_cl_with_unknown_header();
   test_frame_read_cl_header_longer_than_old_cap();
+  test_frame_read_cl_header_longer_than_old_cap_live_pipe();
   test_frame_read_cl_duplicate_content_length_rejected();
   test_frame_read_rpc_content_length_style();
   test_frame_read_rpc_jsonl_style();

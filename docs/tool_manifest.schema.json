@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "adbxplorer Tool Manifest",
+  "description": "Canonical manifest for the MCP tools exposed by adbxplorer.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "const": "./tool_manifest.schema.json",
+      "description": "Self-reference to the manifest schema file."
+    },
+    "mcpSpecVersion": {
+      "type": "string",
+      "const": "2025-11-25",
+      "description": "MCP specification version targeted by this manifest."
+    },
+    "tools": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered tool definitions exposed by the broker.",
+      "items": {
+        "$ref": "#/$defs/tool"
+      }
+    }
+  },
+  "required": [
+    "$schema",
+    "mcpSpecVersion",
+    "tools"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "json_schema_document": {
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": "string",
+          "const": "https://json-schema.org/draft/2020-12/schema"
+        }
+      },
+      "required": [
+        "$schema"
+      ],
+      "description": "One embedded JSON Schema document. Full meta-schema validation is handled by tooling outside this manifest schema."
+    },
+    "tool": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$",
+          "description": "Stable MCP tool name."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable tool title."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable tool description."
+        },
+        "inputSchema": {
+          "$ref": "#/$defs/json_schema_document"
+        },
+        "outputSchema": {
+          "$ref": "#/$defs/json_schema_document"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "inputSchema",
+        "outputSchema"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

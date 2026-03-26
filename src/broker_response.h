@@ -44,6 +44,14 @@ BrokerResponse *bresp_create_conn_profiles(const McpId *id,
                                            const ConnProfile *profiles,
                                            size_t n_profiles);
 
+/* Creates one BrokerResponse that serializes the MCP tools/list result.
+ * It borrows 'id' and deep-copies it. The available tool inventory is static
+ * broker metadata and is not caller-owned.
+ * Returns a caller-owned BrokerResponse on success, NULL on invalid input or
+ * allocation failure.
+ */
+BrokerResponse *bresp_create_tools_list(const McpId *id);
+
 /* Creates one BrokerResponse that owns one described relation payload.
  * It borrows 'id' and 'profile', and takes ownership of 'info' only on
  * success. On failure, caller retains ownership of 'info'. It deep-copies 'id'.

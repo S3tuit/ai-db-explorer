@@ -353,6 +353,14 @@ AdbxStatus json_arr_elem_null(StrBuf *sb) {
   return json_append(sb, "null");
 }
 
+AdbxStatus json_arr_elem_raw_json(StrBuf *sb, const char *raw_json) {
+  if (!sb || !raw_json)
+    return ERR;
+  if (json_maybe_comma(sb) != OK)
+    return ERR;
+  return sb_append_bytes(sb, raw_json, strlen(raw_json));
+}
+
 AdbxStatus json_rpc_begin(StrBuf *sb) {
   if (json_obj_begin(sb) != OK)
     return ERR;

@@ -57,6 +57,36 @@ static void test_json_builder_array(void) {
   sb_clean(&sb);
 }
 
+/* Verifies json_arr_elem_raw_json appends trusted raw JSON values into an
+ * array without escaping or extra wrapping.
+ */
+static void test_json_builder_array_raw_json(void) {
+  StrBuf sb;
+  sb_init(&sb);
+
+  ASSERT_TRUE(json_arr_begin(&sb) == OK);
+  ASSERT_TRUE(json_arr_elem_raw_json(&sb, "{\"a\":1}") == OK);
+  ASSERT_TRUE(json_arr_elem_raw_json(&sb, "true") == OK);
+  ASSERT_TRUE(json_arr_elem_raw_json(&sb, "[\"x\",null]") == OK);
+  ASSERT_TRUE(json_arr_end(&sb) == OK);
+
+  const char *expected = "[{\"a\":1},true,[\"x\",null]]";
+  assert_bytes_eq(sb.data, sb.len, expected, __FILE__, __LINE__);
+  sb_clean(&sb);
+}
+
+/* Verifies json_arr_elem_raw_json fails closed on invalid input pointers.
+ */
+static void test_json_arr_elem_raw_json_invalid_input(void) {
+  StrBuf sb;
+  sb_init(&sb);
+
+  ASSERT_TRUE(json_arr_elem_raw_json(NULL, "{\"a\":1}") == ERR);
+  ASSERT_TRUE(json_arr_elem_raw_json(&sb, NULL) == ERR);
+
+  sb_clean(&sb);
+}
+
 static void test_json_builder_nested(void) {
   StrBuf sb;
   sb_init(&sb);
@@ -354,6 +384,8 @@ static void test_jsget_exists_nonnull(void) {
 int main(void) {
   test_json_builder_object();
   test_json_builder_array();
+  test_json_builder_array_raw_json();
+  test_json_arr_elem_raw_json_invalid_input();
   test_json_builder_nested();
   test_jsget_simple_rpc_validation();
   test_jsget_create_and_destroy();

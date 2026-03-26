@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Validate tool payload JSON against the schemas documented in docs/tools.md.
+"""Validate tool payload JSON against the canonical docs/tools.json manifest.
 
-This script treats the fenced `json` blocks in docs/tools.md as the canonical
-tool definitions. Each block must decode to an object with a unique `name`
-field and both `inputSchema` and `outputSchema` objects.
+This script treats docs/tools.json as the canonical tool manifest. The manifest
+itself is first validated against docs/tool_manifest.schema.json, then every
+embedded inputSchema and outputSchema is validated against JSON Schema
+2020-12, and only then the selected payload instance is checked.
 
 Usage examples:
   echo '{"connections":[]}' | python3 py_utils/validate_tool_json.py \
@@ -17,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,12 +29,13 @@ except ImportError as exc:  # pragma: no cover - environment issue
     raise SystemExit(2)
 
 
-DEFAULT_TOOLS_MD = Path(__file__).resolve().parent.parent / "docs" / "tools.md"
-JSON_BLOCK_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
+DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+DEFAULT_TOOLS_JSON = DOCS_DIR / "tools.json"
+DEFAULT_MANIFEST_SCHEMA = DOCS_DIR / "tool_manifest.schema.json"
 
 
 class ToolSchemaError(RuntimeError):
-    """Raised when docs/tools.md cannot be parsed into tool definitions."""
+    """Raised when the canonical tool manifest cannot be loaded or validated."""
 
 
 def _format_error_path(error_path: list[Any]) -> str:
@@ -49,78 +50,137 @@ def _format_error_path(error_path: list[Any]) -> str:
     return "".join(parts)
 
 
-def load_tool_definitions(tools_md_path: Path = DEFAULT_TOOLS_MD) -> dict[str, dict[str, Any]]:
-    """Load all tool definition JSON objects from docs/tools.md."""
+def _load_json_file(path: Path) -> Any:
+    """Load one JSON file from disk.
+
+    It borrows 'path' and returns the decoded JSON value.
+    Raises ToolSchemaError on I/O or JSON parse failure.
+    """
     try:
-        text = tools_md_path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ToolSchemaError(f"unable to read '{tools_md_path}': {exc}") from exc
+        raise ToolSchemaError(f"unable to read '{path}': {exc}") from exc
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ToolSchemaError(f"invalid JSON in '{path}': {exc}") from exc
+
+
+def load_tool_definitions(
+    tools_json_path: Path = DEFAULT_TOOLS_JSON,
+    manifest_schema_path: Path = DEFAULT_MANIFEST_SCHEMA,
+) -> dict[str, dict[str, Any]]:
+    """Load and validate all tool definitions from docs/tools.json.
+
+    It validates the manifest structure against tool_manifest.schema.json, then
+    validates each embedded inputSchema and outputSchema against JSON Schema
+    2020-12. Returns a dict keyed by tool name.
+    Raises ToolSchemaError on malformed manifest content or invalid schemas.
+    """
+    manifest_schema = _load_json_file(manifest_schema_path)
+    tool_manifest = _load_json_file(tools_json_path)
+
+    try:
+        Draft202012Validator.check_schema(manifest_schema)
+        Draft202012Validator(manifest_schema).validate(tool_manifest)
+    except Exception as exc:
+        raise ToolSchemaError(
+            f"tool manifest '{tools_json_path}' does not match "
+            f"'{manifest_schema_path}': {exc}"
+        ) from exc
+
+    tools = tool_manifest.get("tools")
+    if not isinstance(tools, list) or not tools:
+        raise ToolSchemaError(f"manifest '{tools_json_path}' is missing tools[]")
 
     tool_defs: dict[str, dict[str, Any]] = {}
-    for match in JSON_BLOCK_RE.finditer(text):
-        block = match.group(1)
-        try:
-            tool_def = json.loads(block)
-        except json.JSONDecodeError as exc:
-            raise ToolSchemaError(
-                f"invalid JSON code block in '{tools_md_path}': {exc}"
-            ) from exc
-
+    for tool_def in tools:
         if not isinstance(tool_def, dict):
-            raise ToolSchemaError("each tool JSON block must decode to an object")
+            raise ToolSchemaError("each manifest tool entry must be an object")
 
         name = tool_def.get("name")
         if not isinstance(name, str) or not name:
-            raise ToolSchemaError("each tool JSON block must contain a non-empty 'name'")
+            raise ToolSchemaError("each tool must contain a non-empty 'name'")
         if name in tool_defs:
             raise ToolSchemaError(f"duplicate tool definition for '{name}'")
 
-        if not isinstance(tool_def.get("inputSchema"), dict):
+        input_schema = tool_def.get("inputSchema")
+        output_schema = tool_def.get("outputSchema")
+        if not isinstance(input_schema, dict):
             raise ToolSchemaError(f"tool '{name}' is missing an object 'inputSchema'")
-        if not isinstance(tool_def.get("outputSchema"), dict):
-            raise ToolSchemaError(f"tool '{name}' is missing an object 'outputSchema'")
+        if not isinstance(output_schema, dict):
+            raise ToolSchemaError(
+                f"tool '{name}' is missing an object 'outputSchema'"
+            )
+
+        try:
+            Draft202012Validator.check_schema(input_schema)
+        except Exception as exc:
+            raise ToolSchemaError(
+                f"tool '{name}' has invalid inputSchema: {exc}"
+            ) from exc
+        try:
+            Draft202012Validator.check_schema(output_schema)
+        except Exception as exc:
+            raise ToolSchemaError(
+                f"tool '{name}' has invalid outputSchema: {exc}"
+            ) from exc
 
         tool_defs[name] = tool_def
 
-    if not tool_defs:
-        raise ToolSchemaError(f"no tool definition JSON blocks found in '{tools_md_path}'")
     return tool_defs
 
 
 def get_tool_schema(
-    tool_name: str, schema_kind: str, tools_md_path: Path = DEFAULT_TOOLS_MD
+    tool_name: str,
+    schema_kind: str,
+    tools_json_path: Path = DEFAULT_TOOLS_JSON,
+    manifest_schema_path: Path = DEFAULT_MANIFEST_SCHEMA,
 ) -> dict[str, Any]:
-    """Return one schema from docs/tools.md after validating the schema itself."""
+    """Return one validated tool schema from the canonical tool manifest."""
     if schema_kind not in {"input", "output"}:
         raise ToolSchemaError(f"unsupported schema kind '{schema_kind}'")
 
-    tool_defs = load_tool_definitions(tools_md_path)
+    tool_defs = load_tool_definitions(tools_json_path, manifest_schema_path)
     tool_def = tool_defs.get(tool_name)
     if tool_def is None:
         known = ", ".join(sorted(tool_defs))
         raise ToolSchemaError(f"unknown tool '{tool_name}'. Known tools: {known}")
 
     schema_key = "inputSchema" if schema_kind == "input" else "outputSchema"
-    schema = tool_def[schema_key]
-    Draft202012Validator.check_schema(schema)
-    return schema
+    return tool_def[schema_key]
 
 
 def validate_instance(
-    instance: Any, tool_name: str, schema_kind: str, tools_md_path: Path = DEFAULT_TOOLS_MD
+    instance: Any,
+    tool_name: str,
+    schema_kind: str,
+    tools_json_path: Path = DEFAULT_TOOLS_JSON,
+    manifest_schema_path: Path = DEFAULT_MANIFEST_SCHEMA,
 ) -> list[str]:
     """Validate one JSON instance and return human-readable error strings."""
-    schema = get_tool_schema(tool_name, schema_kind, tools_md_path)
+    schema = get_tool_schema(
+        tool_name,
+        schema_kind,
+        tools_json_path,
+        manifest_schema_path,
+    )
     validator = Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(instance), key=lambda err: list(err.absolute_path))
-    return [f"{_format_error_path(list(err.absolute_path))}: {err.message}" for err in errors]
+    errors = sorted(
+        validator.iter_errors(instance), key=lambda err: list(err.absolute_path)
+    )
+    return [
+        f"{_format_error_path(list(err.absolute_path))}: {err.message}"
+        for err in errors
+    ]
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Validate a JSON payload against one tool schema in docs/tools.md."
+        description="Validate a JSON payload against one tool schema in docs/tools.json."
     )
-    parser.add_argument("tool_name", help="Tool name from docs/tools.md")
+    parser.add_argument("tool_name", help="Tool name from docs/tools.json")
     parser.add_argument(
         "schema_kind",
         choices=("input", "output"),
@@ -132,9 +192,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="JSON instance to validate. If omitted, the script reads JSON from stdin.",
     )
     parser.add_argument(
-        "--tools-md",
-        default=str(DEFAULT_TOOLS_MD),
-        help="Path to the tools.md file to load. Defaults to %(default)s",
+        "--tools-json",
+        default=str(DEFAULT_TOOLS_JSON),
+        help="Path to the tools.json manifest to load. Defaults to %(default)s",
+    )
+    parser.add_argument(
+        "--manifest-schema",
+        default=str(DEFAULT_MANIFEST_SCHEMA),
+        help="Path to the tool manifest schema. Defaults to %(default)s",
     )
     return parser.parse_args(argv)
 
@@ -164,7 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             instance,
             args.tool_name,
             args.schema_kind,
-            Path(args.tools_md),
+            Path(args.tools_json),
+            Path(args.manifest_schema),
         )
     except ToolSchemaError as exc:
         print(f"Error: {exc}", file=sys.stderr)
