@@ -1090,9 +1090,9 @@ static void broker_list_database_connections(const BrokerRunArgs *args,
 
 /* Handles the MCP 'tools/list' request and produces one BrokerResponse.
  * It borrows 'args' and allocates one response object only.
- * Side effects: none beyond response allocation; this method does not touch
- * broker DB state. It is fail-soft and returns void; it sets '*out_resp' to a
- * response object and leaves it NULL only on catastrophic allocation failure.
+ * This method does not touch broker DB state.
+ * It is fail-soft and returns void; it sets '*out_resp' to a response object
+ * and leaves it NULL only on catastrophic allocation failure.
  */
 static void broker_list_tools(const BrokerRunArgs *args,
                               BrokerResponse **out_resp) {
@@ -1103,9 +1103,7 @@ static void broker_list_tools(const BrokerRunArgs *args,
   assert(args->id != NULL);
   assert(out_resp != NULL);
 
-  JsonGetter *jg = args->jg;
   McpId *id = args->id;
-  (void)jg;
 
   // MCP hosts may attach transport metadata or pagination hints we do not use
   // to tools/list. This method only returns static broker-owned tool metadata,

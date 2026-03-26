@@ -2,7 +2,6 @@
 
 #include "config_dir.h"
 #include "file_io.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -84,6 +83,25 @@ static AdbxStatus sstore_str_to_kind(const char *s, SstoreKind *out_kind) {
     return OK;
   }
   return ERR;
+}
+
+/* Logs one warning when the file backend is selected as the effective secret
+ * store. It allocates nothing and borrows no caller-owned memory.
+ */
+static void sstore_log_file_backend_warning(void) {
+#if defined(__linux__)
+  fprintf(stderr,
+          "WARN: using file-based secret storage; install and activate "
+          "libsecret/Secret Service for OS-backed credential storage.\n");
+#elif defined(__APPLE__)
+  fprintf(stderr,
+          "WARN: using file-based secret storage; activate Keychain for "
+          "OS-backed credential storage.\n");
+#else
+  fprintf(stderr,
+          "WARN: using file-based secret storage; no OS-native secret-store "
+          "integration is active on this platform.\n");
+#endif
 }
 
 /* Acquires the backend-selection lock under the default app dir.
@@ -537,11 +555,17 @@ SecretStore *secret_store_create(SecretStoreErr *out_err) {
   if (sstore_resolve_backend(&kind, &store, out_err) != OK)
     return NULL;
 
-  if (store)
+  if (store) {
+    if (kind == SSTORE_KIND_FILE)
+      sstore_log_file_backend_warning();
     return store;
+  }
 
   if (sstore_open_selected_kind(kind, &store, out_err) != OK)
     return NULL;
+
+  if (kind == SSTORE_KIND_FILE)
+    sstore_log_file_backend_warning();
 
   return store;
 }
