@@ -908,12 +908,70 @@ static void test_validator_plan(void) {
   catalog_destroy(cat);
 }
 
+// Verifies validator correctly categorizes safe/unsafe functions
+static void test_validator_safe_funcs_pg(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+  SafetyPolicy *policy = &cp->safe_policy;
+  ASSERT_TRUE(policy != NULL);
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  // backend-provided builtin functions should validate without extra config
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT lower(u.name) FROM users u WHERE u.id = 1;", 1,
+                  VERR_NONE);
+  ASSERT_VALIDATE(db, cp, policy, "SELECT version();", 1, VERR_NONE);
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "SELECT jsonb_build_object('id', u.id, 'name', u.name) FROM users u "
+      "WHERE u.id = 1;",
+      1, VERR_NONE);
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "SELECT timezone('UTC', make_timestamptz(2024, 1, 1, 12, 0, 0)) "
+      "FROM users u WHERE u.id = 1;",
+      1, VERR_NONE);
+
+  // nested builtin calls should remain safe when each callee is in the
+  // generated Postgres allowlist
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT array_length(string_to_array(lower(u.name), 'a'), 1) "
+                  "FROM users u WHERE u.id = 1;",
+                  1, VERR_NONE);
+
+  // config-defined safe functions must still compose with backend builtins
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "SELECT users.calc_balance(u.id) FROM users u WHERE u.id = 1;", 1,
+      VERR_NONE);
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "SELECT lower(transfer_amount(u.id)::text) FROM users u WHERE u.id = 1;",
+      1, VERR_NONE);
+
+  // excluded/unknown functions must fail closed
+  ASSERT_VALIDATE_MSG(db, cp, policy,
+                      "SELECT random() FROM users u WHERE u.id = 1;", 0,
+                      VERR_FUNC_UNSAFE, "random");
+  ASSERT_VALIDATE_MSG(db, cp, policy,
+                      "SELECT calc_balance(u.id) FROM users u WHERE u.id = 1;",
+                      0, VERR_FUNC_UNSAFE, "calc_balance");
+
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
 int main(void) {
   test_validator_accepts();
   test_validator_rejects_rules();
   test_validator_from_notes();
   test_validator_token_param_binding();
   test_validator_plan();
+  test_validator_safe_funcs_pg();
   fprintf(stderr, "OK: test_validator\n");
   return 0;
 }

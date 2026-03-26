@@ -65,12 +65,23 @@ BENCH_SRC := $(wildcard benchmarks/bench_*.c)
 BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
 BENCH_COMMON_SRC := src/arena.c src/utils.c
 
-.PHONY: all clean run test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-tools
+.PHONY: all clean run test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-files
 
 all: $(BIN)
 
-gen-tools:
+gen-files:
 	python3 py_utils/gen_tool_artifacts.py
+	python3 py_utils/gen_pg_safe_functions.py --normalize
+
+src/tool_defs.generated.inc: docs/tools.json docs/tool_manifest.schema.json py_utils/gen_tool_artifacts.py py_utils/validate_tool_json.py
+	python3 py_utils/gen_tool_artifacts.py
+
+src/pg_safe_func.generated.inc: docs/pg_safe_functions.json py_utils/gen_pg_safe_functions.py
+	python3 py_utils/gen_pg_safe_functions.py
+
+build/broker_response.o build/testobj/broker_response.o build/asan/broker_response.o: src/tool_defs.generated.inc
+
+build/postgres_backend.o build/testobj/postgres_backend.o build/asan/postgres_backend.o: src/pg_safe_func.generated.inc
 
 # Build vendored libpg_query (static).
 $(LIBPG_QUERY_LIB):
