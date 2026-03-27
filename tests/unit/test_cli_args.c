@@ -10,8 +10,8 @@
  * Side effects: initializes a local error buffer for cli_parse_args().
  * Error semantics: assertions abort on parse failure.
  */
-static void parse_ok_impl(int argc, char **argv, CliArgs *out,
-                          const char *file, int line) {
+static void parse_ok_impl(int argc, char **argv, CliArgs *out, const char *file,
+                          int line) {
   char err[512];
   memset(err, 0, sizeof(err));
   memset(out, 0, sizeof(*out));
@@ -21,7 +21,7 @@ static void parse_ok_impl(int argc, char **argv, CliArgs *out,
   ASSERT_TRUE_AT(err[0] == '\0', file, line);
 }
 
-#define PARSE_OK(argc, argv, out)                                             \
+#define PARSE_OK(argc, argv, out)                                              \
   parse_ok_impl((argc), (argv), (out), __FILE__, __LINE__)
 
 /* Parses one argv vector and asserts failure with an error substring.
@@ -43,9 +43,8 @@ static void parse_err_contains_impl(int argc, char **argv,
   ASSERT_TRUE_AT(strstr(err, expected_substr) != NULL, file, line);
 }
 
-#define PARSE_ERR_CONTAINS(argc, argv, expected_substr)                       \
-  parse_err_contains_impl((argc), (argv), (expected_substr), __FILE__,        \
-                          __LINE__)
+#define PARSE_ERR_CONTAINS(argc, argv, expected_substr)                        \
+  parse_err_contains_impl((argc), (argv), (expected_substr), __FILE__, __LINE__)
 
 /* Verifies the default CLI shape selects client mode with no optional paths.
  * It allocates no memory and borrows the stack argv vector.
@@ -66,8 +65,8 @@ static void test_cli_parse_defaults_to_client(void) {
  * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_client_paths(void) {
-  char *argv[] = {"adbxplorer", "-client", "-appdir", "/tmp/app",
-                  "-config",    "/tmp/conf.json"};
+  char *argv[] = {"adbxplorer", "-client", "-appdir",
+                  "/tmp/app",   "-config", "/tmp/conf.json"};
   CliArgs out = {0};
 
   PARSE_OK(6, argv, &out);
@@ -81,12 +80,25 @@ static void test_cli_parse_client_paths(void) {
  * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_broker_paths(void) {
-  char *argv[] = {"adbxplorer", "-broker", "-appdir", "/tmp/app",
-                  "-config",    "/tmp/conf.json"};
+  char *argv[] = {"adbxplorer", "-broker", "-appdir",
+                  "/tmp/app",   "-config", "/tmp/conf.json"};
   CliArgs out = {0};
 
   PARSE_OK(6, argv, &out);
   ASSERT_TRUE(out.mode == APP_MODE_BROKER);
+  ASSERT_STREQ(out.app_dir_input, "/tmp/app");
+  ASSERT_STREQ(out.config_input, "/tmp/conf.json");
+}
+
+/* Verifies which-config mode accepts both app and config paths.
+ */
+static void test_cli_parse_which_config_paths(void) {
+  char *argv[] = {"adbxplorer", "-which-config", "-appdir",
+                  "/tmp/app",   "-config",       "/tmp/conf.json"};
+  CliArgs out = {0};
+
+  PARSE_OK(6, argv, &out);
+  ASSERT_TRUE(out.mode == APP_MODE_WHICH_CONFIG);
   ASSERT_STREQ(out.app_dir_input, "/tmp/app");
   ASSERT_STREQ(out.config_input, "/tmp/conf.json");
 }
@@ -180,6 +192,9 @@ static void test_cli_parse_cred_reset_everything(void) {
 static void test_cli_parse_rejects_conflicting_modes(void) {
   char *argv[] = {"adbxplorer", "-client", "-broker"};
   PARSE_ERR_CONTAINS(3, argv, "conflicting top-level modes");
+
+  char *argv_which[] = {"adbxplorer", "-which-config", "-broker"};
+  PARSE_ERR_CONTAINS(3, argv_which, "conflicting top-level modes");
 }
 
 /* Verifies conflicting credential commands are rejected.
@@ -270,6 +285,7 @@ int main(void) {
   test_cli_parse_defaults_to_client();
   test_cli_parse_client_paths();
   test_cli_parse_broker_paths();
+  test_cli_parse_which_config_paths();
   test_cli_parse_cred_sync_without_connection();
   test_cli_parse_cred_sync_with_connection();
   test_cli_parse_cred_test_without_connection();

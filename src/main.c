@@ -24,10 +24,11 @@
 static void print_usage(const char *prog) {
   fprintf(stderr,
           "Usage:\n"
-          "  %s [-client|-broker] [-appdir <path>] [-config <path>]\n"
+          "  %s [-client|-broker|-which-config] [-appdir <path>] "
+          "[-config <path>]\n"
           "  %s -cred (--sync|-s [connection] | --test|-t [connection] |\n"
           "           --reset|-r (<namespace> | --everything))\n"
-          "           [-config <path>]\n",
+           "           [-config <path>]\n",
           prog, prog);
 }
 
@@ -54,6 +55,59 @@ static void print_appdir_error(const char *prefix, const AppDirErr *err) {
   if (err && err->msg[0] != '\0')
     msg = err->msg;
   fprintf(stderr, "ERROR: %s: %s\n", prefix ? prefix : "startup failed", msg);
+}
+
+/* Resolves and prints the runtime/config paths implied by one CLI selection.
+ * It borrows 'cli' and allocates transient path objects that are released
+ * before returning.
+ * Side effects: reads env/config path policy and writes the resolved paths to
+ * stdout.
+ * Returns 0 on success, 1 on invalid input or path-resolution failure.
+ */
+static int run_which_config_mode(const CliArgs *cli) {
+  if (!cli)
+    return 1;
+
+  AppDirErr appdir_err;
+  AppDir *appd = appdir_resolve(cli->app_dir_input, &appdir_err);
+  if (!appd) {
+    print_appdir_error("failed to resolve app directory", &appdir_err);
+    return 1;
+  }
+
+  char *internal_dir = NULL;
+  char *internal_dir_err = NULL;
+  if (confdir_default_resolve(&internal_dir, NULL, &internal_dir_err) != OK) {
+    fprintf(stderr, "ERROR: failed to resolve internal config directory: %s\n",
+            internal_dir_err ? internal_dir_err : "unknown error");
+    free(internal_dir_err);
+    appdir_clean(appd);
+    return 1;
+  }
+
+  char *config_path = NULL;
+  char *config_err = NULL;
+  if (confdir_resolve_config_path(cli->config_input, &config_path, &config_err) !=
+      OK) {
+    fprintf(stderr, "ERROR: failed to resolve configuration file: %s\n",
+            config_err ? config_err : "unknown error");
+    free(config_err);
+    free(internal_dir);
+    appdir_clean(appd);
+    return 1;
+  }
+
+  printf("Runtime shared directory: %s\n", appd->run_dir);
+  printf("Runtime secret directory: %s\n", appd->secret_dir);
+  printf("Internal state/config directory: %s\n", internal_dir);
+  printf("Configuration file: %s\n", config_path);
+
+  free(config_path);
+  free(config_err);
+  free(internal_dir);
+  free(internal_dir_err);
+  appdir_clean(appd);
+  return 0;
 }
 
 /* Parses the process CLI into one structured selection used by main().
@@ -87,6 +141,9 @@ int main(int argc, char **argv) {
 
   if (cli.mode == APP_MODE_CRED)
     return run_cred_mode(&cli.cred_req, cli.config_input);
+
+  if (cli.mode == APP_MODE_WHICH_CONFIG)
+    return run_which_config_mode(&cli);
 
   if (cli.mode == APP_MODE_CLIENT) {
     AppDirErr appdir_err;

@@ -9,6 +9,7 @@
 typedef enum {
   APP_MODE_CLIENT = 0,
   APP_MODE_BROKER,
+  APP_MODE_WHICH_CONFIG,
   APP_MODE_CRED,
 } AppMode;
 

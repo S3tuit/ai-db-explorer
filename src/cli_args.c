@@ -119,22 +119,30 @@ AdbxStatus cli_parse_args(int argc, char **argv, CliArgs *out, char *err_buf,
     if (strcmp(argv[i], "-client") == 0) {
       if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_CLIENT) != OK) {
         cli_set_errf(err_buf, err_cap,
-                     "conflicting top-level modes: '-client', '-broker', and "
-                     "'-cred' are mutually exclusive");
+                     "conflicting top-level modes: '-client', '-broker', "
+                     "'-which-config', and '-cred' are mutually exclusive");
         return ERR;
       }
     } else if (strcmp(argv[i], "-broker") == 0) {
       if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_BROKER) != OK) {
         cli_set_errf(err_buf, err_cap,
-                     "conflicting top-level modes: '-client', '-broker', and "
-                     "'-cred' are mutually exclusive");
+                     "conflicting top-level modes: '-client', '-broker', "
+                     "'-which-config', and '-cred' are mutually exclusive");
+        return ERR;
+      }
+    } else if (strcmp(argv[i], "-which-config") == 0) {
+      if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_WHICH_CONFIG) !=
+          OK) {
+        cli_set_errf(err_buf, err_cap,
+                     "conflicting top-level modes: '-client', '-broker', "
+                     "'-which-config', and '-cred' are mutually exclusive");
         return ERR;
       }
     } else if (strcmp(argv[i], "-cred") == 0) {
       if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_CRED) != OK) {
         cli_set_errf(err_buf, err_cap,
-                     "conflicting top-level modes: '-client', '-broker', and "
-                     "'-cred' are mutually exclusive");
+                     "conflicting top-level modes: '-client', '-broker', "
+                     "'-which-config', and '-cred' are mutually exclusive");
         return ERR;
       }
     } else if (strcmp(argv[i], "--sync") == 0 || strcmp(argv[i], "-s") == 0) {

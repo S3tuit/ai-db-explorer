@@ -12,6 +12,21 @@
 #include "file_io.h"
 #include "test.h"
 
+static const char TEST_CONFIG_JSON[] =
+    "{"
+    "\"version\":\"1.0\","
+    "\"configNamespace\":\"TestNamespace\","
+    "\"safetyPolicy\":{},"
+    "\"databases\":[{"
+    "\"type\":\"postgres\","
+    "\"connectionName\":\"TestDb\","
+    "\"host\":\"localhost\","
+    "\"port\":5432,"
+    "\"username\":\"postgres\","
+    "\"database\":\"postgres\""
+    "}]"
+    "}";
+
 /* Creates one temporary directory path.
  * Ownership: returns heap string owned by caller.
  * Side effects: creates filesystem directory under /tmp.
@@ -118,8 +133,54 @@ static void test_default_app_dir_open(void) {
   free(tmpdir);
 }
 
-/* Verifies default config open creates the app-owned file and returns a usable
- * fd/path pair under one valid default base directory.
+/* Verifies resolve-only helpers return default paths without creating files.
+ * It borrows no heap input; all allocations are cleaned inside the test.
+ */
+static void test_default_config_paths_resolve_without_side_effects(void) {
+  char *tmpdir = make_tmpdir();
+  ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmpdir, 1) == 0);
+  ASSERT_TRUE(setenv("HOME", tmpdir, 1) == 0);
+
+  char *app_path = NULL;
+  ConfDirErrCode code = CONFDIR_ERR_NONE;
+  char *err = NULL;
+  ASSERT_TRUE(confdir_default_resolve(&app_path, &code, &err) == OK);
+  ASSERT_TRUE(err == NULL);
+  ASSERT_TRUE(code == CONFDIR_ERR_NONE);
+  ASSERT_TRUE(app_path != NULL);
+
+  char *cfg_path = NULL;
+  ASSERT_TRUE(confdir_resolve_config_path(NULL, &cfg_path, &err) == OK);
+  ASSERT_TRUE(err == NULL);
+  ASSERT_TRUE(cfg_path != NULL);
+
+#ifdef __APPLE__
+  char expected_app[512];
+  char expected_cfg[512];
+  snprintf(expected_app, sizeof(expected_app),
+           "%s/Library/Application Support/adbxplorer", tmpdir);
+  snprintf(expected_cfg, sizeof(expected_cfg),
+           "%s/Library/Application Support/adbxplorer/config.json", tmpdir);
+#else
+  char expected_app[512];
+  char expected_cfg[512];
+  snprintf(expected_app, sizeof(expected_app), "%s/adbxplorer", tmpdir);
+  snprintf(expected_cfg, sizeof(expected_cfg), "%s/adbxplorer/config.json",
+           tmpdir);
+#endif
+  ASSERT_TRUE(strcmp(app_path, expected_app) == 0);
+  ASSERT_TRUE(strcmp(cfg_path, expected_cfg) == 0);
+  ASSERT_TRUE(access(cfg_path, F_OK) != 0);
+  ASSERT_TRUE(access(app_path, F_OK) != 0);
+
+  free(cfg_path);
+  free(app_path);
+  free(err);
+  free(tmpdir);
+}
+
+/* Verifies default config open requires one pre-existing app-owned file and
+ * returns a usable fd/path pair under one valid default base directory.
  * It borrows no heap input; all allocations are cleaned inside the test.
  */
 static void test_default_config_open_from_platform_policy(void) {
@@ -131,8 +192,20 @@ static void test_default_config_open_from_platform_policy(void) {
   char *base = make_platform_base_dir(tmpdir);
 #endif
 
-  ConfFile cfg = {.fd = -1, .path = NULL};
+  ConfDir dir = {.fd = -1, .path = NULL};
+  ConfDirErrCode code = CONFDIR_ERR_NONE;
   char *err = NULL;
+  ASSERT_TRUE(confdir_default_open(&dir, &code, &err) == OK);
+  ASSERT_TRUE(err == NULL);
+  ASSERT_TRUE(code == CONFDIR_ERR_NONE);
+
+  char *cfg_path = path_join(dir.path, "config.json");
+  ASSERT_TRUE(cfg_path != NULL);
+  ASSERT_TRUE(fileio_write_exact(cfg_path, (const uint8_t *)TEST_CONFIG_JSON,
+                                 strlen(TEST_CONFIG_JSON), 0600) == OK);
+  confdir_clean(&dir);
+
+  ConfFile cfg = {.fd = -1, .path = NULL};
   ASSERT_TRUE(confdir_open(NULL, &cfg, &err) == OK);
   ASSERT_TRUE(err == NULL);
   ASSERT_TRUE(cfg.fd >= 0);
@@ -161,13 +234,15 @@ static void test_default_config_open_from_platform_policy(void) {
 
   cleanup_config_path_tree(cfg.path);
   conffile_clean(&cfg);
+  free(cfg_path);
 #ifdef __APPLE__
   free(base);
 #endif
   free(tmpdir);
 }
 
-/* Verifies Linux fallback creates HOME/.config when XDG is unset.
+/* Verifies Linux fallback creates HOME/.config and the app dir when XDG is
+ * unset.
  * It borrows no heap input; all allocations are cleaned inside the test.
  */
 static void test_linux_home_fallback_creates_dot_config(void) {
@@ -178,23 +253,24 @@ static void test_linux_home_fallback_creates_dot_config(void) {
   ASSERT_TRUE(unsetenv("XDG_CONFIG_HOME") == 0);
   ASSERT_TRUE(setenv("HOME", tmpdir, 1) == 0);
 
-  ConfFile cfg = {.fd = -1, .path = NULL};
+  ConfDir dir = {.fd = -1, .path = NULL};
+  ConfDirErrCode code = CONFDIR_ERR_NONE;
   char *err = NULL;
-  ASSERT_TRUE(confdir_open(NULL, &cfg, &err) == OK);
+  ASSERT_TRUE(confdir_default_open(&dir, &code, &err) == OK);
   ASSERT_TRUE(err == NULL);
-  ASSERT_TRUE(cfg.path != NULL);
+  ASSERT_TRUE(code == CONFDIR_ERR_NONE);
+  ASSERT_TRUE(dir.path != NULL);
 
   char expected[512];
-  snprintf(expected, sizeof(expected), "%s/.config/adbxplorer/config.json",
-           tmpdir);
-  ASSERT_TRUE(strcmp(cfg.path, expected) == 0);
+  snprintf(expected, sizeof(expected), "%s/.config/adbxplorer", tmpdir);
+  ASSERT_TRUE(strcmp(dir.path, expected) == 0);
 
   struct stat st = {0};
-  ASSERT_TRUE(fstat(cfg.fd, &st) == 0);
-  ASSERT_TRUE(S_ISREG(st.st_mode));
+  ASSERT_TRUE(fstat(dir.fd, &st) == 0);
+  ASSERT_TRUE(S_ISDIR(st.st_mode));
 
-  cleanup_config_path_tree(cfg.path);
-  conffile_clean(&cfg);
+  (void)rmdir(dir.path);
+  confdir_clean(&dir);
   free(tmpdir);
 #endif
 }
@@ -225,6 +301,38 @@ static void test_linux_missing_xdg_base_fails_closed(void) {
   free(missing);
   free(tmpdir);
 #endif
+}
+
+/* Verifies default config open fails closed when the default file is missing.
+ * It borrows no heap input; all allocations are cleaned inside the test.
+ */
+static void test_default_config_open_missing_file_fails_closed(void) {
+  char *tmpdir = make_tmpdir();
+  ASSERT_TRUE(setenv("XDG_CONFIG_HOME", tmpdir, 1) == 0);
+  ASSERT_TRUE(setenv("HOME", tmpdir, 1) == 0);
+
+#ifdef __APPLE__
+  char *base = make_platform_base_dir(tmpdir);
+#endif
+
+  ConfFile cfg = {.fd = -1, .path = NULL};
+  char *err = NULL;
+  ASSERT_TRUE(confdir_open(NULL, &cfg, &err) == ERR);
+  ASSERT_TRUE(cfg.fd < 0);
+  ASSERT_TRUE(cfg.path == NULL);
+  ASSERT_TRUE(err != NULL);
+
+  char *resolved = NULL;
+  ASSERT_TRUE(confdir_resolve_config_path(NULL, &resolved, NULL) == OK);
+  ASSERT_TRUE(access(resolved, F_OK) != 0);
+
+  free(resolved);
+  free(err);
+  conffile_clean(&cfg);
+#ifdef __APPLE__
+  free(base);
+#endif
+  free(tmpdir);
 }
 
 /* Verifies default app-dir open reports ENV classification for invalid env.
@@ -433,9 +541,11 @@ static void test_reject_directory_as_config_file(void) {
 
 int main(void) {
   test_default_app_dir_open();
+  test_default_config_paths_resolve_without_side_effects();
   test_default_config_open_from_platform_policy();
   test_linux_home_fallback_creates_dot_config();
   test_linux_missing_xdg_base_fails_closed();
+  test_default_config_open_missing_file_fails_closed();
   test_default_app_dir_open_reports_env_error();
   test_default_app_dir_open_reports_dir_error();
   test_macos_missing_platform_base_fails_closed();

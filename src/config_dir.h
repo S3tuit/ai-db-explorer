@@ -21,6 +21,48 @@ typedef enum {
   CONFDIR_ERR_DIR,
 } ConfDirErrCode;
 
+// TODO: refactor error reporting for this entity to use the adbx_err style.
+
+/* Resolves the default internal app-owned config directory path for the
+ * current platform without touching the filesystem.
+ *
+ * Behavior:
+ * - Linux:
+ *   - $XDG_CONFIG_HOME/adbxplorer when XDG_CONFIG_HOME is set to an absolute
+ *     path.
+ *   - $HOME/.config/adbxplorer otherwise.
+ * - macOS:
+ *   - $HOME/Library/Application Support/adbxplorer
+ *
+ * Ownership:
+ * - On OK, '*out_path' receives one heap-allocated absolute path owned by the
+ *   caller, who must free().
+ * - On ERR, '*out_code' reports whether the failure came from invalid env
+ *   inputs or path-allocation failures.
+ * - On ERR, '*out_err' may contain an allocated error string that caller must
+ *   free.
+ */
+AdbxStatus confdir_default_resolve(char **out_path, ConfDirErrCode *out_code,
+                                   char **out_err);
+
+/* Resolves the configuration file path under the current policy without
+ * touching the filesystem.
+ *
+ * Behavior:
+ * - If 'input_path' is non-NULL and non-empty, it must be an absolute path and
+ *   is returned as-is after copying.
+ * - Otherwise returns the default config file path under the default internal
+ *   app-owned config directory.
+ *
+ * Ownership:
+ * - On OK, '*out_path' receives one heap-allocated absolute path owned by the
+ *   caller, who must free().
+ * - On ERR, '*out_err' may contain an allocated error string that caller must
+ *   free.
+ */
+AdbxStatus confdir_resolve_config_path(const char *input_path, char **out_path,
+                                       char **out_err);
+
 /* Opens the default application config directory for the current platform.
  * 'out_code' and 'out_err' may be NULL if caller doesn't care about them.
  *
@@ -64,7 +106,8 @@ AdbxStatus confdir_default_open(ConfDir *out, ConfDirErrCode *out_code,
  * - The base config directory must already exist, except Linux's HOME/.config
  *   fallback, which is created when missing and XDG_CONFIG_HOME is unset.
  * - The app-owned 'adbxplorer' directory is created or chmod'd to 0700.
- * - The default config file is created when missing and chmod'd to 0600.
+ * - The default config file must already exist as one valid app-owned regular
+ *   file.
  *
  * Ownership:
  * - On OK, 'out->fd' is opened and 'out->path' is heap-allocated; caller must
