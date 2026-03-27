@@ -1,0 +1,59 @@
+{
+  "version":"1",
+  "vendors":[
+    {
+      "name":"libpg_query",
+      "kind":"git_submodule",
+      "path":"third_party/libpg_query",
+      "source":{
+        "host":"github",
+        "repo":"pganalyze/libpg_query"
+      },
+      "pin":{
+        "commit":"7be1aed1f1f968a36cf541319f71e845850f0381",
+        "tag":"17-6.2.2"
+      },
+      "freshness":{
+        "mode":"github_releases",
+        "series":"17",
+        "includePrereleases": false
+      }
+    },
+    {
+      "name":"rapidhash",
+      "kind":"single_file",
+      "path":"src/rapidhash.h",
+      "source":{
+        "host":"github",
+        "repo":"Nicoshev/rapidhash",
+        "file":"rapidhash.h"
+      },
+      "pin":{
+        "ref":"bc4b4baa48a15ff52ff4725e1ccdcda62815221c",
+        "sha256":"807874eeb23339eaa4b435fbadd33d46718c88e32f3eb67bab3eb965eecc626e"
+      },
+      "freshness":{
+        "mode":"github_releases",
+        "includePrereleases": false
+      }
+    },
+    {
+      "name":"jsmn",
+      "kind":"single_file",
+      "path":"src/jsmn.h",
+      "source":{
+        "host":"github",
+        "repo":"zserge/jsmn",
+        "file":"jsmn.h"
+      },
+      "pin":{
+        "ref":"fdcef3ebf886fa210d14956d3c068a653e76a24e",
+        "sha256":"1ed6154dedf009212a08a397e9c4ed50a0ce31d5a8301bb294e137ae3188c13b"
+      },
+      "freshness":{
+        "mode":"github_releases",
+        "includePrereleases": false
+      }
+    }
+  ]
+}
