@@ -119,6 +119,15 @@ static const SecretStoreHarness LIBSECRET_HARNESS = {
     .teardown = contract_teardown_libsecret,
 };
 
+#ifdef __APPLE__
+static const SecretStoreHarness KEYCHAIN_HARNESS = {
+    .name = "keychain",
+    .probe = secret_store_keychain_backend_probe,
+    .setup = contract_setup_libsecret,
+    .teardown = contract_teardown_libsecret,
+};
+#endif
+
 /* Resolves which backend contract harness this test binary should use.
  * It reads the optional ADBX_SECRET_STORE_CONTRACT_BACKEND environment
  * variable and returns one static harness descriptor.
@@ -131,11 +140,20 @@ static const SecretStoreHarness *contract_select_harness(void) {
     return &FILE_HARNESS;
   if (strcmp(name, "libsecret") == 0)
     return &LIBSECRET_HARNESS;
+#ifdef __APPLE__
+  if (strcmp(name, "keychain") == 0)
+    return &KEYCHAIN_HARNESS;
+#endif
 
+#ifdef __APPLE__
+  const char *expected = "file, libsecret, or keychain";
+#else
+  const char *expected = "file or libsecret";
+#endif
   fprintf(stderr,
           "Unsupported ADBX_SECRET_STORE_CONTRACT_BACKEND=%s. "
-          "Expected 'file' or 'libsecret'.\n",
-          name);
+          "Expected %s.\n",
+          name, expected);
   exit(1);
 }
 
