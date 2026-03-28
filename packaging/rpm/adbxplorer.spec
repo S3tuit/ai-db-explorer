@@ -5,7 +5,7 @@ Version:        0.0.1
 Release:        1%{?dist}
 Summary:        MCP-backed database exploration tool
 
-License:        MIT AND LicenseRef-Commons-Clause AND BSD-3-Clause
+License:        MIT AND BSD-3-Clause
 URL:            https://example.invalid/adbxplorer
 Source0:        %{name}-%{version}.tar.gz
 
