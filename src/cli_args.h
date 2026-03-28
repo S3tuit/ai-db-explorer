@@ -11,6 +11,8 @@ typedef enum {
   APP_MODE_BROKER,
   APP_MODE_WHICH_CONFIG,
   APP_MODE_CRED,
+  APP_MODE_HELP,
+  APP_MODE_VERSION,
 } AppMode;
 
 /* Parsed command-line selection consumed by main().
