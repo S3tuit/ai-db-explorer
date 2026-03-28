@@ -19,6 +19,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#ifndef ADBXPLORER_VERSION
+#error "ADBXPLORER_VERSION must be defined by the build"
+#endif
+
 static void mcpser_set_err(McpServer *s, const char *msg) {
   if (!s)
     return;
@@ -620,7 +624,7 @@ static AdbxTriStatus mcpser_user_initialize_handshake(McpServer *s,
     goto fail;
   if (json_kv_str(&sb, "name", "adbxplorer") != OK)
     goto fail;
-  if (json_kv_str(&sb, "version", "0.0.1") != OK)
+  if (json_kv_str(&sb, "version", ADBXPLORER_VERSION) != OK)
     goto fail;
   if (json_obj_end(&sb) != OK)
     goto fail;

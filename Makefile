@@ -1,6 +1,16 @@
 CC      := gcc
 PKG_CONFIG ?= pkg-config
 UNAME_S := $(shell uname -s)
+INSTALL ?= install
+PREFIX ?= /usr/local
+DESTDIR ?=
+BINDIR ?= $(PREFIX)/bin
+VERSION_FILE ?= VERSION
+VERSION ?= $(strip $(shell sed -n '1p' $(VERSION_FILE) 2>/dev/null))
+ifeq ($(strip $(VERSION)),)
+VERSION := 0.0.1
+endif
+VERSION_CPPFLAGS := -DADBXPLORER_VERSION=\"$(VERSION)\"
 LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
 LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
 LIBSECRET_CFLAGS := $(shell $(PKG_CONFIG) --cflags libsecret-1 2>/dev/null)
@@ -16,6 +26,7 @@ LIBPG_QUERY_INC := -I$(LIBPG_QUERY_DIR)
 CFLAGS  := -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O2 -flto=auto
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
 CFLAGS  += -DNDEBUG
+CFLAGS  += $(VERSION_CPPFLAGS)
 ifneq ($(strip $(LIBSECRET_LIBS)),)
 CFLAGS += -DHAVE_LIBSECRET
 endif
@@ -27,12 +38,12 @@ endif
 
 # Benchmark flags (optimized, no sanitizers)
 BENCH_CFLAGS := -Wall -Wextra -Werror -std=c11 -O3 -DNDEBUG -flto \
-                -D_POSIX_C_SOURCE=200809L -Isrc
+                -D_POSIX_C_SOURCE=200809L $(VERSION_CPPFLAGS) -Isrc
 
 # Test flags
 EXTRA_TCFLAGS ?= -DADBX_TEST_MODE
 TCFLAGS = -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O1 $(INCLUDES) \
-          -D_POSIX_C_SOURCE=200809L $(EXTRA_TCFLAGS)
+          -D_POSIX_C_SOURCE=200809L $(VERSION_CPPFLAGS) $(EXTRA_TCFLAGS)
 TSAN    := -fsanitize=address,undefined -fno-omit-frame-pointer
 TLDFLAGS := $(TSAN) $(LDFLAGS) $(PIE_LDFLAGS)
 ASAN_RUN_OPTS ?= detect_leaks=1:abort_on_error=1:halt_on_error=1:fast_unwind_on_malloc=0
@@ -47,6 +58,13 @@ BIN := build/adbxplorer
 ASAN_BIN := build/adbxplorer-asan
 PG_DUMP_AST_BIN := build/pg_dump_ast
 PG_DUMP_AST_SRC := py_utils/pg_dump_ast.c
+DISTDIR := dist
+DISTNAME := adbxplorer-$(VERSION)
+DISTROOT := $(DISTDIR)/$(DISTNAME)
+DISTTAR := $(DISTDIR)/$(DISTNAME).tar.gz
+RPMDIR := packaging/rpm
+RPM_SPEC_IN := $(RPMDIR)/adbxplorer.spec.in
+RPM_SPEC := $(RPMDIR)/adbxplorer.spec
 
 # Unit tests: each tests/unit/test_foo.c -> build/tests/unit/test_foo
 UNIT_TEST_SRC := $(filter-out tests/unit/test_env.c tests/unit/test_broker_run_utils.c,$(wildcard tests/unit/test_*.c))
@@ -65,7 +83,7 @@ BENCH_SRC := $(wildcard benchmarks/bench_*.c)
 BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
 BENCH_COMMON_SRC := src/arena.c src/utils.c
 
-.PHONY: all clean run test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-files vendor-verify vendor-freshness
+.PHONY: all clean run install uninstall dist rpm-spec test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-files vendor-verify vendor-freshness
 
 all: $(BIN)
 
@@ -105,6 +123,36 @@ $(BIN): $(APP_OBJ) $(LIBPG_QUERY_LIB)
 
 run: $(BIN)
 	./$(BIN) $(RUN_ARGS)
+
+install: $(BIN)
+	@mkdir -p $(DESTDIR)$(BINDIR)
+	$(INSTALL) -m 0755 $(BIN) $(DESTDIR)$(BINDIR)/adbxplorer
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/adbxplorer
+
+dist: gen-files
+	rm -rf $(DISTROOT) $(DISTTAR)
+	@mkdir -p $(DISTROOT)
+	@git ls-files -z | while IFS= read -r -d '' path; do \
+		mkdir -p "$(DISTROOT)/$$(dirname "$$path")"; \
+		if [ -f "$$path" ] || [ -L "$$path" ]; then \
+			cp -pP "$$path" "$(DISTROOT)/$$path"; \
+		fi; \
+	done
+	@if [ -d third_party/libpg_query ]; then \
+		mkdir -p "$(DISTROOT)/third_party"; \
+		tar -C third_party --exclude=libpg_query/.git -cf - libpg_query | \
+			tar -C "$(DISTROOT)/third_party" -xf -; \
+	fi
+	tar -czf $(DISTTAR) -C $(DISTDIR) $(DISTNAME)
+	rm -rf $(DISTROOT)
+
+$(RPM_SPEC): $(RPM_SPEC_IN) $(VERSION_FILE)
+	@mkdir -p $(dir $@)
+	sed 's|@VERSION@|$(VERSION)|g' $< > $@
+
+rpm-spec: $(RPM_SPEC)
 
 # Build AST dumper used by py_utils/pg_dump_ast.py
 $(PG_DUMP_AST_BIN): $(PG_DUMP_AST_SRC) $(LIBPG_QUERY_LIB)

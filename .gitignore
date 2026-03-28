@@ -67,3 +67,6 @@ __pycache__*
 
 # Claude
 .claude*
+
+# tarball dir for release
+dist/*
