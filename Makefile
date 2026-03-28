@@ -13,8 +13,28 @@ endif
 VERSION_CPPFLAGS := -DADBXPLORER_VERSION=\"$(VERSION)\"
 LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
 LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
+WITH_LIBSECRET ?= auto
+LIBSECRET_PKGCONFIG_OK := $(shell $(PKG_CONFIG) --exists libsecret-1 >/dev/null 2>&1 && echo yes || echo no)
+
+ifeq ($(WITH_LIBSECRET),1)
+ifeq ($(LIBSECRET_PKGCONFIG_OK),yes)
+LIBSECRET_ENABLED := yes
+else
+$(error WITH_LIBSECRET=1 requires pkg-config libsecret-1; install libsecret development headers or pass WITH_LIBSECRET=0)
+endif
+else ifeq ($(WITH_LIBSECRET),0)
+LIBSECRET_ENABLED := no
+else ifeq ($(WITH_LIBSECRET),auto)
+LIBSECRET_ENABLED := $(LIBSECRET_PKGCONFIG_OK)
+else
+$(error WITH_LIBSECRET must be 0, 1, or auto)
+endif
+
+ifeq ($(LIBSECRET_ENABLED),yes)
 LIBSECRET_CFLAGS := $(shell $(PKG_CONFIG) --cflags libsecret-1 2>/dev/null)
-LIBSECRET_LIBS   := $(shell $(PKG_CONFIG) --libs   libsecret-1 2>/dev/null)
+else
+LIBSECRET_CFLAGS :=
+endif
 
 # Third party flags, these are built separately to allow docker cache in
 # integration tests
@@ -27,11 +47,14 @@ CFLAGS  := -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O2 -flto=auto
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
 CFLAGS  += -DNDEBUG
 CFLAGS  += $(VERSION_CPPFLAGS)
-ifneq ($(strip $(LIBSECRET_LIBS)),)
+ifeq ($(LIBSECRET_ENABLED),yes)
 CFLAGS += -DHAVE_LIBSECRET
 endif
 INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBSECRET_CFLAGS) $(LIBPG_QUERY_INC)
-LDFLAGS := $(LIBPQ_LIBS) $(LIBSECRET_LIBS) $(LIBPG_QUERY_LIB)
+# The libsecret backend is resolved via dlopen at runtime, so we only need the
+# headers during compilation. Linking libsecret here would force a hard runtime
+# dependency and break the intended file-backend fallback on headless machines.
+LDFLAGS := $(LIBPQ_LIBS) $(LIBPG_QUERY_LIB)
 ifeq ($(UNAME_S),Darwin)
 LDFLAGS += -framework Security -framework CoreFoundation
 endif
@@ -131,7 +154,7 @@ install: $(BIN)
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/adbxplorer
 
-dist: gen-files
+dist: gen-files rpm-spec
 	rm -rf $(DISTROOT) $(DISTTAR)
 	@mkdir -p $(DISTROOT)
 	@git ls-files -z | while IFS= read -r -d '' path; do \
@@ -225,7 +248,7 @@ TEST_SECRET_STORE_OBJ := \
 	build/testobj/secret_store_keychain.o \
 	build/testobj/secret_store_libsecret.o
 
-SECRET_STORE_TEST_LDFLAGS := $(TSAN) $(LIBSECRET_LIBS) $(PIE_LDFLAGS)
+SECRET_STORE_TEST_LDFLAGS := $(TSAN) $(PIE_LDFLAGS)
 ifeq ($(UNAME_S),Darwin)
 SECRET_STORE_TEST_LDFLAGS += -framework Security -framework CoreFoundation
 endif

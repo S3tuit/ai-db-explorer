@@ -1,9 +1,11 @@
+%bcond_without libsecret
+
 Name:           adbxplorer
 Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        MCP-backed database exploration tool
 
-License:        UNLICENSED
+License:        MIT AND LicenseRef-Commons-Clause AND BSD-3-Clause
 URL:            https://example.invalid/adbxplorer
 Source0:        %{name}-%{version}.tar.gz
 
@@ -11,7 +13,9 @@ BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  pkgconf-pkg-config
 BuildRequires:  pkgconfig(libpq)
+%if %{with libsecret}
 BuildRequires:  pkgconfig(libsecret-1)
+%endif
 
 %description
 adbxplorer is a local broker plus MCP server for safe database exploration.
@@ -20,13 +24,26 @@ adbxplorer is a local broker plus MCP server for safe database exploration.
 %autosetup
 
 %build
-make build/adbxplorer VERSION=%{version}
+%if %{with libsecret}
+make build/adbxplorer VERSION=%{version} WITH_LIBSECRET=1
+%else
+make build/adbxplorer VERSION=%{version} WITH_LIBSECRET=0
+%endif
 
 %install
 rm -rf %{buildroot}
-make install PREFIX=%{_prefix} DESTDIR=%{buildroot} VERSION=%{version}
+%if %{with libsecret}
+make install PREFIX=%{_prefix} DESTDIR=%{buildroot} VERSION=%{version} WITH_LIBSECRET=1
+%else
+make install PREFIX=%{_prefix} DESTDIR=%{buildroot} VERSION=%{version} WITH_LIBSECRET=0
+%endif
 
 %files
+%license LICENSE
+%license third_party/libpg_query/LICENSE
+%doc ACKNOWLEDGEMENTS.md
+%doc README.md
+%doc SECURITY.md
 %{_bindir}/adbxplorer
 
 %changelog
