@@ -16,21 +16,61 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Prints the CLI usage block for this program.
- * It borrows 'prog' and allocates no memory.
- * Side effects: writes usage text to stderr.
- * Error semantics: none.
+/* Prints the CLI usage block for this program into 'out'.
+ * It borrows 'out' and 'prog' and allocates no memory.
  */
-static void print_usage(const char *prog) {
-  fprintf(stderr,
+static void print_usage(FILE *out, const char *prog) {
+  fprintf(out,
           "Usage:\n"
+          "  %s -h|--help\n"
+          "  %s --version\n"
           "  %s [-client|-broker|-which-config] [-appdir <path>] "
           "[-config <path>]\n"
           "  %s -cred (--sync|-s [connection] | --test|-t [connection] |\n"
-          "           --reset|-r (<namespace> | --everything))\n"
+           "           --reset|-r (<namespace> | --everything))\n"
            "           [-config <path>]\n",
-          prog, prog);
+          prog, prog, prog, prog);
 }
+
+/* Prints the extended CLI help for this program.
+ * It borrows 'prog' and allocates no memory.
+ */
+static void print_help(const char *prog) {
+  print_usage(stdout, prog);
+  fprintf(stdout,
+          "\n"
+          "Modes:\n"
+          "  -client          Run the MCP server over stdin/stdout. This is\n"
+          "                   the default mode.\n"
+          "  -broker          Run the trusted broker that holds credentials\n"
+          "                   and enforces safety policy.\n"
+          "  -which-config    Print the resolved runtime and configuration\n"
+          "                   paths for the current environment.\n"
+          "  -cred            Manage stored credentials.\n"
+          "\n"
+          "Credential commands:\n"
+          "  -s, --sync [connection]\n"
+          "                   Sync one credential or all configured\n"
+          "                   credentials into the selected secret store.\n"
+          "  -t, --test [connection]\n"
+          "                   Test one stored credential or all stored\n"
+          "                   credentials against configured connections.\n"
+          "  -r, --reset (<namespace> | --everything)\n"
+          "                   Delete stored credentials for one namespace or\n"
+          "                   wipe all stored credentials.\n"
+          "\n"
+          "Options:\n"
+          "  -appdir <path>   Use an explicit shared runtime directory for\n"
+          "                   broker/client IPC. Not supported in -cred mode.\n"
+          "  -config <path>   Use an explicit configuration file path.\n"
+          "  -h, --help       Show this help text.\n"
+          "  --version        Show the program version.\n");
+}
+
+/* Prints the program version string.
+ * It allocates no memory and borrows no caller-owned resources.
+ */
+static void print_version(void) { printf("%s\n", ADBXPLORER_VERSION); }
 
 /* Runs one credential-manager command selected from the CLI and prints any
  * error. Returns 0 on success, 1 on failure or invalid input.
@@ -133,11 +173,21 @@ int main(int argc, char **argv) {
   if (cli_parse_args(argc, argv, &cli, cli_err, 512) != OK) {
     fprintf(stderr, "ERROR: %s\n",
             cli_err[0] != '\0' ? cli_err : "invalid command line");
-    print_usage(argv[0]);
+    print_usage(stderr, argv[0]);
     free(cli_err);
     return 1;
   }
   free(cli_err);
+
+  if (cli.mode == APP_MODE_HELP) {
+    print_help(argv[0]);
+    return 0;
+  }
+
+  if (cli.mode == APP_MODE_VERSION) {
+    print_version();
+    return 0;
+  }
 
   if (cli.mode == APP_MODE_CRED)
     return run_cred_mode(&cli.cred_req, cli.config_input);

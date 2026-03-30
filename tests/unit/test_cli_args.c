@@ -48,7 +48,6 @@ static void parse_err_contains_impl(int argc, char **argv,
 
 /* Verifies the default CLI shape selects client mode with no optional paths.
  * It allocates no memory and borrows the stack argv vector.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_defaults_to_client(void) {
   char *argv[] = {"adbxplorer"};
@@ -62,7 +61,6 @@ static void test_cli_parse_defaults_to_client(void) {
 
 /* Verifies explicit client mode accepts both app and config paths.
  * It allocates no memory and borrows the stack argv vector.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_client_paths(void) {
   char *argv[] = {"adbxplorer", "-client", "-appdir",
@@ -77,7 +75,6 @@ static void test_cli_parse_client_paths(void) {
 
 /* Verifies explicit broker mode accepts both app and config paths.
  * It allocates no memory and borrows the stack argv vector.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_broker_paths(void) {
   char *argv[] = {"adbxplorer", "-broker", "-appdir",
@@ -103,9 +100,38 @@ static void test_cli_parse_which_config_paths(void) {
   ASSERT_STREQ(out.config_input, "/tmp/conf.json");
 }
 
+/* Verifies help mode accepts the short and long flags when used alone.
+ */
+static void test_cli_parse_help_flags(void) {
+  char *argv_short[] = {"adbxplorer", "-h"};
+  char *argv_long[] = {"adbxplorer", "--help"};
+  CliArgs out = {0};
+
+  PARSE_OK(2, argv_short, &out);
+  ASSERT_TRUE(out.mode == APP_MODE_HELP);
+  ASSERT_TRUE(out.app_dir_input == NULL);
+  ASSERT_TRUE(out.config_input == NULL);
+
+  PARSE_OK(2, argv_long, &out);
+  ASSERT_TRUE(out.mode == APP_MODE_HELP);
+  ASSERT_TRUE(out.app_dir_input == NULL);
+  ASSERT_TRUE(out.config_input == NULL);
+}
+
+/* Verifies version mode accepts the long flag when used alone.
+ */
+static void test_cli_parse_version_flag(void) {
+  char *argv[] = {"adbxplorer", "--version"};
+  CliArgs out = {0};
+
+  PARSE_OK(2, argv, &out);
+  ASSERT_TRUE(out.mode == APP_MODE_VERSION);
+  ASSERT_TRUE(out.app_dir_input == NULL);
+  ASSERT_TRUE(out.config_input == NULL);
+}
+
 /* Verifies cred sync mode accepts an optional config path without a
  * connection operand.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_cred_sync_without_connection(void) {
   char *argv[] = {"adbxplorer", "-cred", "-s", "-config", "/tmp/conf.json"};
@@ -120,7 +146,6 @@ static void test_cli_parse_cred_sync_without_connection(void) {
 }
 
 /* Verifies cred sync mode accepts an optional connection operand.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_cred_sync_with_connection(void) {
   char *argv[] = {"adbxplorer", "-cred", "--sync", "MyPostgres"};
@@ -133,7 +158,6 @@ static void test_cli_parse_cred_sync_with_connection(void) {
 }
 
 /* Verifies cred test mode accepts no connection operand.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_cred_test_without_connection(void) {
   char *argv[] = {"adbxplorer", "-cred", "-t"};
@@ -146,7 +170,6 @@ static void test_cli_parse_cred_test_without_connection(void) {
 }
 
 /* Verifies cred test mode accepts an optional connection operand.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_cred_test_with_connection(void) {
   char *argv[] = {"adbxplorer", "-cred", "--test", "AnotherPostgres"};
@@ -159,7 +182,6 @@ static void test_cli_parse_cred_test_with_connection(void) {
 }
 
 /* Verifies cred reset mode accepts one namespace operand.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_cred_reset_namespace(void) {
   char *argv[] = {"adbxplorer", "-cred", "-r", "my_namespace"};
@@ -173,7 +195,6 @@ static void test_cli_parse_cred_reset_namespace(void) {
 }
 
 /* Verifies cred reset mode accepts the --everything scope.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_cred_reset_everything(void) {
   char *argv[] = {"adbxplorer", "-cred", "-r", "--everything"};
@@ -187,7 +208,6 @@ static void test_cli_parse_cred_reset_everything(void) {
 }
 
 /* Verifies conflicting top-level modes are rejected.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_rejects_conflicting_modes(void) {
   char *argv[] = {"adbxplorer", "-client", "-broker"};
@@ -195,10 +215,15 @@ static void test_cli_parse_rejects_conflicting_modes(void) {
 
   char *argv_which[] = {"adbxplorer", "-which-config", "-broker"};
   PARSE_ERR_CONTAINS(3, argv_which, "conflicting top-level modes");
+
+  char *argv_help[] = {"adbxplorer", "-h", "-broker"};
+  PARSE_ERR_CONTAINS(3, argv_help, "conflicting top-level modes");
+
+  char *argv_version[] = {"adbxplorer", "--version", "-client"};
+  PARSE_ERR_CONTAINS(3, argv_version, "conflicting top-level modes");
 }
 
 /* Verifies conflicting credential commands are rejected.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_rejects_conflicting_cred_commands(void) {
   char *argv[] = {"adbxplorer", "-cred", "-s", "-t"};
@@ -206,7 +231,6 @@ static void test_cli_parse_rejects_conflicting_cred_commands(void) {
 }
 
 /* Verifies malformed cred invocations are rejected uniformly.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_rejects_invalid_cred_shapes(void) {
   char *argv_no_cmd[] = {"adbxplorer", "-cred"};
@@ -220,15 +244,29 @@ static void test_cli_parse_rejects_invalid_cred_shapes(void) {
 }
 
 /* Verifies appdir is rejected in cred mode.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_rejects_appdir_in_cred_mode(void) {
   char *argv[] = {"adbxplorer", "-cred", "-appdir", "/tmp/app", "-s"};
   PARSE_ERR_CONTAINS(5, argv, "'-appdir' is not supported");
 }
 
+/* Verifies help/version flags reject unrelated options and operands.
+ */
+static void test_cli_parse_rejects_extra_inputs_for_help_and_version(void) {
+  char *argv_help_cfg[] = {"adbxplorer", "-h", "-config", "/tmp/conf.json"};
+  char *argv_help_operand[] = {"adbxplorer", "--help", "MyPostgres"};
+  char *argv_version_appdir[] = {"adbxplorer", "--version", "-appdir",
+                                 "/tmp/app"};
+
+  PARSE_ERR_CONTAINS(4, argv_help_cfg,
+                     "help/version flags do not accept other options");
+  PARSE_ERR_CONTAINS(3, argv_help_operand,
+                     "help/version flags do not accept other options");
+  PARSE_ERR_CONTAINS(4, argv_version_appdir,
+                     "help/version flags do not accept other options");
+}
+
 /* Verifies cred-only flags and operands are rejected outside cred mode.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_rejects_cred_only_inputs_outside_cred_mode(void) {
   char *argv_sync[] = {"adbxplorer", "-s"};
@@ -246,7 +284,6 @@ static void test_cli_parse_rejects_cred_only_inputs_outside_cred_mode(void) {
 }
 
 /* Verifies an extra positional operand in cred mode is rejected.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_rejects_extra_positional_operand(void) {
   char *argv[] = {"adbxplorer", "-cred", "-s", "one", "two"};
@@ -254,7 +291,6 @@ static void test_cli_parse_rejects_extra_positional_operand(void) {
 }
 
 /* Verifies unknown flags and missing option values are rejected.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_rejects_unknown_or_incomplete_flags(void) {
   char *argv_unknown[] = {"adbxplorer", "--bogus"};
@@ -267,7 +303,6 @@ static void test_cli_parse_rejects_unknown_or_incomplete_flags(void) {
 }
 
 /* Verifies cli_parse_args fails closed on invalid API inputs.
- * Error semantics: assertions abort on failure.
  */
 static void test_cli_parse_invalid_api_inputs(void) {
   char *argv[] = {"adbxplorer"};
@@ -286,6 +321,8 @@ int main(void) {
   test_cli_parse_client_paths();
   test_cli_parse_broker_paths();
   test_cli_parse_which_config_paths();
+  test_cli_parse_help_flags();
+  test_cli_parse_version_flag();
   test_cli_parse_cred_sync_without_connection();
   test_cli_parse_cred_sync_with_connection();
   test_cli_parse_cred_test_without_connection();
@@ -296,6 +333,7 @@ int main(void) {
   test_cli_parse_rejects_conflicting_cred_commands();
   test_cli_parse_rejects_invalid_cred_shapes();
   test_cli_parse_rejects_appdir_in_cred_mode();
+  test_cli_parse_rejects_extra_inputs_for_help_and_version();
   test_cli_parse_rejects_cred_only_inputs_outside_cred_mode();
   test_cli_parse_rejects_extra_positional_operand();
   test_cli_parse_rejects_unknown_or_incomplete_flags();

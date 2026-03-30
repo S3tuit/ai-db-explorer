@@ -1,6 +1,6 @@
 #include "secret_store.h"
 
-#ifndef __linux__
+#if !defined(__linux__)
 
 AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store,
                                                    SecretStoreErr *out_err) {
@@ -11,7 +11,21 @@ AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store,
   return NO;
 }
 
-#else /* __linux__ */
+#elif !defined(HAVE_LIBSECRET)
+
+AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store,
+                                                   SecretStoreErr *out_err) {
+  ADBX_ERR_CLEAR(out_err, SSERR_NONE);
+  if (!out_store)
+    return ERR;
+  *out_store = NULL;
+  ADBX_ERR_SETF(out_err, SSERR_ENV,
+                "libsecret backend is unavailable because this build was "
+                "compiled without libsecret development headers.");
+  return NO;
+}
+
+#else /* __linux__ && HAVE_LIBSECRET */
 
 #include <dlfcn.h>
 #include <glib.h>
@@ -461,4 +475,4 @@ AdbxTriStatus secret_store_libsecret_backend_probe(SecretStore **out_store,
   return YES;
 }
 
-#endif /* __linux__ */
+#endif /* __linux__ && HAVE_LIBSECRET */

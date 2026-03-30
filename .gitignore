@@ -70,3 +70,6 @@ __pycache__*
 
 # tarball dir for release
 dist/*
+
+# generated packaging artifacts
+packaging/rpm/adbxplorer.spec

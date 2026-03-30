@@ -3,7 +3,7 @@ Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        MCP-backed database exploration tool
 
-License:        UNLICENSED
+License:        MIT AND BSD-3-Clause
 URL:            https://example.invalid/adbxplorer
 Source0:        %{name}-%{version}.tar.gz
 
@@ -25,8 +25,16 @@ make build/adbxplorer VERSION=%{version}
 %install
 rm -rf %{buildroot}
 make install PREFIX=%{_prefix} DESTDIR=%{buildroot} VERSION=%{version}
+install -d %{buildroot}%{_licensedir}/%{name}
+install -m 0644 third_party/libpg_query/LICENSE \
+  %{buildroot}%{_licensedir}/%{name}/LICENSE.libpg_query
 
 %files
+%license LICENSE
+%license %{_licensedir}/%{name}/LICENSE.libpg_query
+%doc ACKNOWLEDGEMENTS.md
+%doc README.md
+%doc SECURITY.md
 %{_bindir}/adbxplorer
 
 %changelog

@@ -120,14 +120,16 @@ AdbxStatus cli_parse_args(int argc, char **argv, CliArgs *out, char *err_buf,
       if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_CLIENT) != OK) {
         cli_set_errf(err_buf, err_cap,
                      "conflicting top-level modes: '-client', '-broker', "
-                     "'-which-config', and '-cred' are mutually exclusive");
+                     "'-which-config', '-cred', '-h/--help', and "
+                     "'--version' are mutually exclusive");
         return ERR;
       }
     } else if (strcmp(argv[i], "-broker") == 0) {
       if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_BROKER) != OK) {
         cli_set_errf(err_buf, err_cap,
                      "conflicting top-level modes: '-client', '-broker', "
-                     "'-which-config', and '-cred' are mutually exclusive");
+                     "'-which-config', '-cred', '-h/--help', and "
+                     "'--version' are mutually exclusive");
         return ERR;
       }
     } else if (strcmp(argv[i], "-which-config") == 0) {
@@ -135,14 +137,32 @@ AdbxStatus cli_parse_args(int argc, char **argv, CliArgs *out, char *err_buf,
           OK) {
         cli_set_errf(err_buf, err_cap,
                      "conflicting top-level modes: '-client', '-broker', "
-                     "'-which-config', and '-cred' are mutually exclusive");
+                     "'-which-config', '-cred', '-h/--help', and "
+                     "'--version' are mutually exclusive");
         return ERR;
       }
     } else if (strcmp(argv[i], "-cred") == 0) {
       if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_CRED) != OK) {
         cli_set_errf(err_buf, err_cap,
                      "conflicting top-level modes: '-client', '-broker', "
-                     "'-which-config', and '-cred' are mutually exclusive");
+                     "'-which-config', '-cred', '-h/--help', and "
+                     "'--version' are mutually exclusive");
+        return ERR;
+      }
+    } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+      if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_HELP) != OK) {
+        cli_set_errf(err_buf, err_cap,
+                     "conflicting top-level modes: '-client', '-broker', "
+                     "'-which-config', '-cred', '-h/--help', and "
+                     "'--version' are mutually exclusive");
+        return ERR;
+      }
+    } else if (strcmp(argv[i], "--version") == 0) {
+      if (parse_mode_flag(&out->mode, &seen_mode, APP_MODE_VERSION) != OK) {
+        cli_set_errf(err_buf, err_cap,
+                     "conflicting top-level modes: '-client', '-broker', "
+                     "'-which-config', '-cred', '-h/--help', and "
+                     "'--version' are mutually exclusive");
         return ERR;
       }
     } else if (strcmp(argv[i], "--sync") == 0 || strcmp(argv[i], "-s") == 0) {
@@ -194,6 +214,16 @@ AdbxStatus cli_parse_args(int argc, char **argv, CliArgs *out, char *err_buf,
       cli_set_errf(err_buf, err_cap, "unknown flag '%s'", argv[i]);
       return ERR;
     }
+  }
+
+  if (out->mode == APP_MODE_HELP || out->mode == APP_MODE_VERSION) {
+    if (out->app_dir_input || out->config_input || seen_cred_cmd ||
+        cred_use_everything || cred_operand) {
+      cli_set_errf(err_buf, err_cap,
+                   "help/version flags do not accept other options");
+      return ERR;
+    }
+    return OK;
   }
 
   if (out->mode == APP_MODE_CRED) {

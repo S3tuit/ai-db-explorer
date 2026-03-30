@@ -13,8 +13,15 @@ endif
 VERSION_CPPFLAGS := -DADBXPLORER_VERSION=\"$(VERSION)\"
 LIBPQ_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpq 2>/dev/null)
 LIBPQ_LIBS   := $(shell $(PKG_CONFIG) --libs   libpq 2>/dev/null)
+ifeq ($(UNAME_S),Darwin)
+LIBSECRET_CFLAGS :=
+else
+ifeq ($(shell $(PKG_CONFIG) --exists libsecret-1 >/dev/null 2>&1 && echo yes || echo no),yes)
 LIBSECRET_CFLAGS := $(shell $(PKG_CONFIG) --cflags libsecret-1 2>/dev/null)
-LIBSECRET_LIBS   := $(shell $(PKG_CONFIG) --libs   libsecret-1 2>/dev/null)
+else
+$(error libsecret development headers are required on non-Darwin builds; install libsecret-1 for pkg-config)
+endif
+endif
 
 # Third party flags, these are built separately to allow docker cache in
 # integration tests
@@ -27,11 +34,14 @@ CFLAGS  := -Wall -Wextra -Werror -Wenum-conversion -std=c11 -g -O2 -flto=auto
 CFLAGS  += -D_POSIX_C_SOURCE=200809L
 CFLAGS  += -DNDEBUG
 CFLAGS  += $(VERSION_CPPFLAGS)
-ifneq ($(strip $(LIBSECRET_LIBS)),)
+ifneq ($(UNAME_S),Darwin)
 CFLAGS += -DHAVE_LIBSECRET
 endif
 INCLUDES := -Isrc -Itests/unit $(LIBPQ_CFLAGS) $(LIBSECRET_CFLAGS) $(LIBPG_QUERY_INC)
-LDFLAGS := $(LIBPQ_LIBS) $(LIBSECRET_LIBS) $(LIBPG_QUERY_LIB)
+# The libsecret backend is resolved via dlopen at runtime, so we only need the
+# headers during compilation. Linking libsecret here would force a hard runtime
+# dependency and break the intended file-backend fallback on headless machines.
+LDFLAGS := $(LIBPQ_LIBS) $(LIBPG_QUERY_LIB)
 ifeq ($(UNAME_S),Darwin)
 LDFLAGS += -framework Security -framework CoreFoundation
 endif
@@ -66,6 +76,12 @@ RPMDIR := packaging/rpm
 RPM_SPEC_IN := $(RPMDIR)/adbxplorer.spec.in
 RPM_SPEC := $(RPMDIR)/adbxplorer.spec
 
+# Used for 'make srpm'
+RPMBUILD_TOPDIR ?= $(abspath build/rpmbuild)
+RPMBUILD_SOURCEDIR := $(RPMBUILD_TOPDIR)/SOURCES
+RPMBUILD_SPECDIR := $(RPMBUILD_TOPDIR)/SPECS
+RPMBUILD_SRPMDIR := $(RPMBUILD_TOPDIR)/SRPMS
+
 # Unit tests: each tests/unit/test_foo.c -> build/tests/unit/test_foo
 UNIT_TEST_SRC := $(filter-out tests/unit/test_env.c tests/unit/test_broker_run_utils.c,$(wildcard tests/unit/test_*.c))
 UNIT_TEST_BINS := $(patsubst tests/unit/%.c,build/tests/unit/%,$(UNIT_TEST_SRC))
@@ -83,7 +99,7 @@ BENCH_SRC := $(wildcard benchmarks/bench_*.c)
 BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
 BENCH_COMMON_SRC := src/arena.c src/utils.c
 
-.PHONY: all clean run install uninstall dist rpm-spec test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-files vendor-verify vendor-freshness
+.PHONY: all clean run install uninstall dist rpm-spec srpm test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-files vendor-verify vendor-freshness
 
 all: $(BIN)
 
@@ -131,7 +147,7 @@ install: $(BIN)
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/adbxplorer
 
-dist: gen-files
+dist: gen-files rpm-spec
 	rm -rf $(DISTROOT) $(DISTTAR)
 	@mkdir -p $(DISTROOT)
 	@git ls-files -z | while IFS= read -r -d '' path; do \
@@ -153,6 +169,19 @@ $(RPM_SPEC): $(RPM_SPEC_IN) $(VERSION_FILE)
 	sed 's|@VERSION@|$(VERSION)|g' $< > $@
 
 rpm-spec: $(RPM_SPEC)
+
+# Creates the SRPM for releases.
+# REMEMBER: test locally with mock before publishing the release.
+#   'mock -r fedora-43-x86_64 ~/rpmbuild/SRPMS/adbxplorer-0.0.1-1.fc43.src.rpm'
+srpm: dist
+	@mkdir -p $(RPMBUILD_TOPDIR)/BUILD $(RPMBUILD_TOPDIR)/BUILDROOT \
+		$(RPMBUILD_TOPDIR)/RPMS $(RPMBUILD_SOURCEDIR) $(RPMBUILD_SPECDIR) \
+		$(RPMBUILD_SRPMDIR)
+	cp -f $(DISTTAR) $(RPMBUILD_SOURCEDIR)/
+	cp -f $(RPM_SPEC) $(RPMBUILD_SPECDIR)/
+	rpmbuild --define "_topdir $(RPMBUILD_TOPDIR)" \
+		-bs $(RPMBUILD_SPECDIR)/$(notdir $(RPM_SPEC))
+	@ls -1 $(RPMBUILD_SRPMDIR)/adbxplorer-$(VERSION)-*.src.rpm
 
 # Build AST dumper used by py_utils/pg_dump_ast.py
 $(PG_DUMP_AST_BIN): $(PG_DUMP_AST_SRC) $(LIBPG_QUERY_LIB)
@@ -225,7 +254,7 @@ TEST_SECRET_STORE_OBJ := \
 	build/testobj/secret_store_keychain.o \
 	build/testobj/secret_store_libsecret.o
 
-SECRET_STORE_TEST_LDFLAGS := $(TSAN) $(LIBSECRET_LIBS) $(PIE_LDFLAGS)
+SECRET_STORE_TEST_LDFLAGS := $(TSAN) $(PIE_LDFLAGS)
 ifeq ($(UNAME_S),Darwin)
 SECRET_STORE_TEST_LDFLAGS += -framework Security -framework CoreFoundation
 endif
