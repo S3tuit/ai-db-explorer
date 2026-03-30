@@ -1,5 +1,3 @@
-%bcond_without libsecret
-
 Name:           adbxplorer
 Version:        @VERSION@
 Release:        1%{?dist}
@@ -13,9 +11,7 @@ BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  pkgconf-pkg-config
 BuildRequires:  pkgconfig(libpq)
-%if %{with libsecret}
 BuildRequires:  pkgconfig(libsecret-1)
-%endif
 
 %description
 adbxplorer is a local broker plus MCP server for safe database exploration.
@@ -24,23 +20,18 @@ adbxplorer is a local broker plus MCP server for safe database exploration.
 %autosetup
 
 %build
-%if %{with libsecret}
-make build/adbxplorer VERSION=%{version} WITH_LIBSECRET=1
-%else
-make build/adbxplorer VERSION=%{version} WITH_LIBSECRET=0
-%endif
+make build/adbxplorer VERSION=%{version}
 
 %install
 rm -rf %{buildroot}
-%if %{with libsecret}
-make install PREFIX=%{_prefix} DESTDIR=%{buildroot} VERSION=%{version} WITH_LIBSECRET=1
-%else
-make install PREFIX=%{_prefix} DESTDIR=%{buildroot} VERSION=%{version} WITH_LIBSECRET=0
-%endif
+make install PREFIX=%{_prefix} DESTDIR=%{buildroot} VERSION=%{version}
+install -d %{buildroot}%{_licensedir}/%{name}
+install -m 0644 third_party/libpg_query/LICENSE \
+  %{buildroot}%{_licensedir}/%{name}/LICENSE.libpg_query
 
 %files
 %license LICENSE
-%license third_party/libpg_query/LICENSE
+%license %{_licensedir}/%{name}/LICENSE.libpg_query
 %doc ACKNOWLEDGEMENTS.md
 %doc README.md
 %doc SECURITY.md
