@@ -2,78 +2,101 @@
 
 `adbxplorer` is a local, security-first MCP server for database exploration.
 
-It is built for one specific problem: letting an AI agent inspect a database
-without giving that agent direct access to database credentials, raw sensitive
-values, or unrestricted SQL execution.
+It is meant for a specific job: letting an AI agent help you inspect a real
+database without giving that agent direct access to database credentials, raw
+sensitive values, or unrestricted SQL execution.
 
-The key design choice is a split trust model:
+If you mainly want "some MCP server that can talk to a database", there are
+simpler and more mature options.
 
-- The **Broker** is trusted. It holds credentials, enforces policy, and talks
-  to the database.
+If you want "a local agent can explore my database and support me, but
+credentials and policy stay outside the agent runtime", that is the problem
+`adbxplorer` is built for.
+
+This project is still early. Today it is PostgreSQL-focused, local-first, and
+aimed at read-only exploration rather than administration or schema changes.
+
+## How it works
+
+`adbxplorer` uses a split trust model:
+
+- The **Broker** is trusted. It holds credentials, talks to the database, and
+  enforces policy.
 - The **MCP server** is untrusted. It runs next to the agent and only relays
   requests to the Broker.
+- The **agent runtime** should be sandboxed by you, because prompt injection,
+  hallucinations, or hostile tool use must be assumed possible.
 
-If your main concern is "make database tools available to an agent quickly",
-there are easier options. If your main concern is "let an untrusted local agent
-explore a real database without handing it secrets or plaintext sensitive
-data", this project is aimed at that use case.
+This separation is the core of the project. The Broker is the security
+boundary, not the MCP server.
 
-## Why use this over Google MCP Toolbox for Databases?
+In practice, the flow looks like this:
 
-These projects solve different problems.
+1. You configure one or more read-only database connections.
+2. You store credentials outside the agent environment.
+3. You start the Broker outside the agent sandbox.
+4. Your MCP client runs `adbxplorer -client` inside the sandbox.
+5. The MCP server forwards requests to the Broker, which validates and executes
+   them under the configured safety policy.
 
-Google's MCP Toolbox is a broad database tool platform: many data sources,
-prebuilt tools, custom tool frameworks, connection pooling, authentication
-integrations, and observability. It is a strong fit when you want a general
-database MCP layer for apps, agents, or cloud deployments.
+When a query touches configured sensitive data, the Broker does not return the
+plaintext value. It returns a token instead and keeps the real value on the
+Broker side.
 
-`adbxplorer` is narrower and more opinionated. It is designed around a local
-threat model where the agent side is treated as hostile and the Broker is the
-security boundary.
+## How this differs from more general database MCP servers
 
-### Tradeoffs of `adbxplorer`
+Projects such as Google's MCP Toolbox for Databases solve a broader problem:
+they aim to be general database tool platforms with more integrations,
+deployment shapes, and framework features.
+
+`adbxplorer` is narrower.
+
+It is designed around a local threat model where:
+
+- the agent runtime is treated as untrusted
+- database credentials must stay outside that runtime
+- central policy enforcement matters more than convenience
+- returning raw sensitive values to the agent is not acceptable
+
+That narrower scope comes with tradeoffs:
 
 - More setup than a single-process MCP server.
-- PostgreSQL-focused today even if there are plans to support more dbs.
-- Not a generic database tool-building framework.
 - You still need to sandbox the agent runtime correctly.
-- Best suited for **read-only support**, not schema changes or admin flows.
+- PostgreSQL is the only supported backend today.
+- It is best for read-only assistance, not admin workflows.
 
-## How It Works
-
-1. You configure one or more database connections in `config.json`.
-2. You securely store passwords using `adbxplorer -cred ...` instead of putting
-   them in the config file or exporting them into the agent environment.
-3. You start the Broker outside the agent sandbox with `adbxplorer -broker`.
-4. Your MCP client starts `adbxplorer -client` inside the sandbox.
-5. The MCP server relays tool calls to the Broker over a Unix socket.
-6. The Broker validates every request, talks to PostgreSQL, and returns a
-   policy-filtered response.
-
-## Exposed MCP Tools
-
-The current MCP surface is intentionally small:
-
-- `list_database_connections`
-- `describe_relation`
-- `run_sql_query`
-- `run_sql_query_tokens`
-
-That is deliberate. This project is trying to reduce the unsafe surface area,
-not maximize database capability.
-
-## High-Level Setup
+## Quickstart
 
 ### 1. Install `adbxplorer`
 
-From source:
+If you are on Fedora 43:
 
 ```bash
+sudo dnf install dnf-plugins-core
+dnf copr enable s3tuit/ai-db-explorer
+dnf install adbxplorer
+```
+
+On other Linux systems make sure to have `libsecret-devel` installed and then
+build from source:
+
+```bash
+git clone --recurse-submodules https://github.com/S3tuit/ai-db-explorer.git
+cd ai-db-explorer
 make
 sudo make install
 ```
 
-After installation, the binary is `adbxplorer`.
+For macOS, build from source:
+
+```bash
+git clone --recurse-submodules https://github.com/S3tuit/ai-db-explorer.git
+cd ai-db-explorer
+make
+sudo make install
+```
+
+The installed binary is `adbxplorer`.
 
 ### 2. Discover the default paths
 
@@ -90,115 +113,197 @@ This prints:
 - the internal state/config directory
 - the configuration file path
 
-On Linux, the default configuration file is usually under
-`~/.config/adbxplorer/config.json`.
+On Linux, the config file is usually under `~/.config/adbxplorer/config.json`.
 
-### 3. Create a config file
+### 3. Create `config.json`
 
-Start from [`resources/template-config.json`](resources/template-config.json).
-
-Important points:
-
-- `configNamespace` is a unit of isolation so different config files won't
-  have clashing credentials.
-- `safeFunctions` is the per-connection SQL function allowlist. There's already
-  an internal subset of safe SQL functions, add here functions you created and
-  want the agent to use.
-- `sensitiveColumns` marks columns that should be tokenized instead of returned
-  in plaintext.
-- Keep `readOnly` since it's the only truly supported mode for now.
+Start from [`resources/template-config.json`](resources/template-config.json)
+and place it at the configuration path shown by `adbxplorer -which-config`.
 
 ### 4. Use a dedicated read-only database user
 
-`adbxplorer` forces you to use a read-only database role.
+`adbxplorer` expects database access to be read-only.
 
-For PostgreSQL user for the connections you want
-the agent to inspect.
+For PostgreSQL 14+, a simple setup is:
+
+```sql
+CREATE USER ro_example WITH PASSWORD 'replace-me';
+GRANT CONNECT ON DATABASE mydb TO ro_example;
+GRANT pg_read_all_data TO ro_example;
+```
 
 ### 5. Store credentials outside the agent environment
 
-Do **not** put database passwords in the MCP client config and do **not**
-export them as environment variables in the same namespace as the agent.
+Do not put database passwords in the agent's MCP config and do not export them
+into the same environment as the agent.
 
-Use:
-
-```bash
-adbxplorer -cred -s
-```
-
-Or for one connection:
+Once your config file is ready, run:
 
 ```bash
-adbxplorer -cred -s MyPostgres
+adbxplorer -cred --sync
 ```
 
-Useful credential commands:
+You can also sync one connection only:
 
-- `adbxplorer -cred -s [connection]`
-  Sync credentials into the configured secret backend.
-- `adbxplorer -cred -t [connection]`
-  Test stored credentials against configured connections.
-- `adbxplorer -cred -r <namespace>`
-  Reset stored credentials for one namespace.
-- `adbxplorer -cred -r --everything`
-  Wipe all stored credentials managed by `adbxplorer`.
+```bash
+adbxplorer -cred --sync MyPostgres
+```
+
+This stores credentials in a secret store instead of leaving them exposed to
+the agent side.
 
 ### 6. Start the Broker
 
-Run outside the agent sandbox:
+Run this outside the agent sandbox:
 
 ```bash
 adbxplorer -broker
 ```
 
-### 7. Configure your MCP client
+### 7. Create the sandbox
 
-If the MCP client runs in the same environment and sees the same runtime
-directory, the simplest setup is:
+The important rule is not just "run the agent in a sandbox", but "mount the
+runtime directories correctly":
 
-```toml
-[mcp_servers.adbxplorer]
-command = "adbxplorer"
-args = ["-client"]
+- mount the Broker `run/` directory read-write inside the sandbox
+- mount the Broker `secret/` directory read-only inside the sandbox
+
+That lets the MCP server talk to the Broker while preventing writes to the
+handshake secret from the agent side.
+
+There is a helper script at
+[`resources/agent-sandbox-init.sh`](resources/agent-sandbox-init.sh).
+It is a `bubblewrap`-based setups for Codex/Claude Code. Read the comments and
+adjust the paths before using it.
+
+### 8. Run the MCP server inside your sandbox
+
+The client mode is the MCP server. It talks to the Broker over the runtime
+directories discovered earlier.
+
+For Codex inside a sandbox where the app directory is mounted at
+`/apps/adbxplorer` (as it's the case if you're using
+`resources/agent-sandbox-init.sh`):
+
+```bash
+codex mcp add adbxplorer -- adbxplorer -client -appdir /apps/adbxplorer
 ```
 
-If the client runs inside a sandbox and the Broker runtime is mounted at a
-different path inside that sandbox, point the client at the mounted runtime
-directory:
+For Claude Code:
 
-```toml
-[mcp_servers.adbxplorer]
-command = "adbxplorer"
-args = ["-client", "-appdir", "/apps/adbxplorer"]
+```bash
+claude mcp add adbxplorer -- adbxplorer -client -appdir /apps/adbxplorer
 ```
 
-The Broker and client must refer to the same runtime directory, even if the
-host path and sandbox path differ.
+## What the MCP server exposes
 
-## Configuration Concepts
+Right now, the tool surface is intentionally small:
 
-### Sensitive columns
+- list configured database connections
+- describe a relation and its columns
+- run a read-only SQL query
+- run a read-only SQL query with token parameters
 
-Mark sensitive columns in the config so the Broker can return tokens instead of
-plaintext values.
+The generated tool reference lives at
+[`docs/tools.md`](docs/tools.md).
 
-This lets the agent do things like:
+## Config reference
 
-- inspect schemas
-- run read-only queries
-- filter by sensitive values using returned tokens
+The current config file is small on purpose. Here is what matters most.
 
-without ever seeing the underlying secret values directly.
+### `configNamespace`
 
-### Safe functions
+This is the namespace used for credential isolation.
 
-Only functions listed in `safeFunctions` are allowed in queries for that
-connection. This is one of the main ways the Broker reduces the SQL surface
-available to the agent.
+If you use different config files or environments, give them different
+namespaces so their stored credentials do not clash.
 
-### Runtime and config locations
+You can have many config.json files and choose which one to use with:
 
-- `-config <path>` lets you choose a specific config file.
-- `-appdir <path>` lets you choose the shared Broker/MCP runtime directory.
-- `-which-config` shows the effective paths for the current environment.
+```bash
+adbxplorer -broker -config absolute_path_to_config.json
+```
 
+### `safetyPolicy`
+
+This defines the Broker-side limits applied to queries.
+
+Today the template includes:
+
+- `readOnly`
+- `statementTimeoutMs`
+- `maxRowReturned`
+- `maxPayloadKiloBytes`
+- `columnPolicy`
+
+The important point is that policy is enforced by the Broker, not delegated to
+the MCP server or the agent.
+
+### `databases`
+
+This lists the database connections the Broker may expose.
+
+Each entry currently includes fields such as:
+
+- `type`
+- `connectionName`
+- `host`
+- `port`
+- `username`
+- `database`
+- `safeFunctions`
+- `sensitiveColumns`
+
+### `safeFunctions`
+
+This is the per-connection allowlist for SQL functions that the Broker may let
+queries use.
+
+Keep this list small. Add only functions you trust in your environment.
+Note that basic, safe functions like `LOWER` or `ARRAY_AGG` are already deemed
+safe. You can see all the default safe functions at
+`docs/pg_safe_functions.json`.
+
+### `sensitiveColumns`
+
+Use this to mark columns whose plaintext values should not be returned to the
+agent.
+
+For example:
+
+```json
+"sensitiveColumns": [
+  "users.email",
+  "private.users.phone"
+]
+```
+
+When these columns are selected, filtered, or otherwise touched by restricted
+query paths, the Broker applies the sensitive-data handling rules instead of
+blindly returning raw values.
+
+The name `sensitiveColumns` is likely temporary. It will probably evolve into
+something closer to `sensitiveDomains`, because the long-term model should be
+more expressive than a flat list of column names.
+
+For the deeper design around sensitive-data handling and token use, see
+[`docs/sensitive_data.md`](docs/sensitive_data.md).
+
+## Issues and feedback
+
+For bugs, feature requests, setup problems, or general questions, please open a
+GitHub issue. Thank you in advance <3.
+
+If you believe you found a security vulnerability, do not open a public issue.
+Follow the process at SECURITY.md.
+
+## More reading
+
+- System overview:
+  [`docs/sys_overview.md`](docs/sys_overview.md)
+- Tool definitions:
+  [`docs/tools.md`](docs/tools.md)
+- Sensitive data handling:
+  [`docs/sensitive_data.md`](docs/sensitive_data.md)
+- Vulnerability reporting:
+  [`SECURITY.md`](SECURITY.md)

@@ -16,6 +16,21 @@ set -euo pipefail
 # CONFIGURATION: adjust the paths in the section below to match your machine.
 ###############################################################################
 
+
+# --- HOW TO SECURELY RUN AGENTS ----------------------------------------------
+# Note: we will not mount the configuration of your host's coding agents. This
+# avoids that your real config breaks if something happens inside the sandbox.
+# Instead, you'll have to re-enter your auth token to use the agents inside
+# the sandbox.
+#
+# CODEX
+# Just install it normally on your host. Then, follow the comments of this
+# script.
+#
+# CLAUDE CODE
+# Same as codex.
+
+
 # -- Paths to configure -------------------------------------------------------
 
 # Your real home directory on the host
@@ -29,6 +44,7 @@ WORKDIR="$HOST_HOME/devspace/c_prj/ai-db-explorer"
 # The /run subdirectory is mounted read-write (so the sandbox can talk to the
 # broker); the /secret subdirectory is mounted read-only (it holds a token that
 # must not be modified from inside the sandbox).
+# To discover it, run 'adbxplorer -which-config'
 ADBX_APPDIR="/run/user/1000/adbxplorer"
 
 # Persistent sandbox home on the host. Survives across sandbox restarts so that
@@ -36,24 +52,14 @@ ADBX_APPDIR="/run/user/1000/adbxplorer"
 SANDBOX_HOME="${PWD}/agent-sandbox-home"
 
 # Where npm-global binaries live on the host (codex, etc.).
-# Inside the sandbox they appear at $HOME/.node.
-# Usually it's #HOST_HOME/.node.
-NPM_GLOBAL="$HOST_HOME/.npm-global"
+# You may discover this running 'which codex'.
+# Mount the full .node/ dir
+NPM_GLOBAL="$HOST_HOME/.node"
 
 # Extra host-side binaries to expose read-only inside the sandbox.
 HOST_LOCAL_BIN="$HOST_HOME/.local/bin"
 
 # -- End of configuration -----------------------------------------------------
-
-# HOW TO USE CODEX
-# The .codex folder (with auth.json and config.toml) is expected inside
-# SANDBOX_HOME. On your host, install codex normally, then:
-#   mkdir -p agent-sandbox-home/.codex
-#   cp ~/.codex/auth.json  ./agent-sandbox-home/.codex/
-#   cp ~/.codex/config.toml ./agent-sandbox-home/.codex/
-#
-# HOW TO USE CLAUDE CODE
-# The simplest approach is to install it directly inside the sandbox.
 
 USER_NAME="${USER:-}"
 if [ -z "$USER_NAME" ]; then
@@ -106,6 +112,18 @@ args=(
   # -- Project (read-write) ---------------------------------------------------
   --bind "$WORKDIR" /work
 
+  # -- Claude Code ------------------------------------------------------------
+  # Usually, 'claude' is a symlink on your host, so we need to mount the 
+  # absolute path too. From the host, run 'ls -l $(which claude)'.
+  # Then mount the .../share/claude/... dir.
+  # Example:
+  # if the absolute path is ~/.local/share/claude/versions/2.1.87, use this:
+  --ro-bind "$HOST_HOME/.local/share/claude" "$HOME/.local/share/claude"
+
+  # -- Codex ------------------------------------------------------------------
+  # Codex should already be handled inside $NPM_GLOBAL. Both its symlink and
+  # real .js file should be inside $HOST_HOME/.node/bin/ or equivalent.
+
   # -- adbxplorer MCP server --------------------------------------------------
   --bind    "$ADBX_APPDIR/run"    /apps/adbxplorer/run
   --ro-bind "$ADBX_APPDIR/secret" /apps/adbxplorer/secret
@@ -126,3 +144,12 @@ exec bwrap "${args[@]}" \
     XDG_STATE_HOME="$HOME/.local/state" \
     npm_config_cache="$HOME/.npm" \
     bash -i
+
+
+# NOTE:
+# If you think the sandbox looks ugly once inside it, just
+# 'cd agent-sandbox-home' from your host and create a .bashrc where you'll set
+# terminal color:
+#
+# # change terminal appearance
+# PS1="\[\e[32m\]<agent@\h \w>\$\[\033[0m\] "
