@@ -337,6 +337,106 @@ static void test_jsget_array_objects(void) {
   ASSERT_TRUE(jsget_array_objects_next(&jg, &it, &obj) == NO);
 }
 
+static void test_jsget_object_members(void) {
+  const char *json =
+      "{\"domains\":{\"email\":[\"a\",\"b\"],\"phone\":[\"c\"]}}";
+  JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
+  JsonObjIter oit;
+  JsonArrIter ait;
+  JsonGetter val = {0};
+  JsonStrSpan key = {0};
+  JsonStrSpan elem = {0};
+
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, "domains", &oit) == YES);
+
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(key.len == 5);
+  ASSERT_TRUE(memcmp(key.ptr, "email", key.len) == 0);
+  ASSERT_TRUE(jsget_array_strings_begin(&val, NULL, &ait) == YES);
+  ASSERT_TRUE(jsget_array_strings_next(&val, &ait, &elem) == YES);
+  ASSERT_TRUE(elem.len == 1);
+  ASSERT_TRUE(elem.ptr[0] == 'a');
+  ASSERT_TRUE(jsget_array_strings_next(&val, &ait, &elem) == YES);
+  ASSERT_TRUE(elem.len == 1);
+  ASSERT_TRUE(elem.ptr[0] == 'b');
+  ASSERT_TRUE(jsget_array_strings_next(&val, &ait, &elem) == NO);
+
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(key.len == 5);
+  ASSERT_TRUE(memcmp(key.ptr, "phone", key.len) == 0);
+  ASSERT_TRUE(jsget_array_strings_begin(&val, NULL, &ait) == YES);
+  ASSERT_TRUE(jsget_array_strings_next(&val, &ait, &elem) == YES);
+  ASSERT_TRUE(elem.len == 1);
+  ASSERT_TRUE(elem.ptr[0] == 'c');
+  ASSERT_TRUE(jsget_array_strings_next(&val, &ait, &elem) == NO);
+
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == NO);
+}
+
+static void test_jsget_object_members_validation(void) {
+  const char *json = "{\"domains\":null,\"array\":[1],\"obj\":{\"x\":1}}";
+  JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
+  JsonObjIter oit;
+  JsonGetter val = {0};
+  JsonStrSpan key = {0};
+
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, "missing", &oit) == NO);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, "domains", &oit) == NO);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, "array", &oit) == ERR);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, "obj", &oit) == YES);
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &oit) == ERR);
+}
+
+static void test_jsget_object_members_begin_null_key(void) {
+  const char *json = "{\"obj\":{\"x\":1},\"nil\":null,\"arr\":[1]}";
+  JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
+  JsonObjIter oit;
+  JsonStrSpan key = {0};
+  JsonGetter val = {0};
+
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, NULL, &oit) == YES);
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(key.len == 3);
+  ASSERT_TRUE(memcmp(key.ptr, "obj", key.len) == 0);
+  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &oit) == YES);
+
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(key.len == 3);
+  ASSERT_TRUE(memcmp(key.ptr, "nil", key.len) == 0);
+  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &oit) == NO);
+
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(key.len == 3);
+  ASSERT_TRUE(memcmp(key.ptr, "arr", key.len) == 0);
+  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &oit) == ERR);
+}
+
+static void test_jsget_object_members_input_validation(void) {
+  const char *json = "{\"obj\":{\"x\":1}}";
+  JsonGetter jg;
+  JsonTokBuf tok_buf = {0};
+  JsonObjIter oit = {0};
+  JsonStrSpan key = {0};
+  JsonGetter val = {0};
+
+  ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
+  ASSERT_TRUE(jsget_object_members_begin(NULL, "obj", &oit) == ERR);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, "obj", NULL) == ERR);
+
+  ASSERT_TRUE(jsget_object_members_begin(&jg, "obj", &oit) == YES);
+  ASSERT_TRUE(jsget_object_members_next(NULL, &oit, &key, &val) == ERR);
+  ASSERT_TRUE(jsget_object_members_next(&jg, NULL, &key, &val) == ERR);
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, NULL, &val) == ERR);
+  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, NULL) == ERR);
+}
+
 static void test_jsget_top_level_validation(void) {
   const char *json = "{\"a\":1,\"b\":2}";
   const char *json_extra = "{\"a\":1,\"b\":2,\"c\":3}";
@@ -400,6 +500,10 @@ int main(void) {
   test_jsget_string_span_and_decode();
   test_jsget_array_strings();
   test_jsget_array_objects();
+  test_jsget_object_members();
+  test_jsget_object_members_validation();
+  test_jsget_object_members_begin_null_key();
+  test_jsget_object_members_input_validation();
   test_jsget_top_level_validation();
   test_jsget_exists_nonnull();
 

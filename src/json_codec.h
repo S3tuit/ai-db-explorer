@@ -49,6 +49,13 @@ typedef struct JsonArrIter {
   int next_tok; // next token index to consume (internal cursor)
 } JsonArrIter;
 
+typedef struct JsonObjIter {
+  int obj_tok;   // token index of the object
+  int idx;       // current member index [0..count)
+  int count;     // number of members in the object
+  int next_tok;  // next key token index to consume (internal cursor)
+} JsonObjIter;
+
 /* Fixed-size token buffer used by jsget_init().
  * It is caller-owned and must outlive any JsonGetter views that borrow it.
  */
@@ -61,7 +68,7 @@ typedef struct JsonGetter {
   size_t json_len;
   const jsmntok_t *toks;
   int ntok;
-  int root;              // token index of the root object for this view
+  int root;              // token index of the root value for this view
   jsmntok_t *owned_toks; // owned only when initialized via jsget_create()
 } JsonGetter;
 
@@ -170,6 +177,7 @@ AdbxTriStatus jsget_object(const JsonGetter *jg, const char *key,
 
 /*
  * Initializes an iterator over an array of JSON strings at key path `key`.
+ * When `key` is NULL, the current JsonGetter root is used directly.
  * Returns yes/no/err.
  */
 AdbxTriStatus jsget_array_strings_begin(const JsonGetter *jg, const char *key,
@@ -188,6 +196,7 @@ AdbxTriStatus jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
 
 /*
  * Initializes an iterator over an array of JSON objects at key path `key`.
+ * When `key` is NULL, the current JsonGetter root is used directly.
  * Returns yes/no/err.
  */
 AdbxTriStatus jsget_array_objects_begin(const JsonGetter *jg, const char *key,
@@ -206,6 +215,30 @@ AdbxTriStatus jsget_array_objects_begin(const JsonGetter *jg, const char *key,
  */
 AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
                                        JsonGetter *out_obj);
+
+/* Initializes an iterator over a JSON object at key path `key`.
+ * When `key` is NULL, the current JsonGetter root is used directly.
+ * Returns yes/no/err.
+ */
+AdbxTriStatus jsget_object_members_begin(const JsonGetter *jg,
+                                         const char *key, JsonObjIter *it);
+
+/* Gets the next member of the object iterator.
+ *
+ * The returned key span borrows bytes from the original JSON string without
+ * decoding escapes. The returned JsonGetter borrows the same token stream and
+ * is rooted at the member value, which may be any JSON type. Callers may pass
+ * it to other begin functions with `key == NULL` to inspect array/object
+ * values.
+ *
+ * Return:
+ *  YES -> produced next member.
+ *  NO  -> no more members.
+ *  ERR -> malformed token stream / invalid input.
+ */
+AdbxTriStatus jsget_object_members_next(const JsonGetter *jg, JsonObjIter *it,
+                                        JsonStrSpan *out_key,
+                                        JsonGetter *out_val);
 
 /* Makes sure the json object identified by 'obj_key' only contains the
  * 'allowed' top-level keys. If obj_key is NULL, the root object is used.
