@@ -124,6 +124,294 @@ static AdbxStatus split_column_path(char *s, char **out_schema,
   return OK;
 }
 
+typedef enum {
+  CONN_CAT_VER_1_0 = 10,
+  CONN_CAT_VER_1_1 = 11,
+} ConnCatVersion;
+
+/* Splits a decoded sensitive-domain pattern into optional schema/table and a
+ * required final column pattern. Ownership: caller owns 's' and output
+ * pointers borrow slices inside it. Side effects: mutates 's' by inserting NUL
+ * terminators. Returns OK on valid [schema.][table.]column input, ERR on empty
+ * parts or too many qualifiers.
+ */
+static AdbxStatus split_sensitive_path(char *s, char **out_schema,
+                                       char **out_table, char **out_col) {
+  if (!s || !out_schema || !out_table || !out_col)
+    return ERR;
+
+  *out_schema = NULL;
+  *out_table = NULL;
+  *out_col = NULL;
+
+  char *first = strchr(s, '.');
+  if (!first) {
+    if (s[0] == '\0')
+      return ERR;
+    *out_col = s;
+    return OK;
+  }
+
+  char *second = strchr(first + 1, '.');
+  if (second && strchr(second + 1, '.'))
+    return ERR;
+
+  *first = '\0';
+  if (!second) {
+    *out_table = s;
+    *out_col = first + 1;
+  } else {
+    *second = '\0';
+    *out_schema = s;
+    *out_table = first + 1;
+    *out_col = second + 1;
+  }
+
+  if ((*out_table && (*out_table)[0] == '\0') || !*out_col ||
+      (*out_col)[0] == '\0')
+    return ERR;
+  if (*out_schema && (*out_schema)[0] == '\0')
+    return ERR;
+  return OK;
+}
+
+/* Normalizes one caller-owned column pattern in place. It collapse repeated '*'
+ * so logically equivalent globs compare equal. Returns OK on success, ERR when
+ * schema/table wildcards leak here or inputs are invalid. On success,
+ * '*out_star_count' and '*out_literal_len' describe the normalized pattern.
+ */
+static AdbxStatus normalize_column_pattern(char *column_pat,
+                                           uint16_t *out_star_count,
+                                           uint16_t *out_literal_len) {
+  if (!column_pat || !out_star_count || !out_literal_len)
+    return ERR;
+
+  uint16_t star_count = 0;
+  uint16_t literal_len = 0;
+  size_t w = 0;
+  int prev_star = 0;
+
+  for (size_t r = 0; column_pat[r] != '\0'; r++) {
+    char c = column_pat[r];
+    if (c == '.') {
+      return ERR;
+    }
+    if (c == '*') {
+      if (prev_star)
+        continue;
+      column_pat[w++] = c;
+      star_count++;
+      prev_star = 1;
+      continue;
+    }
+
+    column_pat[w++] = c;
+    literal_len++;
+    prev_star = 0;
+  }
+
+  if (w == 0)
+    return ERR;
+
+  column_pat[w] = '\0';
+  *out_star_count = star_count;
+  *out_literal_len = literal_len;
+  return OK;
+}
+
+/* Maps one sensitive rule to its precedence bucket.
+ * Returns a stable rank in precedence order, or -1 on invalid rule shape.
+ * The order is:
+ *  0. exact schema.table.column
+ *  1. glob schema.table.col_pattern
+ *  2. exact table.column
+ *  3. glob table.col_pattern
+ *  4. exact column
+ *  5. glob col_pattern
+ */
+static int sensitive_rule_rank(const SensitiveRule *rule) {
+  if (!rule || !rule->column_pat)
+    return -1;
+  if (rule->schema && !rule->table)
+    return -1;
+
+  if (rule->schema)
+    return (rule->star_count == 0) ? 0 : 1;
+  if (rule->table)
+    return (rule->star_count == 0) ? 2 : 3;
+  return (rule->star_count == 0) ? 4 : 5;
+}
+
+/* Compares optional strings lexicographically with NULL ordered first.
+ * Returns <0 / 0 / >0 like strcmp().
+ */
+static int nullable_str_cmp(const char *a, const char *b) {
+  if (!a && !b)
+    return 0;
+  if (!a)
+    return -1;
+  if (!b)
+    return 1;
+  return strcmp(a, b);
+}
+
+/* Compares sensitive rules in deterministic match precedence order.
+ * Returns <0 / 0 / >0 for qsort-style ordering.
+ */
+static int sensitive_rule_cmp(const void *a, const void *b) {
+  const SensitiveRule *ra = (const SensitiveRule *)a;
+  const SensitiveRule *rb = (const SensitiveRule *)b;
+
+  int rka = sensitive_rule_rank(ra);
+  int rkb = sensitive_rule_rank(rb);
+  if (rka != rkb) {
+    assert(rka >= 0);
+    assert(rkb >= 0);
+
+    return (rka < rkb) ? -1 : 1;
+  }
+
+  int sc = nullable_str_cmp(ra->schema, rb->schema);
+  if (sc != 0)
+    return sc;
+  int tc = nullable_str_cmp(ra->table, rb->table);
+  if (tc != 0)
+    return tc;
+
+  if (ra->star_count != 0 || rb->star_count != 0) {
+    if (ra->star_count != rb->star_count)
+      return (ra->star_count < rb->star_count) ? -1 : 1;
+    if (ra->literal_len != rb->literal_len)
+      return (ra->literal_len > rb->literal_len) ? -1 : 1;
+  }
+
+  int pc = strcmp(ra->column_pat, rb->column_pat);
+  if (pc != 0)
+    return pc;
+  return strcmp(ra->domain, rb->domain);
+}
+
+/* Checks whether two sensitive rules refer to the same normalized match
+ * pattern, ignoring domain.
+ * Returns YES when the two rules would match the same identifiers, NO when
+ * different, ERR on invalid input.
+ */
+static AdbxTriStatus sensitive_rule_same_pattern(const SensitiveRule *a,
+                                                 const SensitiveRule *b) {
+  if (!a || !b)
+    return ERR;
+  if (sensitive_rule_rank(a) != sensitive_rule_rank(b))
+    return NO;
+  if (nullable_str_cmp(a->schema, b->schema) != 0)
+    return NO;
+  if (nullable_str_cmp(a->table, b->table) != 0)
+    return NO;
+  if (strcmp(a->column_pat, b->column_pat) != 0)
+    return NO;
+  return YES;
+}
+
+/* Assigns one contiguous rank slice to the corresponding policy bucket.
+ * Ownership: bucket borrows from 'pol->storage'. Side effects: mutates bucket
+ * metadata in '*pol'. Returns OK on success, ERR on invalid rank/input.
+ */
+static AdbxStatus sensitive_policy_set_bucket(SensitiveDomainPolicy *pol,
+                                              int rank, size_t start,
+                                              size_t count) {
+  if (!pol)
+    return ERR;
+
+  SensitiveRuleBucket *bucket = NULL;
+  switch (rank) {
+  case 0:
+    bucket = &pol->exact_stc;
+    break;
+  case 1:
+    bucket = &pol->glob_stc;
+    break;
+  case 2:
+    bucket = &pol->exact_tc;
+    break;
+  case 3:
+    bucket = &pol->glob_tc;
+    break;
+  case 4:
+    bucket = &pol->exact_c;
+    break;
+  case 5:
+    bucket = &pol->glob_c;
+    break;
+  default:
+    return ERR;
+  }
+
+  bucket->rules = (count == 0 || !pol->storage) ? NULL : &pol->storage[start];
+  bucket->n_rules = count;
+  return OK;
+}
+
+/* Sorts, deduplicates, and slices one sensitive-domain policy in place.
+ * Mutates caller-owned '*pol' only. Returns OK on success, ERR on invalid
+ * state or conflicting normalized patterns that resolve to different domains.
+ */
+static AdbxStatus sensitive_policy_finalize(SensitiveDomainPolicy *pol,
+                                            const char *path_prefix,
+                                            char **err_out) {
+  if (!pol || (!pol->storage && pol->n_storage != 0))
+    return ERR;
+
+  pol->exact_stc = (SensitiveRuleBucket){0};
+  pol->glob_stc = (SensitiveRuleBucket){0};
+  pol->exact_tc = (SensitiveRuleBucket){0};
+  pol->glob_tc = (SensitiveRuleBucket){0};
+  pol->exact_c = (SensitiveRuleBucket){0};
+  pol->glob_c = (SensitiveRuleBucket){0};
+
+  if (pol->n_storage == 0)
+    return OK;
+
+  qsort(pol->storage, pol->n_storage, sizeof(*pol->storage),
+        sensitive_rule_cmp);
+
+  // dedup
+  size_t out_ix = 0;
+  for (size_t i = 0; i < pol->n_storage;) {
+    size_t j = i + 1;
+    while (j < pol->n_storage &&
+           sensitive_rule_same_pattern(&pol->storage[i], &pol->storage[j]) ==
+               YES) {
+      if (strcmp(pol->storage[i].domain, pol->storage[j].domain) != 0) {
+        // TODO: log the wrong normalized pattern
+        set_parse_err(
+            err_out,
+            "%s.sensitiveDomains: the same normalized pattern resolves to "
+            "different domains.",
+            path_prefix);
+        return ERR;
+      }
+      j++;
+    }
+    pol->storage[out_ix++] = pol->storage[i];
+    i = j;
+  }
+  pol->n_storage = out_ix;
+
+  for (size_t i = 0; i < pol->n_storage;) {
+    int rank = sensitive_rule_rank(&pol->storage[i]);
+    if (rank < 0)
+      return ERR;
+    size_t j = i + 1;
+    while (j < pol->n_storage &&
+           sensitive_rule_rank(&pol->storage[j]) == rank) {
+      j++;
+    }
+    if (sensitive_policy_set_bucket(pol, rank, i, j - i) != OK)
+      return ERR;
+    i = j;
+  }
+  return OK;
+}
+
 // Temporary rule list on heap: lets us parse, normalize, sort, and dedupe
 // before moving data into the arena in a compact form.
 typedef struct {
@@ -405,6 +693,243 @@ error:
     }
     free(tmp);
   }
+  return ERR;
+}
+
+/* Parses sensitiveDomains into one sorted SensitiveDomainPolicy.
+ * Ownership: stores all strings and rule storage in out->sens_policy.arena.
+ * Returns OK on success, ERR on malformed patterns, conflicting normalized
+ * rules, or allocation failure.
+ */
+static AdbxStatus parse_sensitive_domains(const JsonGetter *jg,
+                                          ConnProfile *out,
+                                          const char *path_prefix,
+                                          char **err_out) {
+  if (!jg || !out || !path_prefix)
+    return ERR;
+
+  JsonGetter domains_obj = {0};
+  AdbxTriStatus orc = jsget_object(jg, "sensitiveDomains", &domains_obj);
+  if (orc == NO)
+    return OK;
+  if (orc != YES) {
+    set_parse_err(err_out, "%s.sensitiveDomains: expected object.",
+                  path_prefix);
+    return ERR;
+  }
+
+  size_t n_rules = 0;
+  JsonObjIter oit = {0};
+  if (jsget_object_members_begin(&domains_obj, NULL, &oit) != YES)
+    return OK;
+
+  // we first allocate the whole array of SensitiveRule at the start of the
+  // arena, then assign values to each of the rule.
+
+  // count how many SensitiveRule to allocate
+  for (;;) {
+    JsonStrSpan domain_key = {0};
+    JsonGetter arr_view = {0};
+    AdbxTriStatus rc =
+        jsget_object_members_next(&domains_obj, &oit, &domain_key, &arr_view);
+    if (rc == NO)
+      break;
+    if (rc != YES) {
+      set_parse_err(err_out, "%s.sensitiveDomains: malformed object member.",
+                    path_prefix);
+      return ERR;
+    }
+
+    JsonArrIter ait = {0};
+    AdbxTriStatus arc = jsget_array_strings_begin(&arr_view, NULL, &ait);
+    if (arc != YES) {
+      set_parse_err(err_out,
+                    "%s.sensitiveDomains: each domain value must be an array "
+                    "of strings.",
+                    path_prefix);
+      return ERR;
+    }
+    if ((size_t)ait.count > (SIZE_MAX - n_rules)) {
+      set_parse_err(err_out, "%s.sensitiveDomains: too many entries.",
+                    path_prefix);
+      return ERR;
+    }
+    n_rules += (size_t)ait.count;
+  }
+
+  if (n_rules == 0)
+    return OK;
+  if (n_rules > (SIZE_MAX / sizeof(SensitiveRule)) ||
+      n_rules > (size_t)(UINT32_MAX / sizeof(SensitiveRule))) {
+    set_parse_err(err_out, "%s.sensitiveDomains: too many entries.",
+                  path_prefix);
+    return ERR;
+  }
+
+  if (arena_init(&out->sens_policy.arena, NULL, NULL) != OK) {
+    set_parse_err(err_out, "%s.sensitiveDomains: internal allocation error.",
+                  path_prefix);
+    return ERR;
+  }
+
+  out->sens_policy.storage = (SensitiveRule *)arena_alloc(
+      &out->sens_policy.arena, (uint32_t)(n_rules * sizeof(SensitiveRule)));
+  if (!out->sens_policy.storage) {
+    set_parse_err(err_out, "%s.sensitiveDomains: internal allocation error.",
+                  path_prefix);
+    goto error;
+  }
+  out->sens_policy.n_storage = n_rules;
+
+  if (jsget_object_members_begin(&domains_obj, NULL, &oit) != YES) {
+    set_parse_err(err_out, "%s.sensitiveDomains: internal iteration error.",
+                  path_prefix);
+    goto error;
+  }
+
+  // Loop over each object inside sensitiveDomains, allocate its string
+  // identifier inside the arena, then loop over each array element of that
+  // object and assign the values to the SensitiveRule
+  size_t rule_ix = 0;
+  for (;;) {
+    JsonStrSpan domain_key = {0};
+    JsonGetter arr_view = {0};
+    AdbxTriStatus rc =
+        jsget_object_members_next(&domains_obj, &oit, &domain_key, &arr_view);
+    if (rc == NO)
+      break;
+    if (rc != YES) {
+      set_parse_err(err_out, "%s.sensitiveDomains: malformed object member.",
+                    path_prefix);
+      goto error;
+    }
+
+    char *decoded_domain = NULL;
+    if (json_span_decode_alloc(&domain_key, &decoded_domain) != YES ||
+        !decoded_domain) {
+      set_parse_err(err_out,
+                    "%s.sensitiveDomains: failed to decode domain key.",
+                    path_prefix);
+      free(decoded_domain);
+      goto error;
+    }
+    str_lower_inplace(decoded_domain);
+    if (decoded_domain[0] == '\0') {
+      set_parse_err(err_out,
+                    "%s.sensitiveDomains: domain names must not be empty.",
+                    path_prefix);
+      free(decoded_domain);
+      goto error;
+    }
+
+    char *domain_ar =
+        (char *)arena_add_nul(&out->sens_policy.arena, decoded_domain,
+                              (uint32_t)strlen(decoded_domain));
+    free(decoded_domain);
+    if (!domain_ar) {
+      set_parse_err(err_out, "%s.sensitiveDomains: internal allocation error.",
+                    path_prefix);
+      goto error;
+    }
+
+    JsonArrIter ait = {0};
+    AdbxTriStatus arc = jsget_array_strings_begin(&arr_view, NULL, &ait);
+    if (arc != YES) {
+      set_parse_err(err_out,
+                    "%s.sensitiveDomains: each domain value must be an array "
+                    "of strings.",
+                    path_prefix);
+      goto error;
+    }
+
+    for (;;) {
+      JsonStrSpan sp = {0};
+      arc = jsget_array_strings_next(&arr_view, &ait, &sp);
+      if (arc == NO)
+        break;
+      if (arc != YES) {
+        set_parse_err(
+            err_out,
+            "%s.sensitiveDomains: each domain value must contain only strings.",
+            path_prefix);
+        goto error;
+      }
+
+      char *decoded_pat = NULL;
+      if (json_span_decode_alloc(&sp, &decoded_pat) != YES || !decoded_pat) {
+        set_parse_err(err_out,
+                      "%s.sensitiveDomains: failed to decode string entry.",
+                      path_prefix);
+        free(decoded_pat);
+        goto error;
+      }
+
+      str_lower_inplace(decoded_pat);
+
+      // we first add the string to the arena, then mutate it with split_*
+      char *pat_ar = (char *)arena_add_nul(&out->sens_policy.arena, decoded_pat,
+                                           (uint32_t)strlen(decoded_pat));
+      free(decoded_pat);
+      if (!pat_ar) {
+        set_parse_err(err_out,
+                      "%s.sensitiveDomains: internal allocation error.",
+                      path_prefix);
+        goto error;
+      }
+
+      char *schema = NULL;
+      char *table = NULL;
+      char *column_pat = NULL;
+      if (split_sensitive_path(pat_ar, &schema, &table, &column_pat) != OK) {
+        set_parse_err(err_out,
+                      "%s.sensitiveDomains[]: expected [schema.][table.]"
+                      "column with '*' only in the column segment.",
+                      path_prefix);
+        goto error;
+      }
+      if ((schema && strchr(schema, '*')) || (table && strchr(table, '*'))) {
+        set_parse_err(err_out,
+                      "%s.sensitiveDomains[]: '*' is allowed only in the "
+                      "column segment.",
+                      path_prefix);
+        goto error;
+      }
+
+      uint16_t star_count = 0;
+      uint16_t literal_len = 0;
+      if (normalize_column_pattern(column_pat, &star_count, &literal_len) !=
+          OK) {
+        set_parse_err(err_out, "%s.sensitiveDomains[]: invalid column pattern.",
+                      path_prefix);
+        free(decoded_pat);
+        goto error;
+      }
+
+      SensitiveRule *rule = &out->sens_policy.storage[rule_ix++];
+      rule->schema = schema;
+      rule->table = table;
+      rule->column_pat = column_pat;
+      rule->domain =
+          domain_ar; // we allocate just one string per sensitiveDomains object
+      rule->star_count = star_count;
+      rule->literal_len = literal_len;
+    }
+  }
+
+  if (rule_ix != n_rules) {
+    set_parse_err(err_out, "%s.sensitiveDomains: internal counting mismatch.",
+                  path_prefix);
+    goto error;
+  }
+
+  out->sens_policy.n_storage = rule_ix;
+  if (sensitive_policy_finalize(&out->sens_policy, path_prefix, err_out) != OK)
+    goto error;
+  return OK;
+
+error:
+  arena_clean(&out->sens_policy.arena);
+  memset(&out->sens_policy, 0, sizeof(out->sens_policy));
   return ERR;
 }
 
@@ -727,6 +1252,7 @@ static void profile_clean(ConnProfile *p) {
   free((char *)p->options);
   p->secret_ref.cred_namespace = NULL;
   p->secret_ref.connection_name = NULL;
+  arena_clean(&p->sens_policy.arena);
   arena_clean(&p->col_policy.arena);
   arena_clean(&p->safe_funcs.arena);
 }
@@ -772,20 +1298,27 @@ static AdbxStatus parse_credential_namespace(const JsonGetter *jg,
  */
 static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
                                  ConnProfile *out, size_t db_index,
-                                 char **err_out) {
+                                 ConnCatVersion version, char **err_out) {
   if (!cat || !jg || !out)
     return ERR;
 
   char db_path[64];
   snprintf(db_path, sizeof(db_path), "$.databases[%zu]", db_index);
 
-  const char *const keys[] = {
+  const char *const keys_v10[] = {
       "type",          "connectionName", "host",    "port",
       "username",      "database",       "options", "sensitiveColumns",
       "safeFunctions", "safetyPolicy"};
+  const char *const keys_v11[] = {
+      "type",          "connectionName", "host",    "port",
+      "username",      "database",       "options", "sensitiveDomains",
+      "safeFunctions", "safetyPolicy"};
+  const char *const *keys = (version == CONN_CAT_VER_1_1) ? keys_v11 : keys_v10;
+  size_t n_keys =
+      (version == CONN_CAT_VER_1_1) ? ARRLEN(keys_v11) : ARRLEN(keys_v10);
   JsonStrSpan unknown = {0};
   AdbxTriStatus vrc =
-      jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys), &unknown);
+      jsget_top_level_validation(jg, NULL, keys, n_keys, &unknown);
   if (vrc != YES) {
     set_parse_unknown_key_err(err_out, db_path, &unknown, "in database entry");
     return ERR;
@@ -872,8 +1405,13 @@ static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
       goto error;
   }
 
-  if (parse_sensitive_columns(jg, out, db_path, err_out) != OK)
-    goto error;
+  if (version == CONN_CAT_VER_1_1) {
+    if (parse_sensitive_domains(jg, out, db_path, err_out) != OK)
+      goto error;
+  } else {
+    if (parse_sensitive_columns(jg, out, db_path, err_out) != OK)
+      goto error;
+  }
   if (parse_safe_functions(jg, out, db_path, err_out) != OK)
     goto error;
   return OK;
@@ -889,6 +1427,7 @@ error:
   out->host = NULL;
   out->options = NULL;
   out->user = NULL;
+  memset(&out->sens_policy, 0, sizeof(out->sens_policy));
   memset(&out->col_policy, 0, sizeof(out->col_policy));
   memset(&out->safe_funcs, 0, sizeof(out->safe_funcs));
   return ERR;
@@ -900,7 +1439,7 @@ error:
  * Error semantics: returns OK on valid non-empty array, ERR otherwise.
  */
 static AdbxStatus parse_databases(const JsonGetter *jg, ConnCatalog *cat,
-                                  char **err_out) {
+                                  ConnCatVersion version, char **err_out) {
   if (!jg || !cat)
     return ERR;
 
@@ -939,7 +1478,8 @@ static AdbxStatus parse_databases(const JsonGetter *jg, ConnCatalog *cat,
     if (rc != YES)
       goto error;
 
-    if (parse_db_entry(cat, &entry, &profiles[idx], idx, err_out) != OK)
+    if (parse_db_entry(cat, &entry, &profiles[idx], idx, version, err_out) !=
+        OK)
       goto error;
 
     // connectionName must be unique
@@ -968,22 +1508,31 @@ error:
   return ERR;
 }
 
-/* Validates that the top-level "version" key exists and matches the current
- * catalog schema version. Returns:
- * - YES: version exists and is supported.
- * - NO: version missing or unsupported.
- * - ERR: malformed version value or internal error.
+/* Parses the top-level catalog version string into '*out'.
+ * Ownership: borrows 'jg' and writes caller-owned '*out'.
+ * Side effects: allocates one temporary decoded string.
+ * Error semantics: returns YES on supported version, NO on missing or
+ * unsupported value, ERR on malformed input or invalid arguments.
  */
-static AdbxTriStatus parse_version(const JsonGetter *jg) {
-  if (!jg)
+static AdbxTriStatus parse_version(const JsonGetter *jg, ConnCatVersion *out) {
+  if (!jg || !out)
     return ERR;
 
   char *ver = NULL;
   AdbxTriStatus rc = jsget_string_decode_alloc(jg, "version", &ver);
-  if (rc != YES)
+  if (rc == NO)
     return NO;
+  if (rc != YES)
+    return ERR;
 
-  AdbxTriStatus ok = (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) ? YES : NO;
+  AdbxTriStatus ok = NO;
+  if (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) {
+    *out = CONN_CAT_VER_1_1;
+    ok = YES;
+  } else if (strcmp(ver, PREV_CONN_CAT_VERSION) == 0) {
+    *out = CONN_CAT_VER_1_0;
+    ok = YES;
+  }
   free(ver);
   return ok;
 }
@@ -1019,7 +1568,8 @@ static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
     goto error;
   }
 
-  AdbxTriStatus vrc = parse_version(&jg);
+  ConnCatVersion version = 0;
+  AdbxTriStatus vrc = parse_version(&jg, &version);
   if (vrc == NO) {
     set_parse_err(&err_msg, "$.version: missing or unsupported value.");
     goto error;
@@ -1048,7 +1598,7 @@ static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
     goto error;
   }
 
-  if (parse_databases(&jg, cat, &err_msg) != OK) {
+  if (parse_databases(&jg, cat, version, &err_msg) != OK) {
     goto error;
   }
 
@@ -1177,10 +1727,133 @@ static int saferule_cmp(const void *a, const void *b) {
   return strcmp(ra->name, rb->name);
 }
 
+/* Matches one normalized '*' column glob against one normalized identifier.
+ * Returns YES when the pattern matches, NO when it does not.
+ */
+static AdbxTriStatus glob_match_column_pattern(const char *pattern,
+                                               const char *value) {
+  assert(pattern);
+  assert(value);
+
+  const char *p = pattern;
+  const char *v = value;
+  const char *star = NULL;
+  const char *match = NULL;
+
+  while (*v) {
+    if (*p == '*') {
+      star = p;
+      p++;
+      match = v;
+    } else if (*p == *v) {
+      p++;
+      v++;
+    } else if (star) {
+      p = star + 1;
+      match++;
+      v = match;
+    } else {
+      return NO;
+    }
+  }
+
+  while (*p == '*')
+    p++;
+
+  return (*p == '\0') ? YES : NO;
+}
+
+/* Searches one sensitive-rule bucket and writes '*out_domain' to a
+ * caller-borrowed string identifying the sensitive domain. Returns YES on first
+ * matching rule, NO when no rule matches, ERR on invalid input or malformed
+ * rule state.
+ */
+static AdbxTriStatus
+sensitive_bucket_find_domain(const SensitiveRuleBucket *bucket,
+                             const char *schema, const char *table,
+                             const char *column, const char **out_domain) {
+  assert(bucket);
+  assert(column);
+  assert(out_domain);
+
+  *out_domain = NULL;
+  for (size_t i = 0; i < bucket->n_rules; i++) {
+    const SensitiveRule *rule = &bucket->rules[i];
+    assert(rule->column_pat);
+    assert(rule->domain);
+
+    if (rule->schema) {
+      if (!schema || strcmp(rule->schema, schema) != 0)
+        continue;
+    }
+    if (rule->table) {
+      if (!table || strcmp(rule->table, table) != 0)
+        continue;
+    }
+
+    if (rule->star_count == 0) {
+      if (strcmp(rule->column_pat, column) != 0)
+        continue;
+      *out_domain = rule->domain;
+      return YES;
+    } else {
+      AdbxTriStatus mrc = glob_match_column_pattern(rule->column_pat, column);
+      if (mrc == YES) {
+        *out_domain = rule->domain;
+        return YES;
+      }
+    }
+  }
+  return NO;
+}
+
+AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
+                                         const char *schema, const char *table,
+                                         const char *column,
+                                         const char **out_domain) {
+  if (!cp || !column || !out_domain)
+    return ERR;
+
+  const SensitiveDomainPolicy *pol = &cp->sens_policy;
+  if (!pol->storage || pol->n_storage == 0)
+    return NO;
+
+  const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
+  AdbxTriStatus rc = sensitive_bucket_find_domain(&pol->exact_stc, schema_norm,
+                                                  table, column, out_domain);
+  if (rc != NO)
+    return rc;
+  rc = sensitive_bucket_find_domain(&pol->glob_stc, schema_norm, table, column,
+                                    out_domain);
+  if (rc != NO)
+    return rc;
+  rc = sensitive_bucket_find_domain(&pol->exact_tc, schema_norm, table, column,
+                                    out_domain);
+  if (rc != NO)
+    return rc;
+  rc = sensitive_bucket_find_domain(&pol->glob_tc, schema_norm, table, column,
+                                    out_domain);
+  if (rc != NO)
+    return rc;
+  rc = sensitive_bucket_find_domain(&pol->exact_c, schema_norm, table, column,
+                                    out_domain);
+  if (rc != NO)
+    return rc;
+  return sensitive_bucket_find_domain(&pol->glob_c, schema_norm, table, column,
+                                      out_domain);
+}
+
 AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
                                      const char *table, const char *column) {
   if (!cp || !table || !column)
     return ERR;
+
+  if (cp->sens_policy.storage && cp->sens_policy.n_storage > 0) {
+    const char *domain = NULL;
+    AdbxTriStatus rc =
+        connp_get_sensitive_domain(cp, schema, table, column, &domain);
+    return (rc == YES) ? YES : rc;
+  }
 
   const ColumnPolicy *pol = &cp->col_policy;
   if (!pol->rules || pol->n_rules == 0)

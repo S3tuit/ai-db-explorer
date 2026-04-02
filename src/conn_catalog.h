@@ -9,7 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CURR_CONN_CAT_VERSION "1.0"
+#define CURR_CONN_CAT_VERSION "1.1"
+#define PREV_CONN_CAT_VERSION "1.0"
 /* Max bytes allowed for ConnProfile.connection_name (excluding NUL). */
 #define CONN_NAME_MAX_LEN 31u
 #define NAMESPACE_MAX_LEN 31u
@@ -17,6 +18,46 @@
 typedef enum {
   DB_KIND_POSTGRES = 1,
 } DbKind;
+
+/* One parsed sensitive-domain rule. Strings are owned by the parent policy
+ * arena. schema/table may be NULL based on the original qualifier depth.
+ */
+typedef struct SensitiveRule {
+  const char *schema;
+  const char *table;
+  const char *column_pat;
+  const char *domain;   // which sensitiveDomain it belongs to
+  uint16_t star_count;  // how many globs; '*'
+  uint16_t literal_len; // how many non globs char
+} SensitiveRule;
+
+/* One contiguous slice of rules with the same precedence bucket. The slice is
+ * borrowed from SensitiveDomainPolicy.storage.
+ */
+typedef struct SensitiveRuleBucket {
+  SensitiveRule *rules;
+  size_t n_rules;
+} SensitiveRuleBucket;
+
+/* Groups all sensitive-domain rules for a ConnProfile.
+ * storage is sorted in precedence order and bucket fields are slices into it.
+ */
+typedef struct SensitiveDomainPolicy {
+  SensitiveRule *storage;
+  size_t n_storage;
+
+  SensitiveRuleBucket exact_stc; // SensitiveRule with not globs and schema,
+                                 // table, column_pat not null
+  SensitiveRuleBucket glob_stc;  // SensitiveRule with globs and schema, table,
+                                 // column_pat not null
+  SensitiveRuleBucket exact_tc;  // SensitiveRule with not globs and table,
+                                 // column_pat not null
+  SensitiveRuleBucket glob_tc;
+  SensitiveRuleBucket exact_c;
+  SensitiveRuleBucket glob_c;
+
+  Arena arena; // owns 'storage' and the strings it references
+} SensitiveDomainPolicy;
 
 /* Represent whether or not a column should be treated as sensitive */
 typedef struct ColumnRule {
@@ -68,6 +109,9 @@ typedef struct {
   const char *options; // may be NULL
 
   SafetyPolicy safe_policy;
+  // Sensitive-domain rules for config version 1.1+ (may be empty).
+  SensitiveDomainPolicy sens_policy;
+
   // Column sensitivity rules for this connection (may be empty).
   ColumnPolicy col_policy;
 
@@ -121,19 +165,26 @@ size_t catalog_list(ConnCatalog *cat, ConnProfile **out, size_t cap_count);
 /**
  * Returns YES if (schema?, table, column) is marked sensitive by the profile.
  *
- * Business logic (v1, no search_path resolution):
- * - If a global rule table.column exists, it always matches (even if
- * schema-qualified).
- * - If no global rule exists and SQL is schema-qualified, it matches only if
- * the schema is listed for that table.column.
- * - If no global rule exists and SQL is unqualified, any schema-scoped rule for
- *   that table.column matches (since we do not resolve search_path in v1).
+ * Business logic:
+ * - For config version 1.1+, matching uses the sensitive-domain precedence
+ *   buckets documented by the parser implementation.
+ * - For config version 1.0, matching uses the legacy sensitiveColumns policy.
  *
  * Returns YES/NO/ERR.
  */
 AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
                                      const char *table, const char *column);
 
+/* Checks if the column in input, identified by 'schema', 'table', 'column',
+ * belongs to a sensitive domain. 'cp' and 'column' must not be NULL.
+ * - YES means it found a match *out_domain is caller-borrowed.
+ * - NO means not sensitive.
+ * - ERR means invalid input or internal inconsistency.
+ * */
+AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
+                                         const char *schema, const char *table,
+                                         const char *column,
+                                         const char **out_domain);
 /**
  * Returns YES if the function name is marked safe by the profile.
  *
