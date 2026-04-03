@@ -10,7 +10,6 @@
 #include <stdint.h>
 
 #define CURR_CONN_CAT_VERSION "1.1"
-#define PREV_CONN_CAT_VERSION "1.0"
 /* Max bytes allowed for ConnProfile.connection_name (excluding NUL). */
 #define CONN_NAME_MAX_LEN 31u
 #define NAMESPACE_MAX_LEN 31u
@@ -59,22 +58,6 @@ typedef struct SensitiveDomainPolicy {
   Arena arena; // owns 'storage' and the strings it references
 } SensitiveDomainPolicy;
 
-/* Represent whether or not a column should be treated as sensitive */
-typedef struct ColumnRule {
-  const char *table;
-  const char *col;
-  const char **schemas; // sorted unique array; NULL if no schema list
-  uint32_t n_schemas;
-  int is_global; // 1 if rule applies regardless of schema
-} ColumnRule;
-
-/* Groups all the ColumnRule for a ConnProfile. */
-typedef struct ColumnPolicy {
-  ColumnRule *rules; // sorted by (table, col)
-  size_t n_rules;
-  Arena arena; // owns all strings and arrays in ColumnPolicy
-} ColumnPolicy;
-
 /* Represent whether or not a function is safe to call. */
 typedef struct SafeFunctionRule {
   const char *name;
@@ -109,11 +92,8 @@ typedef struct {
   const char *options; // may be NULL
 
   SafetyPolicy safe_policy;
-  // Sensitive-domain rules for config version 1.1+ (may be empty).
+  // Sensitive-domain rules for this connection (may be empty).
   SensitiveDomainPolicy sens_policy;
-
-  // Column sensitivity rules for this connection (may be empty).
-  ColumnPolicy col_policy;
 
   // User-defined safe functions for this connection (may be empty).
   SafeFunctionPolicy safe_funcs;
@@ -162,25 +142,13 @@ size_t catalog_count(const ConnCatalog *cat);
  */
 size_t catalog_list(ConnCatalog *cat, ConnProfile **out, size_t cap_count);
 
-/**
- * Returns YES if (schema?, table, column) is marked sensitive by the profile.
- *
- * Business logic:
- * - For config version 1.1+, matching uses the sensitive-domain precedence
- *   buckets documented by the parser implementation.
- * - For config version 1.0, matching uses the legacy sensitiveColumns policy.
- *
- * Returns YES/NO/ERR.
- */
-AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
-                                     const char *table, const char *column);
-
 /* Checks if the column in input, identified by 'schema', 'table', 'column',
  * belongs to a sensitive domain. 'cp' and 'column' must not be NULL.
- * - YES means it found a match *out_domain is caller-borrowed.
+ * - YES means it found a match. It assigns the matched borrowed domain string
+ *   to '*out_domain' when 'out_domain' is not NULL.
  * - NO means not sensitive.
  * - ERR means invalid input or internal inconsistency.
- * */
+ */
 AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
                                          const char *schema, const char *table,
                                          const char *column,

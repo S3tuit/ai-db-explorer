@@ -5,8 +5,9 @@
 Some database columns are too sensitive to return to an AI agent in plaintext,
 even when the agent is otherwise allowed to inspect the database.
 
-`adbxplorer` handles that by marking columns as sensitive and then applying a
-stricter query policy whenever those columns are touched.
+`adbxplorer` handles that by grouping those columns into sensitive domains and
+then applying a stricter query policy whenever one of those columns is
+touched.
 
 The result is intentionally conservative:
 
@@ -16,29 +17,35 @@ The result is intentionally conservative:
 
 ## Configuration
 
-### `sensitiveColumns`
+### `sensitiveDomains`
 
-Sensitivity is configured per connection with `sensitiveColumns`.
+Sensitivity is configured per connection with `sensitiveDomains`.
 
-Entries use this shape:
+Each object key is the canonical domain name. Each value is an array of column
+patterns using this shape:
 
-- `[schema.]table.column`
+- `[schema.][table.]column`
 
 For example:
 
 ```json
-"sensitiveColumns": [
-  "users.email",
-  "private.users.phone"
-]
+"sensitiveDomains": {
+  "email": [
+    "users.mail",
+    "*email*"
+  ],
+  "phone": [
+    "private.users.phone",
+    "ph_num"
+  ]
+}
 ```
 
-Rules are normalized to lowercase at config-load time, and malformed entries
-are rejected.
+Rules are normalized to lowercase at config-load time. `*` is supported only
+in the final column segment, and malformed entries are rejected.
 
-Today this model is intentionally simple and column-oriented. It will likely
-evolve later into something closer to `sensitiveDomains`, because the long-term
-model should be more expressive than a flat list of column names.
+Two columns should share a domain only when they represent the same logical
+kind of value and are expected to accept the same token parameters.
 
 ### `columnPolicy`
 
@@ -59,8 +66,8 @@ In v1:
 The strategy affects handle reuse inside one live Broker session:
 
 - `randomized` may issue different handles for repeated equal values
-- `deterministic` reuses the same handle for the same connection/column/value
-  while that Broker session state still exists
+- `deterministic` reuses the same handle for the same
+  connection/domain/value while that Broker session state still exists
 
 In both cases, handles should be treated as opaque Broker-owned values, not as
 stable identifiers.
@@ -79,7 +86,7 @@ sample data.
 ## When the stricter policy turns on
 
 The Broker enables the stricter sensitive-data path when a query touches any
-configured sensitive column.
+column that belongs to a configured sensitive domain.
 
 That includes references in places such as:
 
@@ -106,7 +113,7 @@ memory and returns an opaque handle to the agent instead of the plaintext.
 At a high level, those handles are:
 
 - owned by the Broker
-- tied to one connection and one sensitive-column scope
+- tied to one connection and one sensitive domain
 - meant for use only while the underlying Broker session state still exists
 
 The agent can later pass them back through `run_sql_query_tokens`, which lets
@@ -149,6 +156,8 @@ Parameters are also tightly restricted:
 - `run_sql_query_tokens` is the only intended path for parameterized queries
 - parameters are allowed only inside `WHERE` comparisons
 - parameters may only compare against sensitive columns
+- token parameters must belong to the same sensitive domain as the column they
+  are compared against
 
 ### Additional rules when sensitive columns are touched
 
@@ -170,7 +179,7 @@ Allowed forms are:
 - `col = $n`
 - `col IN ($n, $m, ...)`
 
-Where each parameter is an opaque handle for that same sensitive column scope.
+Where each parameter is an opaque handle for that same sensitive domain.
 
 Additional `WHERE` limits:
 

@@ -9,13 +9,13 @@
 #include "test.h"
 #include "validator.h"
 
-/* Builds one SensitiveTok test input containing only scope metadata.
+/* Builds one SensitiveTok test input containing only sensitive-domain metadata.
  * The returned value is stack-owned and safe to copy by value.
  */
-static SensitiveTok make_param_scope(const char *col_ref) {
+static SensitiveTok make_param_domain(const char *domain) {
   SensitiveTok t = {0};
-  t.col_ref = col_ref;
-  t.col_ref_len = (uint32_t)strlen(col_ref);
+  t.domain = domain;
+  t.domain_len = (uint32_t)strlen(domain);
   return t;
 }
 
@@ -101,7 +101,7 @@ static void assert_validate_at(DbBackend *db, const ConnProfile *cp,
 static void
 assert_validate_plan_at(DbBackend *db, const ConnProfile *cp, const char *sql,
                         const ValidatorColOutKind *exp_kinds,
-                        const char *const *exp_col_ids, uint32_t exp_ncols,
+                        const char *const *exp_domains, uint32_t exp_ncols,
                         const SensitiveTok *params, uint32_t nparams,
                         const char *file, int line) {
   ValidateQueryOut out = {0};
@@ -135,16 +135,16 @@ assert_validate_plan_at(DbBackend *db, const ConnProfile *cp, const char *sql,
     ASSERT_TRUE_AT(col->kind == exp_kinds[i], file, line);
 
     if (exp_kinds[i] == VCOL_OUT_PLAINTEXT) {
-      ASSERT_TRUE_AT(col->col_id == NULL, file, line);
-      ASSERT_TRUE_AT(col->col_id_len == 0, file, line);
+      ASSERT_TRUE_AT(col->domain == NULL, file, line);
+      ASSERT_TRUE_AT(col->domain_len == 0, file, line);
       continue;
     }
 
-    ASSERT_TRUE_AT(col->col_id != NULL, file, line);
-    ASSERT_TRUE_AT(col->col_id_len > 0, file, line);
-    ASSERT_TRUE_AT(strlen(col->col_id) == col->col_id_len, file, line);
-    if (exp_col_ids && exp_col_ids[i]) {
-      ASSERT_TRUE_AT(strcmp(col->col_id, exp_col_ids[i]) == 0, file, line);
+    ASSERT_TRUE_AT(col->domain != NULL, file, line);
+    ASSERT_TRUE_AT(col->domain_len > 0, file, line);
+    ASSERT_TRUE_AT(strlen(col->domain) == col->domain_len, file, line);
+    if (exp_domains && exp_domains[i]) {
+      ASSERT_TRUE_AT(strcmp(col->domain, exp_domains[i]) == 0, file, line);
     }
   }
 
@@ -272,15 +272,15 @@ static void test_validator_from_notes(void) {
   ASSERT_TRUE(policy != NULL);
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
-  const SensitiveTok tok_fc1[] = {make_param_scope("users.fiscal_code")};
+  const SensitiveTok tok_fc1[] = {make_param_domain("fiscal_code")};
   const SensitiveTok tok_fc2[] = {
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
   };
   const SensitiveTok tok_fc3[] = {
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
   };
 
   /* ACCEPT cases */
@@ -540,7 +540,7 @@ static void test_validator_from_notes(void) {
 }
 
 /* Verifies token-parameter binding rules in sensitive WHERE predicates.
- * This suite focuses on parameter scope/index validation and does not inspect
+ * This suite focuses on parameter domain/index validation and does not inspect
  * ValidatorPlan output columns.
  */
 static void test_validator_token_param_binding(void) {
@@ -554,82 +554,83 @@ static void test_validator_token_param_binding(void) {
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
 
-  const SensitiveTok tok_users_fc_1[] = {make_param_scope("users.fiscal_code")};
+  const SensitiveTok tok_users_fc_1[] = {make_param_domain("fiscal_code")};
   const SensitiveTok tok_users_fc_2[] = {
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
   };
   const SensitiveTok tok_users_fc_3[] = {
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
   };
   const SensitiveTok tok_private_users_fc_1[] = {
-      make_param_scope("private.users.fiscal_code"),
+      make_param_domain("fiscal_code"),
   };
   const SensitiveTok tok_exp_receiver_1[] = {
-      make_param_scope("expenses.receiver"),
+      make_param_domain("receiver"),
   };
   const SensitiveTok tok_cross_ok[] = {
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("expenses.receiver"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("receiver"),
   };
   const SensitiveTok tok_cross_bad_2nd[] = {
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
   };
   const SensitiveTok tok_in_bad_3rd[] = {
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("users.fiscal_code"),
-      make_param_scope("expenses.receiver"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
+      make_param_domain("receiver"),
   };
   const SensitiveTok tok_bad_meta_null[] = {
-      {.col_ref = NULL, .col_ref_len = 8},
+      {.domain = NULL, .domain_len = 8},
   };
   const SensitiveTok tok_bad_meta_empty[] = {
-      {.col_ref = "users.fiscal_code", .col_ref_len = 0},
+      {.domain = "fiscal_code", .domain_len = 0},
   };
 
-  // schema-qualified query column must not accept table-only token scope.
+  // schema-qualified queries still accept the same domain when the catalog
+  // rule is table-qualified.
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
-      "SELECT u.id FROM private.users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
-      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_users_fc_1, ARRLEN(tok_users_fc_1));
+      "SELECT u.id FROM private.users u WHERE u.fiscal_code = $1 LIMIT 10;", 1,
+      VERR_NONE, NULL, tok_users_fc_1, ARRLEN(tok_users_fc_1));
 
-  // table-only query column must not accept schema-qualified token scope.
+  // Table-only queries also accept the same domain.
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
-      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
-      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_private_users_fc_1,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 1,
+      VERR_NONE, NULL, tok_private_users_fc_1,
       ARRLEN(tok_private_users_fc_1));
 
-  // token from a different table/column must be rejected.
+  // token from a different sensitive domain must be rejected.
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
-      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_exp_receiver_1,
+      VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_exp_receiver_1,
       ARRLEN(tok_exp_receiver_1));
 
-  // two sensitive predicates bound to correct scopes should pass.
+  // two sensitive predicates bound to the correct domains should pass.
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
       "e.user_id = u.id WHERE u.fiscal_code = $1 AND e.receiver = $2 LIMIT 10;",
       1, VERR_NONE, NULL, tok_cross_ok, ARRLEN(tok_cross_ok));
 
-  // two sensitive predicates with wrong second scope should fail.
+  // two sensitive predicates with wrong second domain should fail.
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
       "e.user_id = u.id WHERE u.fiscal_code = $1 AND e.receiver = $2 LIMIT 10;",
-      0, VERR_PARAM_SCOPE_MISMATCH, NULL, tok_cross_bad_2nd,
+      0, VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_cross_bad_2nd,
       ARRLEN(tok_cross_bad_2nd));
 
   // IN with one mismatched token among many should fail.
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, $2, $3) LIMIT 10;",
-      0, VERR_PARAM_SCOPE_MISMATCH, NULL, tok_in_bad_3rd,
+      0, VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_in_bad_3rd,
       ARRLEN(tok_in_bad_3rd));
 
   // Missing token parameters must reject sensitive predicates.
@@ -662,7 +663,7 @@ static void test_validator_token_param_binding(void) {
       "$3 LIMIT 10;",
       0, VERR_PARAM_UNUSED, NULL, tok_users_fc_3, ARRLEN(tok_users_fc_3));
 
-  // '= with param on left' should still enforce scope checks.
+  // '= with param on left' should still enforce domain checks.
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE $1 = u.fiscal_code LIMIT 10;", 1,
@@ -670,7 +671,7 @@ static void test_validator_token_param_binding(void) {
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE $1 = u.fiscal_code LIMIT 10;", 0,
-      VERR_PARAM_SCOPE_MISMATCH, NULL, tok_exp_receiver_1,
+      VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_exp_receiver_1,
       ARRLEN(tok_exp_receiver_1));
 
   // Malformed broker-provided token metadata must fail closed.
@@ -688,7 +689,7 @@ static void test_validator_token_param_binding(void) {
 }
 
 /* Verifies ValidatorPlan output-column mapping for plaintext/token columns,
- * canonical token identifiers, reset semantics, and failure-plan invariants.
+ * sensitive-domain metadata, reset semantics, and failure-plan invariants.
  */
 static void test_validator_plan(void) {
   ConnCatalog *cat = load_test_catalog();
@@ -700,7 +701,7 @@ static void test_validator_plan(void) {
 
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
-  const SensitiveTok tok_fc1[] = {make_param_scope("users.fiscal_code")};
+  const SensitiveTok tok_fc1[] = {make_param_domain("fiscal_code")};
 
   // all plaintext
   {
@@ -743,7 +744,7 @@ static void test_validator_plan(void) {
         VCOL_OUT_TOKEN,
         VCOL_OUT_PLAINTEXT,
     };
-    const char *ids[] = {NULL, "users.fiscal_code", NULL};
+    const char *ids[] = {NULL, "fiscal_code", NULL};
     ASSERT_VALIDATE_PLAN(
         db, cp,
         "SELECT u.eye_color, u.fiscal_code, u.name FROM users u WHERE u.id = "
@@ -757,7 +758,7 @@ static void test_validator_plan(void) {
         VCOL_OUT_PLAINTEXT,
         VCOL_OUT_TOKEN,
     };
-    const char *ids[] = {NULL, "private.users.fiscal_code"};
+    const char *ids[] = {NULL, "fiscal_code"};
     ASSERT_VALIDATE_PLAN(
         db, cp,
         "SELECT u.eye_color, u.fiscal_code FROM private.users u WHERE u.id = "
@@ -773,7 +774,7 @@ static void test_validator_plan(void) {
         VCOL_OUT_PLAINTEXT,
         VCOL_OUT_TOKEN,
     };
-    const char *ids[] = {NULL, NULL, NULL, "private.users.fiscal_code"};
+    const char *ids[] = {NULL, NULL, NULL, "fiscal_code"};
     ASSERT_VALIDATE_PLAN(
         db, cp,
         "SELECT e.amount, e.date, u.name, u.fiscal_COde FROM expenses e INNER "
@@ -789,7 +790,7 @@ static void test_validator_plan(void) {
         VCOL_OUT_PLAINTEXT,
         VCOL_OUT_TOKEN,
     };
-    const char *ids[] = {NULL, NULL, NULL, "users.fiscal_code"};
+    const char *ids[] = {NULL, NULL, NULL, "fiscal_code"};
     ASSERT_VALIDATE_PLAN(
         db, cp,
         "SELECT e.amount, e.date, u2.name, u1.fiscal_COde FROM expenses e "
@@ -804,7 +805,7 @@ static void test_validator_plan(void) {
         VCOL_OUT_TOKEN,
         VCOL_OUT_TOKEN,
     };
-    const char *ids[] = {"users.fiscal_code", "users.fiscal_code"};
+    const char *ids[] = {"fiscal_code", "fiscal_code"};
     ASSERT_VALIDATE_PLAN(
         db, cp,
         "SELECT u.fiscal_code, u.fiscal_code FROM users u WHERE u.id = 1 "
@@ -812,13 +813,13 @@ static void test_validator_plan(void) {
         kinds, ids, 2);
   }
 
-  // output alias should not alter canonical source identifier
+  // output alias should not alter the resolved sensitive domain
   {
     const ValidatorColOutKind kinds[] = {
         VCOL_OUT_TOKEN,
         VCOL_OUT_PLAINTEXT,
     };
-    const char *ids[] = {"users.fiscal_code", NULL};
+    const char *ids[] = {"fiscal_code", NULL};
     ASSERT_VALIDATE_PLAN(
         db, cp,
         "SELECT u.fiscal_code AS fc, u.name FROM users u WHERE u.id = 1 LIMIT "
@@ -832,7 +833,7 @@ static void test_validator_plan(void) {
         VCOL_OUT_TOKEN,
         VCOL_OUT_TOKEN,
     };
-    const char *ids[] = {"users.fiscal_code", "expenses.receiver"};
+    const char *ids[] = {"fiscal_code", "receiver"};
     ASSERT_VALIDATE_PLAN(
         db, cp,
         "SELECT u.fiscal_code, e.receiver FROM users u INNER JOIN expenses e "
@@ -884,8 +885,8 @@ static void test_validator_plan(void) {
       (const ValidatorColPlan *)parr_cat(out.plan.cols, 0);
   ASSERT_TRUE(c0 != NULL);
   ASSERT_TRUE(c0->kind == VCOL_OUT_TOKEN);
-  ASSERT_TRUE(c0->col_id != NULL);
-  ASSERT_STREQ(c0->col_id, "users.fiscal_code");
+  ASSERT_TRUE(c0->domain != NULL);
+  ASSERT_STREQ(c0->domain, "fiscal_code");
 
   ValidatorRequest req_plain = {
       .db = db,
@@ -900,8 +901,8 @@ static void test_validator_plan(void) {
       (const ValidatorColPlan *)parr_cat(out.plan.cols, 0);
   ASSERT_TRUE(c1 != NULL);
   ASSERT_TRUE(c1->kind == VCOL_OUT_PLAINTEXT);
-  ASSERT_TRUE(c1->col_id == NULL);
-  ASSERT_TRUE(c1->col_id_len == 0);
+  ASSERT_TRUE(c1->domain == NULL);
+  ASSERT_TRUE(c1->domain_len == 0);
 
   vq_out_clean(&out);
   db_destroy(db);

@@ -1,7 +1,6 @@
 #ifndef VALIDATOR_H
 #define VALIDATOR_H
 
-#include "arena.h"
 #include "conn_catalog.h"
 #include "db_backend.h"
 #include "packed_array.h"
@@ -29,7 +28,7 @@ typedef enum ValidatorErrCode {
   VERR_JOIN_ON_INVALID, /* JOIN ON not AND/= or invalid operands */
   VERR_JOIN_ON_SENSITIVE,    /* JOIN ON references sensitive columns */
   VERR_PARAM_IDX_RANGE,      /* $n index outside provided parameter list */
-  VERR_PARAM_SCOPE_MISMATCH, /* token parameter scope mismatch */
+  VERR_PARAM_DOMAIN_MISMATCH, /* token parameter domain mismatch */
   VERR_PARAM_UNUSED,         /* provided token parameter not referenced */
   VERR_DISTINCT_SENSITIVE,   /* DISTINCT in sensitive mode */
   VERR_OFFSET_SENSITIVE,     /* OFFSET in sensitive mode */
@@ -49,13 +48,12 @@ typedef enum ValidatorColOutKind {
 
 typedef struct ValidatorColPlan {
   ValidatorColOutKind kind;
-  const char *col_id; // arena-owned canonical column id; NULL for plaintext
-  uint32_t col_id_len;
+  const char *domain; // borrowed from ConnProfile; NULL for plaintext
+  uint32_t domain_len;
 } ValidatorColPlan;
 
 typedef struct ValidatorPlan {
   PackedArray *cols; // entries are ValidatorColPlan, index-aligned with SELECT
-  Arena arena;       // owns ValidatorColPlan.col_id strings
 } ValidatorPlan;
 
 /* Output contract for validate_query().

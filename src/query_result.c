@@ -247,8 +247,8 @@ AdbxTriStatus qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
   SensitiveTokIn in = {
       .value = value,
       .value_len = (uint32_t)v_len,
-      .col_ref = vcol->col_id,
-      .col_ref_len = vcol->col_id_len,
+      .domain = vcol->domain,
+      .domain_len = vcol->domain_len,
       .pg_oid = qcol->pg_oid,
   };
   char tok[SENSITIVE_TOK_BUFSZ];

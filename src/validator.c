@@ -120,81 +120,77 @@ static AdbxStatus vq_out_reset(ValidateQueryOut *out) {
   if (!out->plan.cols)
     return ERR;
 
-  arena_clean(&out->plan.arena);
-  if (arena_init(&out->plan.arena, NULL, NULL) != OK) {
-    parr_destroy(out->plan.cols);
-    out->plan.cols = NULL;
-    return ERR;
-  }
-
   out->err.code = VERR_NONE;
   sb_reset(&out->err.msg);
   return OK;
 }
 
-/* Builds a canonical identifier (schema.table.column or table.column) for one
- * sensitive column reference. It borrows query metadata and writes one
- * arena-owned string into 'plan'. Side effects: allocates bytes in plan->arena
- * and may set validator errors. Error semantics: returns OK on success, ERR on
- * invalid input/alloc failures.
+/* Resolves one query column reference to its borrowed sensitive-domain name.
+ * It borrows query metadata and ConnProfile policy through 'ctx'. Side effects:
+ * may set validator errors. Error semantics: returns YES on success and writes
+ * one borrowed domain pointer/length pair, NO when the column is not
+ * sensitive, ERR on invalid input, unresolved aliases, or internal
+ * inconsistency.
  */
-static AdbxStatus
-validator_make_sensitive_col_id(ValidatorCtx *ctx, const QirQuery *q,
-                                const QirColRef *cr, ValidatorPlan *plan,
-                                const char **out_id, uint32_t *out_id_len) {
+static AdbxTriStatus
+validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
+                                   const QirColRef *cr, const char **out_domain,
+                                   uint32_t *out_domain_len) {
   assert(ctx != NULL);
   assert(q != NULL);
   assert(cr != NULL);
-  assert(plan != NULL);
-  assert(out_id != NULL);
-  assert(out_id_len != NULL);
+  assert(out_domain != NULL);
+  assert(out_domain_len != NULL);
 
-  *out_id = NULL;
-  *out_id_len = 0;
+  *out_domain = NULL;
+  *out_domain_len = 0;
 
   const QirFromItem *fi = find_from_alias(q, cr->qualifier.name);
-  if (!fi || fi->kind != QIR_FROM_BASE_REL) {
+  if (!fi) {
     const char *desc = qir_colref_to_str(cr, &ctx->scratch);
     set_err(ctx, VERR_ANALYZE_FAIL,
-            "Unable to resolve sensitive column source for '%s'.", desc);
+            "Unable to resolve sensitive column source alias for '%s'.", desc);
     return ERR;
   }
+  if (fi->kind != QIR_FROM_BASE_REL)
+    return NO;
 
   const char *schema = fi->u.rel.schema.name;
   const char *table = fi->u.rel.name.name;
   const char *col = cr->column.name;
   if (!table || table[0] == '\0' || !col || col[0] == '\0') {
     set_err(ctx, VERR_ANALYZE_FAIL,
-            "Unable to build sensitive identifier from query metadata.");
+            "Unable to resolve sensitive domain from query metadata.");
     return ERR;
   }
 
-  size_t need = 0;
-  if (schema && schema[0] != '\0') {
-    need = strlen(schema) + 1u + strlen(table) + 1u + strlen(col);
-  } else {
-    need = strlen(table) + 1u + strlen(col);
-  }
-  if (need > UINT32_MAX)
+  const char *domain = NULL;
+  AdbxTriStatus rc =
+      connp_get_sensitive_domain(ctx->cp, schema, table, col, &domain);
+  if (rc == NO)
+    return NO;
+  if (rc != YES || !domain || domain[0] == '\0') {
+    const char *desc = qir_colref_to_str(cr, &ctx->scratch);
+    set_err(ctx, VERR_ANALYZE_FAIL,
+            "Unable to resolve sensitive domain for '%s'.", desc);
     return ERR;
-
-  char *dst = (char *)arena_calloc(&plan->arena, (uint32_t)(need + 1u));
-  if (!dst)
-    return ERR;
-  if (schema && schema[0] != '\0') {
-    (void)snprintf(dst, need + 1u, "%s.%s.%s", schema, table, col);
-  } else {
-    (void)snprintf(dst, need + 1u, "%s.%s", table, col);
   }
 
-  *out_id = dst;
-  *out_id_len = (uint32_t)need;
-  return OK;
+  size_t domain_len = strlen(domain);
+  if (domain_len == 0 || domain_len > UINT32_MAX) {
+    set_err(ctx, VERR_ANALYZE_FAIL,
+            "Resolved sensitive domain has invalid length.");
+    return ERR;
+  }
+
+  *out_domain = domain;
+  *out_domain_len = (uint32_t)domain_len;
+  return YES;
 }
 
 /* Builds the output column plan aligned with main SELECT output indexes.
  * It borrows query and policy metadata and writes into 'out_plan'.
- * Side effects: appends entries to out_plan->cols and may allocate col ids.
+ * Side effects: appends entries to out_plan->cols.
  * Error semantics: returns OK on success, ERR on invalid input/allocation
  * failures; may set validator errors.
  */
@@ -219,31 +215,24 @@ static AdbxStatus validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
     if (idx == UINT32_MAX || !slot)
       return ERR;
     slot->kind = VCOL_OUT_PLAINTEXT;
-    slot->col_id = NULL;
-    slot->col_id_len = 0;
+    slot->domain = NULL;
+    slot->domain_len = 0;
 
     if (si->value->kind != QIR_EXPR_COLREF)
       continue;
 
-    int sens = colref_is_sensitive(q, ctx->cp, &si->value->u.colref);
-    if (sens == ERR) {
-      const char *desc = qir_colref_to_str(&si->value->u.colref, &ctx->scratch);
-      set_err(ctx, VERR_ANALYZE_FAIL,
-              "Unable to analyze output column sensitivity for '%s'.", desc);
+    const char *domain = NULL;
+    uint32_t domain_len = 0;
+    int sens = validator_resolve_sensitive_domain(ctx, q, &si->value->u.colref,
+                                                  &domain, &domain_len);
+    if (sens == ERR)
       return ERR;
-    }
     if (sens != YES)
       continue;
 
-    const char *col_id = NULL;
-    uint32_t col_id_len = 0;
-    if (validator_make_sensitive_col_id(ctx, q, &si->value->u.colref, out_plan,
-                                        &col_id, &col_id_len) != OK) {
-      return ERR;
-    }
     slot->kind = VCOL_OUT_TOKEN;
-    slot->col_id = col_id;
-    slot->col_id_len = col_id_len;
+    slot->domain = domain;
+    slot->domain_len = domain_len;
   }
 
   return OK;
@@ -290,72 +279,17 @@ static const char *validator_expr_diag(ValidatorCtx *ctx, const QirExpr *e) {
   return "<expression>";
 }
 
-/* Compares one query column reference against one canonical token scope.
- * It borrows all inputs and does not allocate.
- * Error semantics: returns YES on exact scope match, NO on mismatch, ERR on
- * invalid input or unresolved source relation.
- */
-static AdbxTriStatus validator_colref_scope_matches(const QirQuery *q,
-                                                    const QirColRef *cr,
-                                                    const char *scope,
-                                                    uint32_t scope_len) {
-  assert(q);
-  assert(cr);
-  assert(scope);
-  assert(scope_len > 0);
-
-  const QirFromItem *fi = find_from_alias(q, cr->qualifier.name);
-  if (!fi)
-    return ERR;
-
-  const char *schema = fi->u.rel.schema.name;
-  const char *table = fi->u.rel.name.name;
-  const char *col = cr->column.name;
-  if (!table || table[0] == '\0' || !col || col[0] == '\0')
-    return ERR;
-
-  size_t table_len = strlen(table);
-  size_t col_len = strlen(col);
-  size_t off = 0;
-
-  if (schema && schema[0] != '\0') {
-    size_t schema_len = strlen(schema);
-    size_t need = schema_len + 1u + table_len + 1u + col_len;
-    if (need != (size_t)scope_len)
-      return NO;
-    if (memcmp(scope, schema, schema_len) != 0)
-      return NO;
-    off += schema_len;
-    if (scope[off] != '.')
-      return NO;
-    off++;
-  } else {
-    size_t need = table_len + 1u + col_len;
-    if (need != (size_t)scope_len)
-      return NO;
-  }
-
-  if (memcmp(scope + off, table, table_len) != 0)
-    return NO;
-  off += table_len;
-  if (scope[off] != '.')
-    return NO;
-  off++;
-  if (memcmp(scope + off, col, col_len) != 0)
-    return NO;
-
-  return YES;
-}
-
 /* Validates that parameter '$param_idx' exists and matches one sensitive
- * column scope. It borrows all inputs and marks ctx->param_used on success.
- * Error semantics: returns YES on success, NO on policy mismatch, ERR on bad
- * input/internal inconsistency.
+ * domain. It borrows all inputs and marks ctx->param_used on success.
+ * This should be used only in pass B since we assume QirColRef's table is a
+ * base relation of 'q's scope.
+ * Returns YES on success, NO on policy mismatch, ERR on bad input or internal
+ * inconsistency.
  */
 static AdbxTriStatus
-validator_validate_param_scope_for_col(ValidatorCtx *ctx, const QirQuery *q,
-                                       const QirColRef *sensitive_cr,
-                                       int param_idx) {
+validator_validate_param_domain_for_col(ValidatorCtx *ctx, const QirQuery *q,
+                                        const QirColRef *sensitive_cr,
+                                        int param_idx) {
   assert(ctx);
   assert(q);
   assert(sensitive_cr);
@@ -382,26 +316,30 @@ validator_validate_param_scope_for_col(ValidatorCtx *ctx, const QirQuery *q,
   }
 
   const SensitiveTok *tok = &ctx->params[(uint32_t)param_idx - 1u];
-  if (!tok->col_ref || tok->col_ref_len == 0) {
+  if (!tok->domain || tok->domain_len == 0) {
     set_err(ctx, VERR_ANALYZE_FAIL, "Invalid token parameter metadata for $%d.",
             param_idx);
     return ERR;
   }
 
-  int mrc = validator_colref_scope_matches(q, sensitive_cr, tok->col_ref,
-                                           tok->col_ref_len);
-  if (mrc == ERR) {
-    set_err(
-        ctx, VERR_ANALYZE_FAIL,
-        "Unable to resolve sensitive column scope during token validation.");
+  const char *domain = NULL;
+  uint32_t domain_len = 0;
+  int mrc = validator_resolve_sensitive_domain(ctx, q, sensitive_cr, &domain,
+                                               &domain_len);
+  if (mrc == ERR)
+    return ERR;
+  if (mrc != YES) {
+    set_err(ctx, VERR_ANALYZE_FAIL,
+            "Unable to resolve sensitive domain during token validation.");
     return ERR;
   }
-  if (mrc == NO) {
+  if (tok->domain_len != domain_len ||
+      memcmp(tok->domain, domain, domain_len) != 0) {
     const char *desc = qir_colref_to_str(sensitive_cr, &ctx->scratch);
-    set_err(ctx, VERR_PARAM_SCOPE_MISMATCH,
-            "Token parameter $%d scope '%.*s' does not match sensitive column "
-            "'%s'.",
-            param_idx, (int)tok->col_ref_len, tok->col_ref, desc);
+    set_err(ctx, VERR_PARAM_DOMAIN_MISMATCH,
+            "Token parameter $%d domain '%.*s' does not match sensitive "
+            "column domain for '%s'.",
+            param_idx, (int)tok->domain_len, tok->domain, desc);
     return NO;
   }
 
@@ -434,7 +372,7 @@ static inline AdbxTriStatus colref_is_sensitive(const QirQuery *q,
   const char *table = fi->u.rel.name.name;
   const char *col = c->column.name;
 
-  return connp_is_col_sensitive(cp, schema, table, col);
+  return connp_get_sensitive_domain(cp, schema, table, col, NULL);
 }
 
 /* Validates that every QirFromItem and QirJoin has an alias. Returns YES, or
@@ -1360,7 +1298,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
                   desc);
           return NO;
         }
-        int prc = validator_validate_param_scope_for_col(
+        int prc = validator_validate_param_domain_for_col(
             ctx, main_q, &e->u.bin.l->u.colref, e->u.bin.r->u.param_index);
         if (prc != YES)
           return prc;
@@ -1381,7 +1319,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
                   desc);
           return NO;
         }
-        int prc = validator_validate_param_scope_for_col(
+        int prc = validator_validate_param_domain_for_col(
             ctx, main_q, &e->u.bin.r->u.colref, e->u.bin.l->u.param_index);
         if (prc != YES)
           return prc;
@@ -1417,7 +1355,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
                     desc);
             return NO;
           }
-          int prc = validator_validate_param_scope_for_col(
+          int prc = validator_validate_param_domain_for_col(
               ctx, main_q, &e->u.in_.lhs->u.colref, it->u.param_index);
           if (prc != YES)
             return prc;
@@ -1623,12 +1561,6 @@ AdbxStatus vq_out_init(ValidateQueryOut *out) {
   if (!out->plan.cols)
     return ERR;
 
-  if (arena_init(&out->plan.arena, NULL, NULL) != OK) {
-    parr_destroy(out->plan.cols);
-    out->plan.cols = NULL;
-    return ERR;
-  }
-
   out->err.code = VERR_NONE;
   return OK;
 }
@@ -1638,7 +1570,6 @@ void vq_out_clean(ValidateQueryOut *out) {
     return;
   parr_destroy(out->plan.cols);
   out->plan.cols = NULL;
-  arena_clean(&out->plan.arena);
   sb_clean(&out->err.msg);
   out->err.code = VERR_NONE;
 }

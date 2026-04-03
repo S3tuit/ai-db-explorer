@@ -157,8 +157,8 @@ static void test_store_get_len_edge_cases(void) {
   SensitiveTokIn in = {
       .value = "abc",
       .value_len = 3u,
-      .col_ref = "public.users.ssn",
-      .col_ref_len = (uint32_t)strlen("public.users.ssn"),
+      .domain = "ssn",
+      .domain_len = (uint32_t)strlen("ssn"),
       .pg_oid = 23u,
   };
   char tok[SENSITIVE_TOK_BUFSZ] = {0};
@@ -171,7 +171,8 @@ static void test_store_get_len_edge_cases(void) {
   arena_clean(&arena);
 }
 
-/* Verifies deterministic mode compares by bytes, not pointer identity. */
+/* Verifies deterministic mode compares domains by bytes, not pointer identity.
+ */
 static void test_create_token_deterministic_pointer_independence(void) {
   Arena arena = {0};
   init_test_arena(&arena);
@@ -182,34 +183,34 @@ static void test_create_token_deterministic_pointer_independence(void) {
 
   char v1[] = {'a', 'b', 'c'};
   char v2[] = {'a', 'b', 'c'};
-  char c1[] = "public.users.ssn";
-  char c1_copy[] = "public.users.ssn";
+  char d1[] = "ssn";
+  char d1_copy[] = "ssn";
   SensitiveTokIn in1 = {
       .value = v1,
       .value_len = 3u,
-      .col_ref = c1,
-      .col_ref_len = (uint32_t)strlen(c1),
+      .domain = d1,
+      .domain_len = (uint32_t)strlen(d1),
       .pg_oid = 23u,
   };
   SensitiveTokIn in1_same = {
       .value = v2,
       .value_len = 3u,
-      .col_ref = c1_copy,
-      .col_ref_len = (uint32_t)strlen(c1_copy),
+      .domain = d1_copy,
+      .domain_len = (uint32_t)strlen(d1_copy),
       .pg_oid = 23u,
   };
   SensitiveTokIn in2 = {
       .value = v1,
       .value_len = 3u,
-      .col_ref = "public.users.email",
-      .col_ref_len = (uint32_t)strlen("public.users.email"),
+      .domain = "email",
+      .domain_len = (uint32_t)strlen("email"),
       .pg_oid = 25u,
   };
   SensitiveTokIn in3 = {
       .value = "abd",
       .value_len = 3u,
-      .col_ref = c1,
-      .col_ref_len = (uint32_t)strlen(c1),
+      .domain = d1,
+      .domain_len = (uint32_t)strlen(d1),
       .pg_oid = 23u,
   };
   char tok1[SENSITIVE_TOK_BUFSZ] = {0};
@@ -235,7 +236,7 @@ static void test_create_token_deterministic_pointer_independence(void) {
 }
 
 /* Verifies SQL NULL payloads are supported and deduplicated in deterministic
- * mode for identical column keys.
+ * mode for identical domain keys.
  */
 static void test_create_token_null_value_deterministic(void) {
   Arena arena = {0};
@@ -248,8 +249,8 @@ static void test_create_token_null_value_deterministic(void) {
   SensitiveTokIn in = {
       .value = NULL,
       .value_len = 0u,
-      .col_ref = "public.users.ssn",
-      .col_ref_len = (uint32_t)strlen("public.users.ssn"),
+      .domain = "ssn",
+      .domain_len = (uint32_t)strlen("ssn"),
       .pg_oid = 23u,
   };
   char tok1[SENSITIVE_TOK_BUFSZ] = {0};
@@ -286,8 +287,8 @@ static void test_create_token_connection_name_too_long(void) {
   SensitiveTokIn in = {
       .value = "abc",
       .value_len = 3u,
-      .col_ref = "public.users.ssn",
-      .col_ref_len = (uint32_t)strlen("public.users.ssn"),
+      .domain = "ssn",
+      .domain_len = (uint32_t)strlen("ssn"),
       .pg_oid = 23u,
   };
   char tok[SENSITIVE_TOK_BUFSZ] = {0};
@@ -312,8 +313,8 @@ static void test_create_token_deterministic_reuse(void) {
   SensitiveTokIn in = {
       .value = val,
       .value_len = 5u,
-      .col_ref = "public.users.ssn",
-      .col_ref_len = (uint32_t)strlen("public.users.ssn"),
+      .domain = "ssn",
+      .domain_len = (uint32_t)strlen("ssn"),
       .pg_oid = 23u,
   };
 
@@ -333,8 +334,8 @@ static void test_create_token_deterministic_reuse(void) {
   ASSERT_TRUE(e0->value_len == 5u);
   ASSERT_TRUE(memcmp(e0->value, val, 5u) == 0);
   ASSERT_TRUE(e0->value != val);
-  ASSERT_TRUE(e0->col_ref_len == in.col_ref_len);
-  ASSERT_TRUE(memcmp(e0->col_ref, in.col_ref, in.col_ref_len) == 0);
+  ASSERT_TRUE(e0->domain_len == in.domain_len);
+  ASSERT_TRUE(memcmp(e0->domain, in.domain, in.domain_len) == 0);
 
   const SensitiveTok *nul = stok_store_get(store, 1);
   ASSERT_TRUE(nul == NULL);
@@ -357,8 +358,8 @@ static void test_create_token_randomized_appends(void) {
   SensitiveTokIn in = {
       .value = val_bytes,
       .value_len = 3u,
-      .col_ref = "private.events.payload",
-      .col_ref_len = (uint32_t)strlen("private.events.payload"),
+      .domain = "payload",
+      .domain_len = (uint32_t)strlen("payload"),
       .pg_oid = 25u,
   };
 
@@ -380,10 +381,10 @@ static void test_create_token_randomized_appends(void) {
   ASSERT_TRUE(e1->value_len == 3u);
   ASSERT_TRUE(memcmp(e0->value, val_bytes, 3u) == 0);
   ASSERT_TRUE(memcmp(e1->value, val_bytes, 3u) == 0);
-  ASSERT_TRUE(e0->col_ref_len == in.col_ref_len);
-  ASSERT_TRUE(e1->col_ref_len == in.col_ref_len);
-  ASSERT_TRUE(memcmp(e0->col_ref, in.col_ref, in.col_ref_len) == 0);
-  ASSERT_TRUE(memcmp(e1->col_ref, in.col_ref, in.col_ref_len) == 0);
+  ASSERT_TRUE(e0->domain_len == in.domain_len);
+  ASSERT_TRUE(e1->domain_len == in.domain_len);
+  ASSERT_TRUE(memcmp(e0->domain, in.domain, in.domain_len) == 0);
+  ASSERT_TRUE(memcmp(e1->domain, in.domain, in.domain_len) == 0);
 
   stok_store_destroy(store);
   arena_clean(&arena);
@@ -401,8 +402,8 @@ static void test_create_token_input_validation(void) {
   SensitiveTokIn in = {
       .value = "abc",
       .value_len = 3u,
-      .col_ref = "public.users.ssn",
-      .col_ref_len = (uint32_t)strlen("public.users.ssn"),
+      .domain = "ssn",
+      .domain_len = (uint32_t)strlen("ssn"),
       .pg_oid = 23u,
   };
 
@@ -411,10 +412,10 @@ static void test_create_token_input_validation(void) {
   ASSERT_TRUE(stok_store_create_token(store, 1u, &in, NULL) < 0);
 
   SensitiveTokIn bad = in;
-  bad.col_ref = NULL;
+  bad.domain = NULL;
   ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
   bad = in;
-  bad.col_ref_len = 0;
+  bad.domain_len = 0;
   ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
   bad = in;
   bad.value = NULL;

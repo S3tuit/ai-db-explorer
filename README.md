@@ -252,7 +252,7 @@ Each entry currently includes fields such as:
 - `username`
 - `database`
 - `safeFunctions`
-- `sensitiveColumns`
+- `sensitiveDomains`
 
 ### `safeFunctions`
 
@@ -264,27 +264,32 @@ Note that basic, safe functions like `LOWER` or `ARRAY_AGG` are already deemed
 safe. You can see all the default safe functions at
 `docs/pg_safe_functions.json`.
 
-### `sensitiveColumns`
+### `sensitiveDomains`
 
-Use this to mark columns whose plaintext values should not be returned to the
-agent.
+Use this to group equivalent sensitive columns into domains. Columns in the
+same domain may share deterministic token reuse and may accept the same token
+parameters in restricted comparisons.
 
 For example:
 
 ```json
-"sensitiveColumns": [
-  "users.email",
-  "private.users.phone"
-]
+"sensitiveDomains": {
+  "email": [
+    "users.mail",
+    "*email*"
+  ],
+  "phone": [
+    "private.users.phone",
+    "ph_num"
+  ]
+}
 ```
 
-When these columns are selected, filtered, or otherwise touched by restricted
-query paths, the Broker applies the sensitive-data handling rules instead of
-blindly returning raw values.
+Each identifier uses the shape `[schema.][table.]column`, and `*` is supported
+only in the final column segment.
 
-The name `sensitiveColumns` is likely temporary. It will probably evolve into
-something closer to `sensitiveDomains`, because the long-term model should be
-more expressive than a flat list of column names.
+When a query touches a column that belongs to a sensitive domain, the Broker
+applies the sensitive-data handling rules instead of returning raw values.
 
 For the deeper design around sensitive-data handling and token use, see
 [`docs/sensitive_data.md`](docs/sensitive_data.md).

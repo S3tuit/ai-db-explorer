@@ -21,8 +21,8 @@ typedef struct DbTokenStore DbTokenStore;
 typedef struct SensitiveTok {
   const char *value;   // borrowed plaintext value; may be NULL for SQL NULL
   uint32_t value_len;  // bytes in 'value' (excluding trailing NUL)
-  const char *col_ref; // borrowed canonicalized identifier: schema.table.column
-  uint32_t col_ref_len;
+  const char *domain;  // borrowed canonical sensitive-domain name
+  uint32_t domain_len;
   uint32_t pg_oid; // Postgres OID for typed bind
 } SensitiveTok;
 
@@ -40,22 +40,20 @@ typedef struct ParsedTokView {
  * Ownership:
  * - borrows 'profile' and 'arena';
  * - caller owns returned store and must call stok_store_destroy().
- * Side effects: allocates token array, string pool, and optional deterministic
- * hash index.
+ * Side effects: allocates token array and optional deterministic hash index.
  * Returns a valid store on success, NULL on invalid input/allocation failure.
  */
 DbTokenStore *stok_store_create(const ConnProfile *profile, Arena *arena);
 
 /* Destroys one heap-owned DbTokenStore.
  * Ownership: releases store-owned internals and invalidates 'store'.
- * Side effects: destroys token array/string pool/hash index.
+ * Side effects: destroys token array/hash index.
  * Error semantics: none (safe on NULL).
  */
 void stok_store_destroy(DbTokenStore *store);
 
 /* Compares two stores by connection_name.
  * It borrows both inputs and does not allocate memory.
- * Side effects: none.
  * Returns YES when both stores target the same connection, NO otherwise.
  */
 AdbxTriStatus stok_store_same_connection(const DbTokenStore *a,
@@ -82,8 +80,8 @@ const SensitiveTok *stok_store_get(const DbTokenStore *store, uint32_t idx);
 typedef struct SensitiveTokIn {
   const char *value;  // may be NULL only when value_len == 0 (SQL NULL payload)
   uint32_t value_len; // bytes in 'value'
-  const char *col_ref;
-  uint32_t col_ref_len;
+  const char *domain; // borrowed and must outlive any token created from it
+  uint32_t domain_len;
   uint32_t pg_oid;
 } SensitiveTokIn;
 
@@ -91,8 +89,8 @@ typedef struct SensitiveTokIn {
  * Ownership:
  * - borrows all inputs;
  * - mutates 'store' and writes token text into caller-owned out_tok buffer.
- * Side effects: may append one SensitiveTok entry, intern bytes in StringPool,
- * and update deterministic hash index.
+ * Side effects: may append one SensitiveTok entry and update the
+ * deterministic hash index.
  * Returns token byte length (without NUL) on success, -1 on invalid input or
  * allocation failure.
  */

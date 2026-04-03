@@ -83,7 +83,7 @@ ConnCatalog *catalog_load_from_file(const char *path, char **err_out) {
 
 ConnCatalog *load_test_catalog(void) {
   const char *json = "{"
-                     "  \"version\": \"1.0\","
+                     "  \"version\": \"1.1\","
                      "  \"configNamespace\": \"TestNamespace\","
                      "  \"safetyPolicy\": {"
                      "    \"columnPolicy\": {"
@@ -103,12 +103,12 @@ ConnCatalog *load_test_catalog(void) {
                      "        \"users.calc_balance\","
                      "        \"transfer_amount\""
                      "      ],"
-                     "      \"sensitiveColumns\": ["
-                     "        \"users.fiscal_code\","
-                     "        \"users.card_code\","
-                     "        \"private.cards.balance\","
-                     "        \"expenses.receiver\""
-                     "      ]"
+                     "      \"sensitiveDomains\": {"
+                     "        \"fiscal_code\": [\"users.fiscal_code\"],"
+                     "        \"card_code\": [\"users.card_code\"],"
+                     "        \"balance\": [\"private.cards.balance\"],"
+                     "        \"receiver\": [\"expenses.receiver\"]"
+                     "      }"
                      "    }"
                      "  ]"
                      "}";
@@ -138,11 +138,14 @@ ConnProfile make_profile(const char *connection_name,
 int get_validate_query_out(ValidateQueryOut *out, char *sql) {
   ASSERT_TRUE(out);
 
-  ConnCatalog *cat = load_test_catalog();
-  ASSERT_TRUE(cat);
+  static ConnCatalog *shared_cat = NULL;
+  if (!shared_cat) {
+    shared_cat = load_test_catalog();
+  }
+  ASSERT_TRUE(shared_cat);
 
   ConnProfile *cp = NULL;
-  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(catalog_list(shared_cat, &cp, 1) == 1);
   ASSERT_TRUE(cp);
 
   SafetyPolicy *policy = &cp->safe_policy;
@@ -156,7 +159,6 @@ int get_validate_query_out(ValidateQueryOut *out, char *sql) {
   int rc = validate_query(&vr, out);
 
   db_destroy(db);
-  catalog_destroy(cat);
 
   return rc;
 }

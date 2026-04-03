@@ -82,53 +82,6 @@ static void set_parse_unknown_key_err(char **err_out, const char *path_prefix,
   set_parse_err(err_out, "%s: unknown key %s.", path_prefix, scope_suffix);
 }
 
-/* Splits a decoded column path into schema/table/column components.
- * Ownership: caller owns 's' and any output pointers are into 's'.
- * Side effects: mutates 's' by inserting NUL terminators.
- * Returns OK/ERR. */
-static AdbxStatus split_column_path(char *s, char **out_schema,
-                                    char **out_table, char **out_col) {
-  if (!s || !out_table || !out_col)
-    return ERR;
-
-  *out_schema = NULL;
-  *out_table = NULL;
-  *out_col = NULL;
-
-  char *first = strchr(s, '.');
-  if (!first)
-    return ERR;
-  char *second = strchr(first + 1, '.');
-
-  if (second && strchr(second + 1, '.'))
-    return ERR; // too many parts
-
-  *first = '\0';
-  if (!second) {
-    *out_table = s;
-    *out_col = first + 1;
-  } else {
-    *second = '\0';
-    *out_schema = s;
-    *out_table = first + 1;
-    *out_col = second + 1;
-  }
-
-  if (!*out_table || !*out_col)
-    return ERR;
-  if ((*out_table)[0] == '\0' || (*out_col)[0] == '\0')
-    return ERR;
-  if (*out_schema && (*out_schema)[0] == '\0')
-    return ERR;
-
-  return OK;
-}
-
-typedef enum {
-  CONN_CAT_VER_1_0 = 10,
-  CONN_CAT_VER_1_1 = 11,
-} ConnCatVersion;
-
 /* Splits a decoded sensitive-domain pattern into optional schema/table and a
  * required final column pattern. Ownership: caller owns 's' and output
  * pointers borrow slices inside it. Side effects: mutates 's' by inserting NUL
@@ -412,39 +365,10 @@ static AdbxStatus sensitive_policy_finalize(SensitiveDomainPolicy *pol,
   return OK;
 }
 
-// Temporary rule list on heap: lets us parse, normalize, sort, and dedupe
-// before moving data into the arena in a compact form.
-typedef struct {
-  char *table;
-  char *col;
-  char *schema; // NULL for global rules
-} ColumnRuleTmp;
-
 typedef struct {
   char *schema; // NULL for global rules
   char *name;
 } SafeFuncRuleTmp;
-
-/* Compares ColumnRuleTmp entries by table, col, schema (NULL first). */
-static int colruletmp_cmp(const void *a, const void *b) {
-  const ColumnRuleTmp *ra = (const ColumnRuleTmp *)a;
-  const ColumnRuleTmp *rb = (const ColumnRuleTmp *)b;
-
-  int tc = strcmp(ra->table, rb->table);
-  if (tc != 0)
-    return tc;
-  int cc = strcmp(ra->col, rb->col);
-  if (cc != 0)
-    return cc;
-
-  if (!ra->schema && !rb->schema)
-    return 0;
-  if (!ra->schema)
-    return -1;
-  if (!rb->schema)
-    return 1;
-  return strcmp(ra->schema, rb->schema);
-}
 
 /* Compares SafeFuncRuleTmp entries by name, schema (NULL first). */
 static int saferuletmp_cmp(const void *a, const void *b) {
@@ -491,209 +415,6 @@ static AdbxStatus split_func_path(char *input, char **out_schema,
   *out_schema = schema;
   *out_name = name;
   return OK;
-}
-
-/* Parses sensitiveColumns into ColumnRules.
- * Business logic is documented in connp_is_col_sensitive().
- * Ownership: stores all strings and arrays in out->col_policy.arena.
- * Side effects: allocates temporary heap lists and arena-backed rule storage.
- * Error semantics: returns OK on success, ERR on malformed entries, allocation
- * failures, or invalid input.
- */
-static AdbxStatus parse_sensitive_columns(const JsonGetter *jg,
-                                          ConnProfile *out,
-                                          const char *path_prefix,
-                                          char **err_out) {
-  if (!jg || !out || !path_prefix)
-    return ERR;
-
-  JsonArrIter it;
-  AdbxTriStatus rc = jsget_array_strings_begin(jg, "sensitiveColumns", &it);
-  if (rc == NO)
-    return OK;
-  if (rc != YES) {
-    set_parse_err(err_out, "%s.sensitiveColumns: expected an array of strings.",
-                  path_prefix);
-    return ERR;
-  }
-
-  ColumnRuleTmp *tmp = NULL;
-  size_t tmp_len = 0;
-  size_t tmp_cap = 0;
-
-  for (;;) {
-    JsonStrSpan sp = {0};
-    rc = jsget_array_strings_next(jg, &it, &sp);
-    if (rc == NO)
-      break;
-    if (rc != YES) {
-      set_parse_err(err_out, "%s.sensitiveColumns: expected string entries.",
-                    path_prefix);
-      goto error;
-    }
-
-    char *decoded = NULL;
-    if (json_span_decode_alloc(&sp, &decoded) != YES) {
-      set_parse_err(err_out,
-                    "%s.sensitiveColumns: failed to decode string entry.",
-                    path_prefix);
-      goto error;
-    }
-
-    char *schema = NULL;
-    char *table = NULL;
-    char *colname = NULL;
-    if (split_column_path(decoded, &schema, &table, &colname) != OK) {
-      free(decoded);
-      set_parse_err(err_out,
-                    "%s.sensitiveColumns[]: expected [schema.]table.column.",
-                    path_prefix);
-      goto error;
-    }
-
-    str_lower_inplace(schema);
-    str_lower_inplace(table);
-    str_lower_inplace(colname);
-
-    if (tmp_len == tmp_cap) {
-      size_t nc = (tmp_cap == 0) ? 8 : tmp_cap * 2;
-      ColumnRuleTmp *nt = (ColumnRuleTmp *)xrealloc(tmp, nc * sizeof(*tmp));
-      tmp = nt;
-      tmp_cap = nc;
-    }
-
-    tmp[tmp_len].schema = schema ? strdup(schema) : NULL;
-    tmp[tmp_len].table = strdup(table);
-    tmp[tmp_len].col = strdup(colname);
-    if (!tmp[tmp_len].table || !tmp[tmp_len].col ||
-        (schema && !tmp[tmp_len].schema)) {
-      free(decoded);
-      set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
-                    path_prefix);
-      goto error;
-    }
-    tmp_len++;
-
-    free(decoded);
-  }
-
-  if (tmp_len == 0)
-    return OK;
-
-  qsort(tmp, tmp_len, sizeof(*tmp), colruletmp_cmp);
-
-  if (arena_init(&out->col_policy.arena, NULL, NULL) != OK) {
-    set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
-                  path_prefix);
-    goto error;
-  }
-
-  // this loop finds unique elements
-  size_t n_rules = 0;
-  for (size_t i = 0; i < tmp_len;) {
-    size_t j = i + 1;
-    // works because the array is sorted
-    while (j < tmp_len && strcmp(tmp[i].table, tmp[j].table) == 0 &&
-           strcmp(tmp[i].col, tmp[j].col) == 0) {
-      j++;
-    }
-    n_rules++;
-    i = j;
-  }
-
-  // At this point we have a sorted tmp array (not malloc'd) of ColumnRuleTmp.
-  // Now we have to malloc it in order to persist it.
-  ColumnRule *rules = (ColumnRule *)arena_calloc(
-      &out->col_policy.arena, (uint32_t)(n_rules * sizeof(*rules)));
-  if (!rules) {
-    set_parse_err(err_out, "%s.sensitiveColumns: internal allocation error.",
-                  path_prefix);
-    goto error;
-  }
-
-  // since we may have duplication, this loop is used for deduplication
-  size_t rix = 0;
-  for (size_t i = 0; i < tmp_len;) {
-    size_t j = i;
-    int is_global = 0;
-    size_t n_schema = 0;
-    const char *last_schema = NULL;
-
-    // j skips duplicated elements
-    while (j < tmp_len && strcmp(tmp[i].table, tmp[j].table) == 0 &&
-           strcmp(tmp[i].col, tmp[j].col) == 0) {
-      // no schema-qualified -> global rule
-      if (!tmp[j].schema) {
-        is_global = 1;
-
-        // since the temp list is sorted, ignoring consecutive and equal schemas
-        // means deduplicating
-      } else if (!last_schema || strcmp(tmp[j].schema, last_schema) != 0) {
-        n_schema++;
-        last_schema = tmp[j].schema;
-      }
-      j++;
-    }
-
-    ColumnRule *r = &rules[rix++];
-    r->table = (const char *)arena_add_nul(&out->col_policy.arena, tmp[i].table,
-                                           (uint32_t)strlen(tmp[i].table));
-    r->col = (const char *)arena_add_nul(&out->col_policy.arena, tmp[i].col,
-                                         (uint32_t)strlen(tmp[i].col));
-    r->is_global = is_global;
-    r->n_schemas = (uint32_t)n_schema;
-    r->schemas = NULL;
-
-    if (n_schema > 0) {
-      const char **schemas = (const char **)arena_calloc(
-          &out->col_policy.arena, (uint32_t)(n_schema * sizeof(*schemas)));
-      if (!schemas) {
-        set_parse_err(err_out,
-                      "%s.sensitiveColumns: internal allocation error.",
-                      path_prefix);
-        goto error;
-      }
-
-      size_t k = 0;
-      last_schema = NULL;
-      for (size_t t = i; t < j; t++) {
-        if (!tmp[t].schema)
-          continue;
-        if (last_schema && strcmp(tmp[t].schema, last_schema) == 0)
-          continue;
-        schemas[k++] =
-            (const char *)arena_add_nul(&out->col_policy.arena, tmp[t].schema,
-                                        (uint32_t)strlen(tmp[t].schema));
-        last_schema = tmp[t].schema;
-      }
-      r->schemas = schemas;
-    }
-
-    i = j;
-  }
-
-  out->col_policy.rules = rules;
-  out->col_policy.n_rules = n_rules;
-
-  for (size_t i = 0; i < tmp_len; i++) {
-    free(tmp[i].schema);
-    free(tmp[i].table);
-    free(tmp[i].col);
-  }
-  free(tmp);
-  return OK;
-
-error:
-  set_parse_err(err_out, "%s.sensitiveColumns: invalid entry.", path_prefix);
-  if (tmp) {
-    for (size_t i = 0; i < tmp_len; i++) {
-      free(tmp[i].schema);
-      free(tmp[i].table);
-      free(tmp[i].col);
-    }
-    free(tmp);
-  }
-  return ERR;
 }
 
 /* Parses sensitiveDomains into one sorted SensitiveDomainPolicy.
@@ -1253,7 +974,6 @@ static void profile_clean(ConnProfile *p) {
   p->secret_ref.cred_namespace = NULL;
   p->secret_ref.connection_name = NULL;
   arena_clean(&p->sens_policy.arena);
-  arena_clean(&p->col_policy.arena);
   arena_clean(&p->safe_funcs.arena);
 }
 
@@ -1298,27 +1018,20 @@ static AdbxStatus parse_credential_namespace(const JsonGetter *jg,
  */
 static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
                                  ConnProfile *out, size_t db_index,
-                                 ConnCatVersion version, char **err_out) {
+                                 char **err_out) {
   if (!cat || !jg || !out)
     return ERR;
 
   char db_path[64];
   snprintf(db_path, sizeof(db_path), "$.databases[%zu]", db_index);
 
-  const char *const keys_v10[] = {
-      "type",          "connectionName", "host",    "port",
-      "username",      "database",       "options", "sensitiveColumns",
-      "safeFunctions", "safetyPolicy"};
-  const char *const keys_v11[] = {
+  const char *const keys[] = {
       "type",          "connectionName", "host",    "port",
       "username",      "database",       "options", "sensitiveDomains",
       "safeFunctions", "safetyPolicy"};
-  const char *const *keys = (version == CONN_CAT_VER_1_1) ? keys_v11 : keys_v10;
-  size_t n_keys =
-      (version == CONN_CAT_VER_1_1) ? ARRLEN(keys_v11) : ARRLEN(keys_v10);
   JsonStrSpan unknown = {0};
-  AdbxTriStatus vrc =
-      jsget_top_level_validation(jg, NULL, keys, n_keys, &unknown);
+  AdbxTriStatus vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys),
+                                                 &unknown);
   if (vrc != YES) {
     set_parse_unknown_key_err(err_out, db_path, &unknown, "in database entry");
     return ERR;
@@ -1405,13 +1118,8 @@ static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
       goto error;
   }
 
-  if (version == CONN_CAT_VER_1_1) {
-    if (parse_sensitive_domains(jg, out, db_path, err_out) != OK)
-      goto error;
-  } else {
-    if (parse_sensitive_columns(jg, out, db_path, err_out) != OK)
-      goto error;
-  }
+  if (parse_sensitive_domains(jg, out, db_path, err_out) != OK)
+    goto error;
   if (parse_safe_functions(jg, out, db_path, err_out) != OK)
     goto error;
   return OK;
@@ -1428,7 +1136,6 @@ error:
   out->options = NULL;
   out->user = NULL;
   memset(&out->sens_policy, 0, sizeof(out->sens_policy));
-  memset(&out->col_policy, 0, sizeof(out->col_policy));
   memset(&out->safe_funcs, 0, sizeof(out->safe_funcs));
   return ERR;
 }
@@ -1439,7 +1146,7 @@ error:
  * Error semantics: returns OK on valid non-empty array, ERR otherwise.
  */
 static AdbxStatus parse_databases(const JsonGetter *jg, ConnCatalog *cat,
-                                  ConnCatVersion version, char **err_out) {
+                                  char **err_out) {
   if (!jg || !cat)
     return ERR;
 
@@ -1478,8 +1185,7 @@ static AdbxStatus parse_databases(const JsonGetter *jg, ConnCatalog *cat,
     if (rc != YES)
       goto error;
 
-    if (parse_db_entry(cat, &entry, &profiles[idx], idx, version, err_out) !=
-        OK)
+    if (parse_db_entry(cat, &entry, &profiles[idx], idx, err_out) != OK)
       goto error;
 
     // connectionName must be unique
@@ -1508,14 +1214,13 @@ error:
   return ERR;
 }
 
-/* Parses the top-level catalog version string into '*out'.
- * Ownership: borrows 'jg' and writes caller-owned '*out'.
- * Side effects: allocates one temporary decoded string.
- * Error semantics: returns YES on supported version, NO on missing or
+/* Validates the top-level catalog version string.
+ * Ownership: borrows 'jg' and allocates one temporary decoded string.
+ * Error semantics: returns YES on the supported version, NO on missing or
  * unsupported value, ERR on malformed input or invalid arguments.
  */
-static AdbxTriStatus parse_version(const JsonGetter *jg, ConnCatVersion *out) {
-  if (!jg || !out)
+static AdbxTriStatus parse_version(const JsonGetter *jg) {
+  if (!jg)
     return ERR;
 
   char *ver = NULL;
@@ -1525,14 +1230,8 @@ static AdbxTriStatus parse_version(const JsonGetter *jg, ConnCatVersion *out) {
   if (rc != YES)
     return ERR;
 
-  AdbxTriStatus ok = NO;
-  if (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) {
-    *out = CONN_CAT_VER_1_1;
-    ok = YES;
-  } else if (strcmp(ver, PREV_CONN_CAT_VERSION) == 0) {
-    *out = CONN_CAT_VER_1_0;
-    ok = YES;
-  }
+  AdbxTriStatus ok =
+      (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) ? YES : NO;
   free(ver);
   return ok;
 }
@@ -1568,8 +1267,7 @@ static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
     goto error;
   }
 
-  ConnCatVersion version = 0;
-  AdbxTriStatus vrc = parse_version(&jg, &version);
+  AdbxTriStatus vrc = parse_version(&jg);
   if (vrc == NO) {
     set_parse_err(&err_msg, "$.version: missing or unsupported value.");
     goto error;
@@ -1598,7 +1296,7 @@ static ConnCatalog *catalog_parse_config_bytes(const char *data, size_t len,
     goto error;
   }
 
-  if (parse_databases(&jg, cat, version, &err_msg) != OK) {
+  if (parse_databases(&jg, cat, &err_msg) != OK) {
     goto error;
   }
 
@@ -1710,16 +1408,6 @@ size_t catalog_list(ConnCatalog *cat, ConnProfile **out, size_t cap_count) {
   return n;
 }
 
-/* Comparator for ColumnRule array sorting and lookup. */
-static int colrule_cmp(const void *a, const void *b) {
-  const ColumnRule *ra = (const ColumnRule *)a;
-  const ColumnRule *rb = (const ColumnRule *)b;
-  int tc = strcmp(ra->table, rb->table);
-  if (tc != 0)
-    return tc;
-  return strcmp(ra->col, rb->col);
-}
-
 /* Comparator for SafeFunctionRule array lookup by name. */
 static int saferule_cmp(const void *a, const void *b) {
   const SafeFunctionRule *ra = (const SafeFunctionRule *)a;
@@ -1763,10 +1451,10 @@ static AdbxTriStatus glob_match_column_pattern(const char *pattern,
   return (*p == '\0') ? YES : NO;
 }
 
-/* Searches one sensitive-rule bucket and writes '*out_domain' to a
- * caller-borrowed string identifying the sensitive domain. Returns YES on first
- * matching rule, NO when no rule matches, ERR on invalid input or malformed
- * rule state.
+/* Searches one sensitive-rule bucket and writes '*out_domain', if not NULL, to
+ * a caller-borrowed string identifying the sensitive domain. Returns YES on
+ * first matching rule, NO when no rule matches, ERR on invalid input or
+ * malformed rule state.
  */
 static AdbxTriStatus
 sensitive_bucket_find_domain(const SensitiveRuleBucket *bucket,
@@ -1774,9 +1462,7 @@ sensitive_bucket_find_domain(const SensitiveRuleBucket *bucket,
                              const char *column, const char **out_domain) {
   assert(bucket);
   assert(column);
-  assert(out_domain);
 
-  *out_domain = NULL;
   for (size_t i = 0; i < bucket->n_rules; i++) {
     const SensitiveRule *rule = &bucket->rules[i];
     assert(rule->column_pat);
@@ -1794,12 +1480,16 @@ sensitive_bucket_find_domain(const SensitiveRuleBucket *bucket,
     if (rule->star_count == 0) {
       if (strcmp(rule->column_pat, column) != 0)
         continue;
-      *out_domain = rule->domain;
+      if (out_domain) {
+        *out_domain = rule->domain;
+      }
       return YES;
     } else {
       AdbxTriStatus mrc = glob_match_column_pattern(rule->column_pat, column);
       if (mrc == YES) {
-        *out_domain = rule->domain;
+        if (out_domain) {
+          *out_domain = rule->domain;
+        }
         return YES;
       }
     }
@@ -1811,10 +1501,14 @@ AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
                                          const char *schema, const char *table,
                                          const char *column,
                                          const char **out_domain) {
-  if (!cp || !column || !out_domain)
+  if (!cp || !column)
     return ERR;
 
   const SensitiveDomainPolicy *pol = &cp->sens_policy;
+  // TODO: consider adding an out_domain_len parameter to avoid repeated
+  // strlen() calls in callers that need the borrowed domain bytes.
+  if (out_domain)
+    *out_domain = NULL;
   if (!pol->storage || pol->n_storage == 0)
     return NO;
 
@@ -1841,52 +1535,6 @@ AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
     return rc;
   return sensitive_bucket_find_domain(&pol->glob_c, schema_norm, table, column,
                                       out_domain);
-}
-
-AdbxTriStatus connp_is_col_sensitive(const ConnProfile *cp, const char *schema,
-                                     const char *table, const char *column) {
-  if (!cp || !table || !column)
-    return ERR;
-
-  if (cp->sens_policy.storage && cp->sens_policy.n_storage > 0) {
-    const char *domain = NULL;
-    AdbxTriStatus rc =
-        connp_get_sensitive_domain(cp, schema, table, column, &domain);
-    return (rc == YES) ? YES : rc;
-  }
-
-  const ColumnPolicy *pol = &cp->col_policy;
-  if (!pol->rules || pol->n_rules == 0)
-    return NO;
-
-  ColumnRule key = {0};
-  key.table = table;
-  key.col = column;
-
-  ColumnRule *r = (ColumnRule *)bsearch(&key, pol->rules, pol->n_rules,
-                                        sizeof(*pol->rules), colrule_cmp);
-  if (!r)
-    return NO;
-
-  if (r->is_global)
-    return YES;
-
-  const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
-  if (!schema_norm) {
-    // Unqualified SQL matches any schema-scoped rule (we do not resolve
-    // search_path).
-    return YES;
-  }
-
-  if (!r->schemas || r->n_schemas == 0)
-    return NO;
-
-  // Schemas are few (usually <=10), so a linear scan is simpler and fast.
-  for (uint32_t i = 0; i < r->n_schemas; i++) {
-    if (strcmp(schema_norm, r->schemas[i]) == 0)
-      return YES;
-  }
-  return NO;
 }
 
 AdbxTriStatus connp_is_func_safe(const ConnProfile *cp, const char *schema,
