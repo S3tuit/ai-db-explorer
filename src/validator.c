@@ -70,9 +70,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
                                            const QirQuery *q);
 static inline const QirFromItem *find_from_alias(const QirQuery *q,
                                                  const char *alias);
-static inline AdbxTriStatus colref_is_sensitive(const QirQuery *q,
-                                                const ConnProfile *cp,
-                                                const QirColRef *c);
 
 #define MAX_ERR_MSG_LEN 512
 /* Resets 'ctx->err->msg' and writes a string into it using 'fmt' like printf().
@@ -126,11 +123,18 @@ static AdbxStatus vq_out_reset(ValidateQueryOut *out) {
 }
 
 /* Resolves one query column reference to its borrowed sensitive-domain name.
- * It borrows query metadata and ConnProfile policy through 'ctx'. Side effects:
- * may set validator errors. Error semantics: returns YES on success and writes
- * one borrowed domain pointer/length pair, NO when the column is not
- * sensitive, ERR on invalid input, unresolved aliases, or internal
- * inconsistency.
+ * Returns:
+ *  - YES when 'cr' is sensitive and writes one borrowed domain
+ *    pointer/length pair (if 'out_domain' and 'out_domain_len' are not NULL).
+ *  - NO when the column is not sensitive.
+ *  - ERR on invalid input, unresolved aliases, or internal inconsistency and
+ *    modifies 'ctx'.
+ *
+ * This is not suitable to understand if a colref contains data of a sensitive
+ * column because we don't resolve the original table. However, since we
+ * enforced that sensitive columns can only appear in the main SELECT, this can
+ * be used to understand if a colref, of the main SELECT, contains sensitive
+ * data.
  */
 static AdbxTriStatus
 validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
@@ -139,11 +143,11 @@ validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
   assert(ctx != NULL);
   assert(q != NULL);
   assert(cr != NULL);
-  assert(out_domain != NULL);
-  assert(out_domain_len != NULL);
 
-  *out_domain = NULL;
-  *out_domain_len = 0;
+  if (out_domain)
+    *out_domain = NULL;
+  if (out_domain_len)
+    *out_domain_len = 0;
 
   const QirFromItem *fi = find_from_alias(q, cr->qualifier.name);
   if (!fi) {
@@ -152,6 +156,8 @@ validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
             "Unable to resolve sensitive column source alias for '%s'.", desc);
     return ERR;
   }
+
+  // We don't trace back the original relationship
   if (fi->kind != QIR_FROM_BASE_REL)
     return NO;
 
@@ -164,27 +170,34 @@ validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
     return ERR;
   }
 
-  const char *domain = NULL;
+  SensDomainOut sdout;
   AdbxTriStatus rc =
-      connp_get_sensitive_domain(ctx->cp, schema, table, col, &domain);
+      connp_get_sensitive_domain(ctx->cp, schema, table, col, &sdout);
   if (rc == NO)
     return NO;
-  if (rc != YES || !domain || domain[0] == '\0') {
+  if (rc != YES || !sdout.domain || sdout.domain[0] == '\0') {
     const char *desc = qir_colref_to_str(cr, &ctx->scratch);
-    set_err(ctx, VERR_ANALYZE_FAIL,
-            "Unable to resolve sensitive domain for '%s'.", desc);
+    if (sdout.err.msg[0] != '\0') {
+      set_err(ctx, VERR_ANALYZE_FAIL, "%s", sdout.err.msg);
+    } else {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Unable to resolve sensitive domain for '%s'.", desc);
+    }
     return ERR;
   }
 
-  size_t domain_len = strlen(domain);
-  if (domain_len == 0 || domain_len > UINT32_MAX) {
-    set_err(ctx, VERR_ANALYZE_FAIL,
-            "Resolved sensitive domain has invalid length.");
-    return ERR;
+  if (out_domain_len) {
+    size_t domain_len = strlen(sdout.domain);
+    if (domain_len == 0 || domain_len > UINT32_MAX) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Resolved sensitive domain has invalid length.");
+      return ERR;
+    }
+    *out_domain_len = (uint32_t)domain_len;
   }
 
-  *out_domain = domain;
-  *out_domain_len = (uint32_t)domain_len;
+  if (out_domain)
+    *out_domain = sdout.domain;
   return YES;
 }
 
@@ -346,33 +359,6 @@ validator_validate_param_domain_for_col(ValidatorCtx *ctx, const QirQuery *q,
   if (ctx->param_used)
     ctx->param_used[(uint32_t)param_idx - 1u] = 1u;
   return YES;
-}
-
-/* Returns YES if the colref resolves to a sensitive base table column, else,
- * NO or ERR. This is not suitable to understand if a colref contains data of a
- * sensitive column because we don't resolve the original table. However, since
- * we enforced that sensitive columns can only appear in the main SELECT, this
- * can be used to understand if a colref, of the main SELECT, contains sensitive
- * data. This should be called only on columns of the main SELECT. */
-static inline AdbxTriStatus colref_is_sensitive(const QirQuery *q,
-                                                const ConnProfile *cp,
-                                                const QirColRef *c) {
-  if (!q || !cp || !c)
-    return ERR;
-
-  const QirFromItem *fi = find_from_alias(q, c->qualifier.name);
-  if (!fi) {
-    return ERR;
-  }
-  // We don't trace back the original relationship
-  if (fi->kind != QIR_FROM_BASE_REL)
-    return NO;
-
-  const char *schema = fi->u.rel.schema.name;
-  const char *table = fi->u.rel.name.name;
-  const char *col = c->column.name;
-
-  return connp_get_sensitive_domain(cp, schema, table, col, NULL);
 }
 
 /* Validates that every QirFromItem and QirJoin has an alias. Returns YES, or
@@ -563,7 +549,8 @@ static AdbxTriStatus validate_sensitive_touches_scope(ValidatorCtx *ctx,
     if (t->kind != QIR_TOUCH_BASE)
       continue;
 
-    int rc = colref_is_sensitive(t->source_query, ctx->cp, &t->col);
+    int rc = validator_resolve_sensitive_domain(ctx, t->source_query, &t->col,
+                                                NULL, NULL);
     if (rc == ERR)
       return ERR;
     if (rc == YES) {
@@ -748,16 +735,21 @@ static AdbxTriStatus validate_expr_functions(ValidatorCtx *ctx,
 }
 
 /* Returns YES if the expression tree contains a sensitive column reference.
- * Subqueries are treated as separate scopes and do not contribute to this
- * check. */
-static AdbxTriStatus
-expr_has_sensitive(const QirQuery *q, const ConnProfile *cp, const QirExpr *e) {
-  if (!q || !cp || !e)
+ * It borrows all inputs and does not allocate.
+ * Side effects: on ERR it may propagate detailed validator errors from nested
+ * sensitive-domain resolution into ctx->err.
+ * Returns YES when a sensitive column is present, NO when not present, ERR on
+ * invalid input or failed sensitivity resolution. Subqueries are treated as
+ * separate scopes and do not contribute to this check.
+ */
+static AdbxTriStatus expr_has_sensitive(ValidatorCtx *ctx, const QirQuery *q,
+                                        const QirExpr *e) {
+  if (!ctx || !q || !e)
     return ERR;
 
   switch (e->kind) {
   case QIR_EXPR_COLREF:
-    return colref_is_sensitive(q, cp, &e->u.colref);
+    return validator_resolve_sensitive_domain(ctx, q, &e->u.colref, NULL, NULL);
   case QIR_EXPR_PARAM:
   case QIR_EXPR_LITERAL:
     return NO;
@@ -768,14 +760,14 @@ expr_has_sensitive(const QirQuery *q, const ConnProfile *cp, const QirExpr *e) {
     return NO;
   case QIR_EXPR_FUNCALL: {
     for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
-      int rc = expr_has_sensitive(q, cp, e->u.funcall.args[i]);
+      int rc = expr_has_sensitive(ctx, q, e->u.funcall.args[i]);
       if (rc != NO)
         return rc;
     }
     return NO;
   }
   case QIR_EXPR_CAST:
-    return expr_has_sensitive(q, cp, e->u.cast.expr);
+    return expr_has_sensitive(ctx, q, e->u.cast.expr);
   case QIR_EXPR_EQ:
   case QIR_EXPR_NE:
   case QIR_EXPR_GT:
@@ -786,19 +778,19 @@ expr_has_sensitive(const QirQuery *q, const ConnProfile *cp, const QirExpr *e) {
   case QIR_EXPR_NOT_LIKE:
   case QIR_EXPR_AND:
   case QIR_EXPR_OR: {
-    int rc = expr_has_sensitive(q, cp, e->u.bin.l);
+    int rc = expr_has_sensitive(ctx, q, e->u.bin.l);
     if (rc != NO)
       return rc;
-    return expr_has_sensitive(q, cp, e->u.bin.r);
+    return expr_has_sensitive(ctx, q, e->u.bin.r);
   }
   case QIR_EXPR_NOT:
-    return expr_has_sensitive(q, cp, e->u.bin.l);
+    return expr_has_sensitive(ctx, q, e->u.bin.l);
   case QIR_EXPR_IN: {
-    int rc = expr_has_sensitive(q, cp, e->u.in_.lhs);
+    int rc = expr_has_sensitive(ctx, q, e->u.in_.lhs);
     if (rc != NO)
       return rc;
     for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      rc = expr_has_sensitive(q, cp, e->u.in_.items[i]);
+      rc = expr_has_sensitive(ctx, q, e->u.in_.items[i]);
       if (rc != NO)
         return rc;
     }
@@ -806,7 +798,7 @@ expr_has_sensitive(const QirQuery *q, const ConnProfile *cp, const QirExpr *e) {
   }
   case QIR_EXPR_CASE: {
     if (e->u.case_.arg) {
-      int rc = expr_has_sensitive(q, cp, e->u.case_.arg);
+      int rc = expr_has_sensitive(ctx, q, e->u.case_.arg);
       if (rc != NO)
         return rc;
     }
@@ -814,31 +806,31 @@ expr_has_sensitive(const QirQuery *q, const ConnProfile *cp, const QirExpr *e) {
       QirCaseWhen *w = e->u.case_.whens[i];
       if (!w)
         return ERR;
-      int rc = expr_has_sensitive(q, cp, w->when_expr);
+      int rc = expr_has_sensitive(ctx, q, w->when_expr);
       if (rc != NO)
         return rc;
-      rc = expr_has_sensitive(q, cp, w->then_expr);
+      rc = expr_has_sensitive(ctx, q, w->then_expr);
       if (rc != NO)
         return rc;
     }
     if (e->u.case_.else_expr) {
-      return expr_has_sensitive(q, cp, e->u.case_.else_expr);
+      return expr_has_sensitive(ctx, q, e->u.case_.else_expr);
     }
     return NO;
   }
   case QIR_EXPR_WINDOWFUNC: {
     for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
-      int rc = expr_has_sensitive(q, cp, e->u.window.func.args[i]);
+      int rc = expr_has_sensitive(ctx, q, e->u.window.func.args[i]);
       if (rc != NO)
         return rc;
     }
     for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
-      int rc = expr_has_sensitive(q, cp, e->u.window.partition_by[i]);
+      int rc = expr_has_sensitive(ctx, q, e->u.window.partition_by[i]);
       if (rc != NO)
         return rc;
     }
     for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
-      int rc = expr_has_sensitive(q, cp, e->u.window.order_by[i]);
+      int rc = expr_has_sensitive(ctx, q, e->u.window.order_by[i]);
       if (rc != NO)
         return rc;
     }
@@ -966,7 +958,7 @@ static AdbxTriStatus validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
     if (left_param) {
       // We don't check whether the sensitive column is a base reference
       // because it's not the responsibility of this function
-      int sens_r = expr_has_sensitive(q, ctx->cp, e->u.bin.r);
+      int sens_r = expr_has_sensitive(ctx, q, e->u.bin.r);
       if (sens_r == ERR)
         return ERR;
       if (sens_r != YES) {
@@ -977,7 +969,7 @@ static AdbxTriStatus validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
     }
     int right_param = (e->u.bin.r && e->u.bin.r->kind == QIR_EXPR_PARAM);
     if (right_param) {
-      int sens_l = expr_has_sensitive(q, ctx->cp, e->u.bin.l);
+      int sens_l = expr_has_sensitive(ctx, q, e->u.bin.l);
       if (sens_l == ERR)
         return ERR;
       if (sens_l != YES) {
@@ -991,7 +983,7 @@ static AdbxTriStatus validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
   case QIR_EXPR_IN: {
     if (!e->u.in_.lhs)
       return ERR;
-    int sens_l = expr_has_sensitive(q, ctx->cp, e->u.in_.lhs);
+    int sens_l = expr_has_sensitive(ctx, q, e->u.in_.lhs);
     if (sens_l == ERR)
       return ERR;
     for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
@@ -1212,7 +1204,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
 
   switch (loc) {
   case SENS_LOC_SELECT: {
-    int sens = expr_has_sensitive(main_q, ctx->cp, e);
+    int sens = expr_has_sensitive(ctx, main_q, e);
     if (sens == ERR)
       return ERR;
     if (sens == YES && e->kind != QIR_EXPR_COLREF) {
@@ -1239,10 +1231,10 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
             "JOIN predicates must compare simple operands in sensitive mode.");
         return NO;
       }
-      int sens_l = expr_has_sensitive(main_q, ctx->cp, e->u.bin.l);
+      int sens_l = expr_has_sensitive(ctx, main_q, e->u.bin.l);
       if (sens_l == ERR)
         return ERR;
-      int sens_r = expr_has_sensitive(main_q, ctx->cp, e->u.bin.r);
+      int sens_r = expr_has_sensitive(ctx, main_q, e->u.bin.r);
       if (sens_r == ERR)
         return ERR;
       if (sens_l == YES || sens_r == YES) {
@@ -1275,10 +1267,10 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
       return validate_sensitive_expr(ctx, main_q, e->u.bin.r, loc);
     }
     case QIR_EXPR_EQ: {
-      int sens_l = expr_has_sensitive(main_q, ctx->cp, e->u.bin.l);
+      int sens_l = expr_has_sensitive(ctx, main_q, e->u.bin.l);
       if (sens_l == ERR)
         return ERR;
-      int sens_r = expr_has_sensitive(main_q, ctx->cp, e->u.bin.r);
+      int sens_r = expr_has_sensitive(ctx, main_q, e->u.bin.r);
       if (sens_r == ERR)
         return ERR;
 
@@ -1327,7 +1319,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
       return YES;
     }
     case QIR_EXPR_IN: {
-      int sens_l = expr_has_sensitive(main_q, ctx->cp, e->u.in_.lhs);
+      int sens_l = expr_has_sensitive(ctx, main_q, e->u.in_.lhs);
       if (sens_l == ERR)
         return ERR;
       if ((sens_l == YES && e->u.in_.lhs->kind != QIR_EXPR_COLREF)) {
@@ -1361,7 +1353,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
             return prc;
         }
 
-        int sens_i = expr_has_sensitive(main_q, ctx->cp, it);
+        int sens_i = expr_has_sensitive(ctx, main_q, it);
         if (sens_i == ERR)
           return ERR;
         if (sens_i == YES) {
@@ -1389,7 +1381,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
   case SENS_LOC_GROUP_BY:
   case SENS_LOC_HAVING:
   case SENS_LOC_ORDER_BY: {
-    int sens = expr_has_sensitive(main_q, ctx->cp, e);
+    int sens = expr_has_sensitive(ctx, main_q, e);
     if (sens == ERR)
       return ERR;
     if (sens == YES) {

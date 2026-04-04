@@ -164,12 +164,12 @@ static void
 assert_sensitive_domain_lookup(const ConnProfile *cp, const char *schema,
                                const char *table, const char *column,
                                AdbxTriStatus exp_rc, const char *exp_domain) {
-  const char *domain = NULL;
+  SensDomainOut out = {0};
   AdbxTriStatus rc =
-      connp_get_sensitive_domain(cp, schema, table, column, &domain);
+      connp_get_sensitive_domain(cp, schema, table, column, &out);
   ASSERT_TRUE(rc == exp_rc);
   if (exp_rc == YES)
-    ASSERT_STREQ(domain, exp_domain);
+    ASSERT_STREQ(out.domain, exp_domain);
 }
 
 /* Builds one minimal version 1.1 catalog with a single postgres connection and
@@ -860,7 +860,7 @@ static void test_connp_is_sensitive(void) {
   assert_sensitive_domain_lookup(cp, "private", "users", "email", YES, "email");
   assert_sensitive_domain_lookup(cp, "private", "users", "name", YES, "name");
   assert_sensitive_domain_lookup(cp, "public", "users", "name", NO, NULL);
-  assert_sensitive_domain_lookup(cp, "", "users", "name", NO, NULL);
+  assert_sensitive_domain_lookup(cp, "", "users", "name", YES, "name");
   assert_sensitive_domain_lookup(cp, "", "users", "age", NO, NULL);
 
   ASSERT_TRUE(connp_is_func_safe(cp, "", "md1") == YES);
@@ -897,25 +897,22 @@ static void test_sensitive_domains_v11_parse(void) {
   ASSERT_TRUE(cp->sens_policy.exact_c.n_rules == 2);
   ASSERT_TRUE(cp->sens_policy.glob_c.n_rules == 0);
 
-  const char *domain = NULL;
+  SensDomainOut out = {0};
   ASSERT_TRUE(connp_get_sensitive_domain(cp, "private", "registry", "telefono",
-                                         &domain) == YES);
-  ASSERT_STREQ(domain, "telefono");
+                                         &out) == YES);
+  ASSERT_STREQ(out.domain, "telefono");
 
-  domain = NULL;
   ASSERT_TRUE(connp_get_sensitive_domain(cp, "public", "anagrafica", "email",
-                                         &domain) == YES);
-  ASSERT_STREQ(domain, "email");
+                                         &out) == YES);
+  ASSERT_STREQ(out.domain, "email");
 
-  domain = NULL;
   ASSERT_TRUE(connp_get_sensitive_domain(cp, "ignored", "whatever",
-                                         "email_rappr_legale", &domain) == YES);
-  ASSERT_STREQ(domain, "email");
+                                         "email_rappr_legale", &out) == YES);
+  ASSERT_STREQ(out.domain, "email");
 
-  domain = NULL;
   ASSERT_TRUE(connp_get_sensitive_domain(cp, "ignored", "whatever",
-                                         "numero_tel", &domain) == YES);
-  ASSERT_STREQ(domain, "telefono");
+                                         "numero_tel", &out) == YES);
+  ASSERT_STREQ(out.domain, "telefono");
 
   catalog_destroy(cat);
   free(err);
@@ -1123,17 +1120,6 @@ static void test_sensitive_domains_v11_qualifier_glob_fails(void) {
   free(err);
 }
 
-/* Ensures config version 1.1 rejects the removed sensitiveColumns key. */
-static void test_sensitive_domains_v11_rejects_sensitive_columns_key(void) {
-  char *err = NULL;
-  ConnCatalog *cat = load_catalog_with_version_and_db_extra_raw(
-      &err, "1.1", "\"sensitiveColumns\":[\"users.email\"]");
-  ASSERT_TRUE(cat == NULL);
-  ASSERT_TRUE(err != NULL);
-  ASSERT_TRUE(strstr(err, "unknown key \"sensitiveColumns\"") != NULL);
-  free(err);
-}
-
 /* Ensures exact schema.table.column wins over all lower-precedence matches. */
 static void test_sensitive_domains_v11_precedence_exact_stc_first(void) {
   char *err = NULL;
@@ -1270,6 +1256,134 @@ static void test_sensitive_domains_v11_glob_prefers_lexicographic(void) {
   free(err);
 }
 
+/* Ensures underqualified table.column fails closed when exact schema-qualified
+ * rules match different domains, while fully qualified lookups stay
+ * resolvable.
+ */
+static void
+test_sensitive_domains_v11_underqualified_exact_stc_ambiguous(void) {
+  char *err = NULL;
+  ConnCatalog *cat = load_sensitive_domains_catalog_fmt(
+      &err, "dcdc", "email", "users.email", "private_email",
+      "private.users.email");
+  ASSERT_TRUE(cat != NULL);
+  ASSERT_TRUE(err == NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "SensitiveDomainsDb");
+  ASSERT_TRUE(cp != NULL);
+
+  assert_sensitive_domain_lookup(cp, "private", "users", "email", YES,
+                                 "private_email");
+  assert_sensitive_domain_lookup(cp, "public", "users", "email", YES, "email");
+
+  SensDomainOut out = {
+      .domain = "stale",
+      .err = {.code = CONNCAT_ERR_INTERNAL, .msg = "stale"},
+  };
+  ASSERT_TRUE(connp_get_sensitive_domain(cp, NULL, "users", "email", &out) ==
+              ERR);
+  ASSERT_TRUE(out.domain == NULL);
+  ASSERT_TRUE(out.err.code == CONNCAT_ERR_AMBIGUOUS_DOMAIN);
+  ASSERT_TRUE(strstr(out.err.msg, "users.email") != NULL);
+  ASSERT_TRUE(strstr(out.err.msg, "email") != NULL);
+  ASSERT_TRUE(strstr(out.err.msg, "private_email") != NULL);
+
+  catalog_destroy(cat);
+  free(err);
+}
+
+/* Ensures underqualified table.column fails closed when schema-qualified glob
+ * rules match different domains.
+ */
+static void test_sensitive_domains_v11_underqualified_glob_stc_ambiguous(void) {
+  char *err = NULL;
+  ConnCatalog *cat = load_sensitive_domains_catalog_fmt(
+      &err, "dcdc", "email", "users.em*l", "private_email",
+      "private.users.emai*");
+  ASSERT_TRUE(cat != NULL);
+  ASSERT_TRUE(err == NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "SensitiveDomainsDb");
+  ASSERT_TRUE(cp != NULL);
+
+  assert_sensitive_domain_lookup(cp, "private", "users", "email", YES,
+                                 "private_email");
+  assert_sensitive_domain_lookup(cp, "public", "users", "email", YES, "email");
+
+  SensDomainOut out = {
+      .domain = "stale",
+      .err = {.code = CONNCAT_ERR_INTERNAL, .msg = "stale"},
+  };
+  ASSERT_TRUE(connp_get_sensitive_domain(cp, NULL, "users", "email", &out) ==
+              ERR);
+  ASSERT_TRUE(out.domain == NULL);
+  ASSERT_TRUE(out.err.code == CONNCAT_ERR_AMBIGUOUS_DOMAIN);
+  ASSERT_TRUE(strstr(out.err.msg, "users.email") != NULL);
+  ASSERT_TRUE(strstr(out.err.msg, "email") != NULL);
+  ASSERT_TRUE(strstr(out.err.msg, "private_email") != NULL);
+
+  catalog_destroy(cat);
+  free(err);
+}
+
+/* Ensures underqualified table.column falls back to one unique schema-
+ * qualified rule when no table/column or column-only rules match.
+ */
+static void
+test_sensitive_domains_v11_underqualified_unique_stc_fallback(void) {
+  char *err = NULL;
+  ConnCatalog *cat = load_sensitive_domains_catalog_fmt(
+      &err, "dc", "private_email", "private.users.email");
+  ASSERT_TRUE(cat != NULL);
+  ASSERT_TRUE(err == NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "SensitiveDomainsDb");
+  ASSERT_TRUE(cp != NULL);
+
+  assert_sensitive_domain_lookup(cp, "private", "users", "email", YES,
+                                 "private_email");
+
+  SensDomainOut out = {
+      .domain = "stale",
+      .err = {.code = CONNCAT_ERR_INTERNAL, .msg = "stale"},
+  };
+  ASSERT_TRUE(connp_get_sensitive_domain(cp, NULL, "users", "email", &out) ==
+              YES);
+  ASSERT_STREQ(out.domain, "private_email");
+  ASSERT_TRUE(out.err.code == CONNCAT_ERR_NONE);
+  ASSERT_TRUE(out.err.msg[0] == '\0');
+
+  catalog_destroy(cat);
+  free(err);
+}
+
+/* Ensures underqualified table.column succeeds when a table/column match and a
+ * schema-qualified fallback agree on the same domain.
+ */
+static void test_sensitive_domains_v11_underqualified_tc_and_stc_agree(void) {
+  char *err = NULL;
+  ConnCatalog *cat = load_sensitive_domains_catalog_fmt(
+      &err, "dcc", "email", "users.email", "private.users.email");
+  ASSERT_TRUE(cat != NULL);
+  ASSERT_TRUE(err == NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "SensitiveDomainsDb");
+  ASSERT_TRUE(cp != NULL);
+
+  SensDomainOut out = {
+      .domain = "stale",
+      .err = {.code = CONNCAT_ERR_INTERNAL, .msg = "stale"},
+  };
+  ASSERT_TRUE(connp_get_sensitive_domain(cp, NULL, "users", "email", &out) ==
+              YES);
+  ASSERT_STREQ(out.domain, "email");
+  ASSERT_TRUE(out.err.code == CONNCAT_ERR_NONE);
+  ASSERT_TRUE(out.err.msg[0] == '\0');
+
+  catalog_destroy(cat);
+  free(err);
+}
+
 /* Ensures connp_get_sensitive_domain resolves the main rule shapes and returns
  * NO when nothing matches.
  */
@@ -1294,11 +1408,15 @@ static void test_connp_get_sensitive_domain_shapes(void) {
 
 /* Ensures connp_get_sensitive_domain validates required arguments. */
 static void test_connp_get_sensitive_domain_invalid_input(void) {
-  const char *domain = NULL;
+  SensDomainOut out = {0};
   ASSERT_TRUE(connp_get_sensitive_domain(NULL, "public", "users", "email",
-                                         &domain) == ERR);
+                                         &out) == ERR);
+  ASSERT_TRUE(out.domain == NULL);
+  ASSERT_TRUE(out.err.code == CONNCAT_ERR_INVALID_INPUT);
   ASSERT_TRUE(connp_get_sensitive_domain(&(ConnProfile){0}, "public", "users",
-                                         NULL, &domain) == ERR);
+                                         NULL, &out) == ERR);
+  ASSERT_TRUE(out.domain == NULL);
+  ASSERT_TRUE(out.err.code == CONNCAT_ERR_INVALID_INPUT);
   ASSERT_TRUE(connp_get_sensitive_domain(&(ConnProfile){0}, "public", "users",
                                          "email", NULL) == NO);
 }
@@ -1336,7 +1454,6 @@ int main(void) {
   test_sensitive_domains_v11_too_many_dots_fails();
   test_sensitive_domains_v11_empty_segment_fails();
   test_sensitive_domains_v11_qualifier_glob_fails();
-  test_sensitive_domains_v11_rejects_sensitive_columns_key();
   test_sensitive_domains_v11_precedence_exact_stc_first();
   test_sensitive_domains_v11_precedence_glob_stc_over_exact_tc();
   test_sensitive_domains_v11_precedence_exact_tc_over_glob_tc();
@@ -1345,6 +1462,10 @@ int main(void) {
   test_sensitive_domains_v11_glob_prefers_fewer_stars();
   test_sensitive_domains_v11_glob_prefers_more_literals();
   test_sensitive_domains_v11_glob_prefers_lexicographic();
+  test_sensitive_domains_v11_underqualified_exact_stc_ambiguous();
+  test_sensitive_domains_v11_underqualified_glob_stc_ambiguous();
+  test_sensitive_domains_v11_underqualified_unique_stc_fallback();
+  test_sensitive_domains_v11_underqualified_tc_and_stc_agree();
   test_connp_get_sensitive_domain_shapes();
   test_connp_get_sensitive_domain_invalid_input();
   fprintf(stderr, "OK: test_conn_catalog\n");

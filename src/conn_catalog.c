@@ -1497,44 +1497,243 @@ sensitive_bucket_find_domain(const SensitiveRuleBucket *bucket,
   return NO;
 }
 
+/* Clears one optional sensitive-domain lookup output before use.
+ * It borrows 'out' and does not allocate memory.
+ * Side effects: resets the caller-owned output struct to the empty state.
+ * Error semantics: none; NULL input is ignored.
+ */
+static void sensitive_lookup_out_clear(SensDomainOut *out) {
+  if (!out)
+    return;
+  out->domain = NULL;
+  ADBX_ERR_CLEAR(&out->err, CONNCAT_ERR_NONE);
+}
+
+/* Stores one typed sensitive-domain lookup error in an optional output.
+ * It borrows 'out' and allocates nothing.
+ * Side effects: clears any previously stored domain and formats one message.
+ * Error semantics: none; NULL output is ignored.
+ */
+static void sensitive_lookup_out_set_err(SensDomainOut *out,
+                                         ConnCatalogErrCode code,
+                                         const char *fmt, ...) {
+  if (!out)
+    return;
+
+  out->domain = NULL;
+  out->err.code = code;
+  if (!fmt) {
+    out->err.msg[0] = '\0';
+    return;
+  }
+
+  va_list ap;
+  va_start(ap, fmt);
+  (void)vsnprintf(out->err.msg, sizeof(out->err.msg), fmt, ap);
+  va_end(ap);
+}
+
+/* Scans one schema-qualified bucket while ignoring schema, and collects one
+ * unique matching domain across all schemas for the caller-supplied
+ * table/column pair. It borrows all inputs and writes the borrowed unique
+ * domain through 'inout_domain' when provided. When it detects a conflicting
+ * second domain, it writes that borrowed domain through
+ * 'out_conflict_domain' when provided.
+ * Side effects: mutates '*inout_domain' when it discovers the first match.
+ * Error semantics: returns YES when at least one rule matches without domain
+ * conflict, NO when nothing matches, ERR on invalid input, malformed rule
+ * state, or conflicting matched domains.
+ */
+static AdbxTriStatus
+sensitive_bucket_collect_unique_domain(const SensitiveRuleBucket *bucket,
+                                       const char *table, const char *column,
+                                       const char **inout_domain,
+                                       const char **out_conflict_domain) {
+  if (!bucket || !table || !column || !inout_domain)
+    return ERR;
+  if (out_conflict_domain)
+    *out_conflict_domain = NULL;
+
+  int found = 0;
+  for (size_t i = 0; i < bucket->n_rules; i++) {
+    const SensitiveRule *rule = &bucket->rules[i];
+    if (!rule->schema || !rule->table || !rule->column_pat || !rule->domain)
+      return ERR;
+    if (strcmp(rule->table, table) != 0)
+      continue;
+
+    AdbxTriStatus mrc = NO;
+    if (rule->star_count == 0) {
+      mrc = (strcmp(rule->column_pat, column) == 0) ? YES : NO;
+    } else {
+      mrc = glob_match_column_pattern(rule->column_pat, column);
+    }
+    if (mrc == ERR)
+      return ERR;
+    if (mrc == NO)
+      continue;
+
+    if (!*inout_domain) {
+      *inout_domain = rule->domain;
+    } else if (strcmp(*inout_domain, rule->domain) != 0) {
+      if (out_conflict_domain)
+        *out_conflict_domain = rule->domain;
+      return ERR;
+    }
+    found = 1;
+  }
+
+  return found ? YES : NO;
+}
+
 AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
                                          const char *schema, const char *table,
                                          const char *column,
-                                         const char **out_domain) {
-  if (!cp || !column)
+                                         SensDomainOut *out) {
+  sensitive_lookup_out_clear(out);
+
+  if (!cp || !table || !column || table[0] == '\0' || column[0] == '\0') {
+    sensitive_lookup_out_set_err(
+        out, CONNCAT_ERR_INVALID_INPUT,
+        "sensitive domain lookup requires non-empty table and column names.");
     return ERR;
+  }
 
   const SensitiveDomainPolicy *pol = &cp->sens_policy;
   // TODO: consider adding an out_domain_len parameter to avoid repeated
   // strlen() calls in callers that need the borrowed domain bytes.
-  if (out_domain)
-    *out_domain = NULL;
   if (!pol->storage || pol->n_storage == 0)
     return NO;
 
   const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
-  AdbxTriStatus rc = sensitive_bucket_find_domain(&pol->exact_stc, schema_norm,
-                                                  table, column, out_domain);
-  if (rc != NO)
+  const char *domain = NULL;
+  AdbxTriStatus rc = NO;
+  if (schema_norm) {
+    rc = sensitive_bucket_find_domain(&pol->exact_stc, schema_norm, table,
+                                      column, &domain);
+    if (rc != NO)
+      goto done;
+    rc = sensitive_bucket_find_domain(&pol->glob_stc, schema_norm, table,
+                                      column, &domain);
+    if (rc != NO)
+      goto done;
+    rc = sensitive_bucket_find_domain(&pol->exact_tc, NULL, table, column,
+                                      &domain);
+    if (rc != NO)
+      goto done;
+    rc = sensitive_bucket_find_domain(&pol->glob_tc, NULL, table, column,
+                                      &domain);
+    if (rc != NO)
+      goto done;
+    rc = sensitive_bucket_find_domain(&pol->exact_c, NULL, table, column,
+                                      &domain);
+    if (rc != NO)
+      goto done;
+    rc = sensitive_bucket_find_domain(&pol->glob_c, NULL, table, column,
+                                      &domain);
+    if (rc == YES && out)
+      out->domain = domain;
     return rc;
-  rc = sensitive_bucket_find_domain(&pol->glob_stc, schema_norm, table, column,
-                                    out_domain);
-  if (rc != NO)
+  }
+
+  const char *tc_domain = NULL;
+  rc = sensitive_bucket_find_domain(&pol->exact_tc, NULL, table, column,
+                                    &tc_domain);
+  if (rc == NO) {
+    rc = sensitive_bucket_find_domain(&pol->glob_tc, NULL, table, column,
+                                      &tc_domain);
+  }
+  if (rc == NO) {
+    rc = sensitive_bucket_find_domain(&pol->exact_c, NULL, table, column,
+                                      &tc_domain);
+  }
+  if (rc == NO) {
+    rc = sensitive_bucket_find_domain(&pol->glob_c, NULL, table, column,
+                                      &tc_domain);
+  }
+  if (rc == ERR) {
+    sensitive_lookup_out_set_err(
+        out, CONNCAT_ERR_INTERNAL,
+        "invalid sensitive-domain policy state while matching '%s.%s'.", table,
+        column);
+    return ERR;
+  }
+
+  const char *stc_domain = NULL;
+  const char *conflict_domain = NULL;
+  AdbxTriStatus src = sensitive_bucket_collect_unique_domain(
+      &pol->exact_stc, table, column, &stc_domain, &conflict_domain);
+  if (src == YES || src == NO) {
+    AdbxTriStatus grc = sensitive_bucket_collect_unique_domain(
+        &pol->glob_stc, table, column, &stc_domain, &conflict_domain);
+    if (grc == ERR) {
+      if (conflict_domain) {
+        sensitive_lookup_out_set_err(
+            out, CONNCAT_ERR_AMBIGUOUS_DOMAIN,
+            "ambiguous sensitive domain for lookup '%s.%s': conflicting "
+            "domains '%s' and '%s'.",
+            table, column, stc_domain ? stc_domain : "<unknown>",
+            conflict_domain);
+      } else {
+        sensitive_lookup_out_set_err(
+            out, CONNCAT_ERR_INTERNAL,
+            "invalid sensitive-domain policy state while matching '%s.%s'.",
+            table, column);
+      }
+      return ERR;
+    }
+    if (grc == YES)
+      src = YES;
+  } else {
+    if (conflict_domain) {
+      sensitive_lookup_out_set_err(
+          out, CONNCAT_ERR_AMBIGUOUS_DOMAIN,
+          "ambiguous sensitive domain for lookup '%s.%s': conflicting "
+          "domains '%s' and '%s'.",
+          table, column, stc_domain ? stc_domain : "<unknown>",
+          conflict_domain);
+    } else {
+      sensitive_lookup_out_set_err(
+          out, CONNCAT_ERR_INTERNAL,
+          "invalid sensitive-domain policy state while matching '%s.%s'.",
+          table, column);
+    }
+    return ERR;
+  }
+
+  if (src == NO) {
+    if (rc == YES && out)
+      out->domain = tc_domain;
     return rc;
-  rc = sensitive_bucket_find_domain(&pol->exact_tc, schema_norm, table, column,
-                                    out_domain);
-  if (rc != NO)
-    return rc;
-  rc = sensitive_bucket_find_domain(&pol->glob_tc, schema_norm, table, column,
-                                    out_domain);
-  if (rc != NO)
-    return rc;
-  rc = sensitive_bucket_find_domain(&pol->exact_c, schema_norm, table, column,
-                                    out_domain);
-  if (rc != NO)
-    return rc;
-  return sensitive_bucket_find_domain(&pol->glob_c, schema_norm, table, column,
-                                      out_domain);
+  }
+
+  if (rc == NO) {
+    if (out)
+      out->domain = stc_domain;
+    return YES;
+  }
+
+  if (strcmp(stc_domain, tc_domain) != 0) {
+    sensitive_lookup_out_set_err(
+        out, CONNCAT_ERR_AMBIGUOUS_DOMAIN,
+        "ambiguous sensitive domain for lookup '%s.%s': conflicting domains "
+        "'%s' and '%s'.",
+        table, column, tc_domain, stc_domain);
+    return ERR;
+  }
+
+  domain = tc_domain;
+done:
+  if (rc == ERR) {
+    sensitive_lookup_out_set_err(
+        out, CONNCAT_ERR_INTERNAL,
+        "invalid sensitive-domain policy state while matching '%s.%s'.", table,
+        column);
+    return ERR;
+  }
+  if (rc == YES && out)
+    out->domain = domain;
+  return rc;
 }
 
 AdbxTriStatus connp_is_func_safe(const ConnProfile *cp, const char *schema,

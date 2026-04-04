@@ -344,6 +344,156 @@ static void test_create_token_deterministic_reuse(void) {
   arena_clean(&arena);
 }
 
+/* Verifies deterministic mode reuses one token for the same (domain, value)
+ * pair even across separate caller-owned input buffers.
+ */
+static void test_create_token_deterministic_same_domain_same_value(void) {
+  Arena arena = {0};
+  init_test_arena(&arena);
+
+  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
+  DbTokenStore *store = stok_store_create(&cp, &arena);
+  ASSERT_TRUE(store != NULL);
+
+  char v1[] = "alice";
+  char v2[] = "alice";
+  char tok1[SENSITIVE_TOK_BUFSZ] = {0};
+  char tok2[SENSITIVE_TOK_BUFSZ] = {0};
+  SensitiveTokIn in1 = {
+      .value = v1,
+      .value_len = 5u,
+      .domain = "fiscal_code",
+      .domain_len = (uint32_t)strlen("fiscal_code"),
+      .pg_oid = 23u,
+  };
+  SensitiveTokIn in2 = {
+      .value = v2,
+      .value_len = 5u,
+      .domain = "fiscal_code",
+      .domain_len = (uint32_t)strlen("fiscal_code"),
+      .pg_oid = 23u,
+  };
+
+  ASSERT_TRUE(stok_store_create_token(store, 11u, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, 11u, &in2, tok2) > 0);
+  ASSERT_TRUE(strcmp(tok1, tok2) == 0);
+  ASSERT_TRUE(stok_store_len(store) == 1);
+
+  stok_store_destroy(store);
+  arena_clean(&arena);
+}
+
+/* Verifies deterministic mode separates equal plaintext values across
+ * different sensitive domains.
+ */
+static void test_create_token_deterministic_different_domain_same_value(void) {
+  Arena arena = {0};
+  init_test_arena(&arena);
+
+  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
+  DbTokenStore *store = stok_store_create(&cp, &arena);
+  ASSERT_TRUE(store != NULL);
+
+  char tok1[SENSITIVE_TOK_BUFSZ] = {0};
+  char tok2[SENSITIVE_TOK_BUFSZ] = {0};
+  SensitiveTokIn in1 = {
+      .value = "alice",
+      .value_len = 5u,
+      .domain = "fiscal_code",
+      .domain_len = (uint32_t)strlen("fiscal_code"),
+      .pg_oid = 23u,
+  };
+  SensitiveTokIn in2 = {
+      .value = "alice",
+      .value_len = 5u,
+      .domain = "email",
+      .domain_len = (uint32_t)strlen("email"),
+      .pg_oid = 25u,
+  };
+
+  ASSERT_TRUE(stok_store_create_token(store, 11u, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, 11u, &in2, tok2) > 0);
+  ASSERT_TRUE(strcmp(tok1, tok2) != 0);
+  ASSERT_TRUE(stok_store_len(store) == 2);
+
+  stok_store_destroy(store);
+  arena_clean(&arena);
+}
+
+/* Verifies deterministic mode separates different plaintext values inside the
+ * same sensitive domain.
+ */
+static void test_create_token_deterministic_same_domain_different_value(void) {
+  Arena arena = {0};
+  init_test_arena(&arena);
+
+  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
+  DbTokenStore *store = stok_store_create(&cp, &arena);
+  ASSERT_TRUE(store != NULL);
+
+  char tok1[SENSITIVE_TOK_BUFSZ] = {0};
+  char tok2[SENSITIVE_TOK_BUFSZ] = {0};
+  SensitiveTokIn in1 = {
+      .value = "alice",
+      .value_len = 5u,
+      .domain = "fiscal_code",
+      .domain_len = (uint32_t)strlen("fiscal_code"),
+      .pg_oid = 23u,
+  };
+  SensitiveTokIn in2 = {
+      .value = "bob",
+      .value_len = 3u,
+      .domain = "fiscal_code",
+      .domain_len = (uint32_t)strlen("fiscal_code"),
+      .pg_oid = 23u,
+  };
+
+  ASSERT_TRUE(stok_store_create_token(store, 11u, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, 11u, &in2, tok2) > 0);
+  ASSERT_TRUE(strcmp(tok1, tok2) != 0);
+  ASSERT_TRUE(stok_store_len(store) == 2);
+
+  stok_store_destroy(store);
+  arena_clean(&arena);
+}
+
+/* Verifies deterministic token identity remains isolated per connection even
+ * when the same domain and plaintext value are reused.
+ */
+static void
+test_create_token_deterministic_same_domain_same_value_diff_connection(void) {
+  Arena arena = {0};
+  init_test_arena(&arena);
+
+  ConnProfile cp_a = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
+  ConnProfile cp_b = make_profile("analytics", SAFETY_COLSTRAT_DETERMINISTIC);
+  DbTokenStore *store_a = stok_store_create(&cp_a, &arena);
+  DbTokenStore *store_b = stok_store_create(&cp_b, &arena);
+  ASSERT_TRUE(store_a != NULL);
+  ASSERT_TRUE(store_b != NULL);
+
+  char tok1[SENSITIVE_TOK_BUFSZ] = {0};
+  char tok2[SENSITIVE_TOK_BUFSZ] = {0};
+  SensitiveTokIn in = {
+      .value = "alice",
+      .value_len = 5u,
+      .domain = "fiscal_code",
+      .domain_len = (uint32_t)strlen("fiscal_code"),
+      .pg_oid = 23u,
+  };
+
+  ASSERT_TRUE(stok_store_create_token(store_a, 11u, &in, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store_b, 11u, &in, tok2) > 0);
+  ASSERT_TRUE(strcmp(tok1, tok2) != 0);
+  ASSERT_TRUE(stok_store_len(store_a) == 1);
+  ASSERT_TRUE(stok_store_len(store_b) == 1);
+
+  stok_store_destroy(store_a);
+  stok_store_destroy(store_b);
+  arena_clean(&arena);
+}
+
+/* Verifies randomized mode never deduplicates equal (domain, value) inputs. */
 static void test_create_token_randomized_appends(void) {
   Arena arena = {0};
   init_test_arena(&arena);
@@ -418,6 +568,10 @@ static void test_create_token_input_validation(void) {
   bad.domain_len = 0;
   ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
   bad = in;
+  bad.domain = "";
+  bad.domain_len = 0u;
+  ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
+  bad = in;
   bad.value = NULL;
   bad.value_len = 1u;
   ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
@@ -443,6 +597,10 @@ int main(void) {
   test_create_token_null_value_deterministic();
   test_create_token_connection_name_too_long();
   test_create_token_deterministic_reuse();
+  test_create_token_deterministic_same_domain_same_value();
+  test_create_token_deterministic_different_domain_same_value();
+  test_create_token_deterministic_same_domain_different_value();
+  test_create_token_deterministic_same_domain_same_value_diff_connection();
   test_create_token_randomized_appends();
   test_create_token_input_validation();
   fprintf(stderr, "OK: test_sensitive_tok\n");

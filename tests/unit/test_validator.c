@@ -159,6 +159,29 @@ assert_validate_plan_at(DbBackend *db, const ConnProfile *cp, const char *sql,
   assert_validate_plan_at((db), (cp), (sql), (exp_kinds), (exp_ids),           \
                           (exp_ncols), params, nparams, __FILE__, __LINE__)
 
+/* Returns YES when the validator error message contains 'needle'.
+ * It borrows both inputs and performs no allocations.
+ * Error semantics: returns YES on substring match, NO otherwise.
+ */
+static AdbxTriStatus validate_err_has_substr(const ValidateQueryOut *out,
+                                             const char *needle) {
+  if (!out || !needle || !out->err.msg.data)
+    return NO;
+
+  size_t hay_len = out->err.msg.len;
+  size_t needle_len = strlen(needle);
+  if (needle_len == 0)
+    return YES;
+  if (hay_len < needle_len)
+    return NO;
+
+  for (size_t i = 0; i + needle_len <= hay_len; i++) {
+    if (memcmp(out->err.msg.data + i, needle, needle_len) == 0)
+      return YES;
+  }
+  return NO;
+}
+
 /* Runs one validation expected to fail and asserts that the output plan is
  * empty after failure.
  * It borrows all inputs and owns temporary ValidateQueryOut for this call.
@@ -578,6 +601,14 @@ static void test_validator_token_param_binding(void) {
       make_param_domain("fiscal_code"),
       make_param_domain("fiscal_code"),
   };
+  const SensitiveTok tok_in_cf_ok[] = {
+      make_param_domain("fiscal_code"),
+      make_param_domain("fiscal_code"),
+  };
+  const SensitiveTok tok_in_cf_bad[] = {
+      make_param_domain("fiscal_code"),
+      make_param_domain("card_code"),
+  };
   const SensitiveTok tok_in_bad_3rd[] = {
       make_param_domain("fiscal_code"),
       make_param_domain("fiscal_code"),
@@ -633,6 +664,20 @@ static void test_validator_token_param_binding(void) {
       0, VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_in_bad_3rd,
       ARRLEN(tok_in_bad_3rd));
 
+  // Underqualified table.column lookups matched through the broad "*_cf"
+  // domain rule should accept multiple parameters from the same domain.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT t.name FROM a_table t WHERE t.a_cf IN ($1, $2) LIMIT 5;", 1,
+      VERR_NONE, NULL, tok_in_cf_ok, ARRLEN(tok_in_cf_ok));
+
+  // One mismatched domain inside the same IN predicate must still fail.
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT t.name FROM a_table t WHERE t.a_cf IN ($1, $2) LIMIT 5;", 0,
+      VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_in_cf_bad,
+      ARRLEN(tok_in_cf_bad));
+
   // Missing token parameters must reject sensitive predicates.
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;",
@@ -684,6 +729,75 @@ static void test_validator_token_param_binding(void) {
       "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 0,
       VERR_ANALYZE_FAIL, NULL, tok_bad_meta_empty, ARRLEN(tok_bad_meta_empty));
 
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
+/* Verifies validator propagates one user-facing ambiguous-domain error when an
+ * underqualified table.column lookup matches conflicting schema-qualified
+ * domains in the catalog.
+ */
+static void test_validator_ambiguous_domain_message(void) {
+  const char *json = "{"
+                     "  \"version\": \"1.1\","
+                     "  \"configNamespace\": \"TestNamespace\","
+                     "  \"safetyPolicy\": {"
+                     "    \"columnPolicy\": {"
+                     "      \"mode\": \"pseudonymize\","
+                     "      \"strategy\": \"deterministic\""
+                     "    }"
+                     "  },"
+                     "  \"databases\": ["
+                     "    {"
+                     "      \"type\": \"postgres\","
+                     "      \"connectionName\": \"TestDb\","
+                     "      \"host\": \"localhost\","
+                     "      \"port\": 5432,"
+                     "      \"username\": \"postgres\","
+                     "      \"database\": \"postgres\","
+                     "      \"sensitiveDomains\": {"
+                     "        \"fiscal_code\": [\"users.fiscal_code\"],"
+                     "        \"private_fiscal_code\": "
+                     "[\"private.users.fiscal_code\"]"
+                     "      }"
+                     "    }"
+                     "  ]"
+                     "}";
+
+  char *path = write_tmp_config(json);
+  ASSERT_TRUE(path != NULL);
+  char *load_err = NULL;
+  ConnCatalog *cat = catalog_load_from_file(path, &load_err);
+  unlink(path);
+  free(path);
+  ASSERT_TRUE(cat != NULL);
+  ASSERT_TRUE(load_err == NULL);
+
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  const SensitiveTok tok_fc[] = {make_param_domain("fiscal_code")};
+  ValidateQueryOut out = {0};
+  ASSERT_TRUE(vq_out_init(&out) == OK);
+  ValidatorRequest req = {
+      .db = db,
+      .profile = cp,
+      .sql = "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;",
+      .params = tok_fc,
+      .nparams = ARRLEN(tok_fc),
+  };
+
+  ASSERT_TRUE(validate_query(&req, &out) == ERR);
+  ASSERT_TRUE(out.err.code == VERR_ANALYZE_FAIL);
+  ASSERT_TRUE(validate_err_has_substr(&out, "users.fiscal_code") == YES);
+  ASSERT_TRUE(validate_err_has_substr(&out, "fiscal_code") == YES);
+  ASSERT_TRUE(validate_err_has_substr(&out, "private_fiscal_code") == YES);
+
+  vq_out_clean(&out);
   db_destroy(db);
   catalog_destroy(cat);
 }
@@ -971,6 +1085,7 @@ int main(void) {
   test_validator_rejects_rules();
   test_validator_from_notes();
   test_validator_token_param_binding();
+  test_validator_ambiguous_domain_message();
   test_validator_plan();
   test_validator_safe_funcs_pg();
   fprintf(stderr, "OK: test_validator\n");

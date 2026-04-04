@@ -396,26 +396,27 @@ static void test_jsget_object_members_begin_null_key(void) {
   const char *json = "{\"obj\":{\"x\":1},\"nil\":null,\"arr\":[1]}";
   JsonGetter jg;
   JsonTokBuf tok_buf = {0};
-  JsonObjIter oit;
+  JsonObjIter root_it;
+  JsonObjIter nested_it;
   JsonStrSpan key = {0};
   JsonGetter val = {0};
 
   ASSERT_TRUE(jsget_init(&jg, json, strlen(json), &tok_buf) == OK);
-  ASSERT_TRUE(jsget_object_members_begin(&jg, NULL, &oit) == YES);
-  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(jsget_object_members_begin(&jg, NULL, &root_it) == YES);
+  ASSERT_TRUE(jsget_object_members_next(&jg, &root_it, &key, &val) == YES);
   ASSERT_TRUE(key.len == 3);
   ASSERT_TRUE(memcmp(key.ptr, "obj", key.len) == 0);
-  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &oit) == YES);
+  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &nested_it) == YES);
 
-  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(jsget_object_members_next(&jg, &root_it, &key, &val) == YES);
   ASSERT_TRUE(key.len == 3);
   ASSERT_TRUE(memcmp(key.ptr, "nil", key.len) == 0);
-  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &oit) == NO);
+  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &nested_it) == NO);
 
-  ASSERT_TRUE(jsget_object_members_next(&jg, &oit, &key, &val) == YES);
+  ASSERT_TRUE(jsget_object_members_next(&jg, &root_it, &key, &val) == YES);
   ASSERT_TRUE(key.len == 3);
   ASSERT_TRUE(memcmp(key.ptr, "arr", key.len) == 0);
-  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &oit) == ERR);
+  ASSERT_TRUE(jsget_object_members_begin(&val, NULL, &nested_it) == ERR);
 }
 
 static void test_jsget_object_members_input_validation(void) {

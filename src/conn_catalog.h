@@ -1,6 +1,7 @@
 #ifndef CONN_CATALOG_H
 #define CONN_CATALOG_H
 
+#include "adbx_err.h"
 #include "arena.h"
 #include "safety_policy.h"
 #include "secret_store.h"
@@ -17,6 +18,23 @@
 typedef enum {
   DB_KIND_POSTGRES = 1,
 } DbKind;
+
+typedef enum {
+  CONNCAT_ERR_NONE = 0,
+  CONNCAT_ERR_INVALID_INPUT,
+  CONNCAT_ERR_AMBIGUOUS_DOMAIN,
+  CONNCAT_ERR_INTERNAL,
+} ConnCatalogErrCode;
+
+typedef struct {
+  ConnCatalogErrCode code;
+  char msg[ADBX_ERRMSG_MAX];
+} ConnCatalogErr;
+
+typedef struct {
+  const char *domain; // borrowed from ConnProfile
+  ConnCatalogErr err;
+} SensDomainOut;
 
 /* One parsed sensitive-domain rule. Strings are owned by the parent policy
  * arena. schema/table may be NULL based on the original qualifier depth.
@@ -143,16 +161,30 @@ size_t catalog_count(const ConnCatalog *cat);
 size_t catalog_list(ConnCatalog *cat, ConnProfile **out, size_t cap_count);
 
 /* Checks if the column in input, identified by 'schema', 'table', 'column',
- * belongs to a sensitive domain. 'cp' and 'column' must not be NULL.
- * - YES means it found a match. It assigns the matched borrowed domain string
- *   to '*out_domain' when 'out_domain' is not NULL.
- * - NO means not sensitive.
- * - ERR means invalid input or internal inconsistency.
+ * belongs to a sensitive domain. 'cp', 'table', and 'column' must not be
+ * NULL. Empty 'schema' is treated as absent.
+ *
+ * Accepted lookup shapes:
+ * - (schema, table, column): fully qualified lookup.
+ * - (NULL, table, column): underqualified lookup that falls back
+ *   conservatively across all schema-qualified matches.
+ *
+ * Column-only lookups are rejected because they are too ambiguous to validate
+ * safely.
+ *
+ * When 'out' is not NULL, the function clears it on entry.
+ *
+ * - YES means it found a match. 'out->domain' is a borrowed non-NULL domain
+ *   string and 'out->err' is clear.
+ * - NO means not sensitive. 'out->domain' is NULL and 'out->err' is clear.
+ * - ERR means invalid input, ambiguous underqualified lookup, or internal
+ *   inconsistency. 'out->domain' is NULL and 'out->err' is set when 'out' is
+ *   provided.
  */
 AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
                                          const char *schema, const char *table,
                                          const char *column,
-                                         const char **out_domain);
+                                         SensDomainOut *out);
 /**
  * Returns YES if the function name is marked safe by the profile.
  *

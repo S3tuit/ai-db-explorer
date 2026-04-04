@@ -252,7 +252,8 @@ Each entry currently includes fields such as:
 - `username`
 - `database`
 - `safeFunctions`
-- `sensitiveDomains`
+- `sensitiveDomains` for sensitive columns that should share the same logical
+  domain
 
 ### `safeFunctions`
 
@@ -266,17 +267,31 @@ safe. You can see all the default safe functions at
 
 ### `sensitiveDomains`
 
-Use this to group equivalent sensitive columns into domains. Columns in the
-same domain may share deterministic token reuse and may accept the same token
-parameters in restricted comparisons.
+Use `sensitiveDomains` to tell the Broker which columns are sensitive, and
+which of those columns should be treated as the same logical kind of value.
+
+Each object key is the domain name. Each value is a list of identifiers or
+patterns with shape `[schema.][table.]column`.
+
+Columns in the same domain:
+
+- are treated as sensitive
+- can accept the same token parameters in restricted `WHERE col = $n` and
+  `WHERE col IN (...)` comparisons
+- in deterministic mode, reuse the same token for the same
+  `connection + domain + value`
+
+Only group columns together when they really represent the same kind of value.
+For example, two fiscal-code columns usually belong in the same domain; a
+fiscal-code column and an email column should not.
 
 For example:
 
 ```json
 "sensitiveDomains": {
-  "email": [
-    "users.mail",
-    "*email*"
+  "fiscal_code": [
+    "users.fiscal_code",
+    "*_cf"
   ],
   "phone": [
     "private.users.phone",
@@ -285,11 +300,48 @@ For example:
 }
 ```
 
-Each identifier uses the shape `[schema.][table.]column`, and `*` is supported
-only in the final column segment.
+Pattern rules are normalized to lowercase when the config is loaded. `*` is
+supported only in the final column segment.
+
+This example matches, among others:
+
+- fiscal_code: `private.users.fiscal_code`, `users.fiscal_code`,
+  `registry.user_cf`
+- phone: `private.users.phone`, `public.accounts.ph_num`
+
+It will not match:
+
+- `users.email`
+- `public.users.phone`
+- `registry.user_phone`
+
+At a high level, more specific rules win over broader ones, and ambiguous
+matches fail closed.
+
+In practice, this means the agent can get an opaque token from one column and
+reuse it against another column in the same domain, without ever seeing the
+plaintext value.
+
+For example, the agent can first run:
+
+```sql
+SELECT u.creation_date, u.fiscal_code FROM users u WHERE u.name = 'Matteo' LIMIT 10;
+```
+
+and receive an opaque token in place of `u.fiscal_code`.
+
+It can then reuse that token in a second query such as:
+
+```sql
+SELECT r.account_id FROM registry r WHERE r.user_cf = $1 LIMIT 10;
+```
+
+That works because both `users.fiscal_code` and `registry.user_cf` belong to
+the same `fiscal_code` domain.
 
 When a query touches a column that belongs to a sensitive domain, the Broker
-applies the sensitive-data handling rules instead of returning raw values.
+switches to the stricter sensitive-data path. Sensitive outputs are tokenized,
+and query shape becomes more restricted.
 
 For the deeper design around sensitive-data handling and token use, see
 [`docs/sensitive_data.md`](docs/sensitive_data.md).

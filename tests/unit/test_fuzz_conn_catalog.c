@@ -633,37 +633,139 @@ static AdbxTriStatus ref_glob_match(const char *pattern, const char *value) {
   return ref_glob_match(pattern + 1, value + 1);
 }
 
-/* Finds the expected sensitive domain for one lookup according to the
- * canonical reference model. It borrows all inputs and performs no
- * allocations. Aborts on invalid input and returns a borrowed domain name on
- * match, NULL when no rule matches.
+/* Checks whether one reference rule matches the caller-supplied lookup. It
+ * borrows all inputs and performs no allocations.
+ * Error semantics: returns YES on match, NO when the rule does not apply.
  */
-static const char *fuzz_model_find_domain(const FuzzModel *model,
-                                          const char *schema, const char *table,
-                                          const char *column) {
-  ASSERT_TRUE(model);
+static AdbxTriStatus fuzz_rule_matches(const FuzzRule *rule, const char *schema,
+                                       const char *table, const char *column,
+                                       int ignore_schema) {
+  ASSERT_TRUE(rule);
+  ASSERT_TRUE(table);
   ASSERT_TRUE(column);
 
-  const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
+  if (!ignore_schema && rule->schema) {
+    if (!schema || strcmp(rule->schema, schema) != 0)
+      return NO;
+  }
+  if (rule->table && strcmp(rule->table, table) != 0)
+    return NO;
+
+  if (rule->star_count == 0)
+    return (strcmp(rule->column_pat, column) == 0) ? YES : NO;
+  return ref_glob_match(rule->column_pat, column);
+}
+
+/* Finds the first matching domain within one rank range of the sorted
+ * reference-rule array. It borrows all inputs and writes one borrowed domain
+ * through 'out_domain' on success.
+ * Error semantics: returns YES on first match, NO when nothing matches.
+ */
+static AdbxTriStatus
+fuzz_model_find_first_match(const FuzzModel *model, int rank_lo, int rank_hi,
+                            const char *schema, const char *table,
+                            const char *column, int ignore_schema,
+                            const char **out_domain) {
+  ASSERT_TRUE(model);
+  ASSERT_TRUE(table);
+  ASSERT_TRUE(column);
+  ASSERT_TRUE(out_domain);
+
   for (size_t i = 0; i < model->n_rules; i++) {
     const FuzzRule *rule = &model->rules[i];
-    if (rule->schema) {
-      if (!schema_norm || strcmp(rule->schema, schema_norm) != 0)
-        continue;
-    }
-    if (rule->table) {
-      if (!table || strcmp(rule->table, table) != 0)
-        continue;
-    }
-    if (rule->star_count == 0) {
-      if (strcmp(rule->column_pat, column) == 0)
-        return rule->domain;
+    int rank = fuzz_rule_rank(rule);
+    if (rank < rank_lo)
       continue;
+    if (rank > rank_hi)
+      break;
+
+    if (fuzz_rule_matches(rule, schema, table, column, ignore_schema) == YES) {
+      *out_domain = rule->domain;
+      return YES;
     }
-    if (ref_glob_match(rule->column_pat, column) == YES)
-      return rule->domain;
   }
-  return NULL;
+  return NO;
+}
+
+/* Collects one unique matching schema-qualified domain across all schemas for
+ * the caller-supplied table/column pair. It borrows all inputs and writes the
+ * borrowed unique domain through 'inout_domain' when present.
+ * Error semantics: returns YES when one or more schema-qualified rules match
+ * without conflict, NO when none match, ERR on conflicting matched domains.
+ */
+static AdbxTriStatus
+fuzz_model_collect_unique_stc_domain(const FuzzModel *model, const char *table,
+                                     const char *column,
+                                     const char **inout_domain) {
+  ASSERT_TRUE(model);
+  ASSERT_TRUE(table);
+  ASSERT_TRUE(column);
+  ASSERT_TRUE(inout_domain);
+
+  int found = 0;
+  for (size_t i = 0; i < model->n_rules; i++) {
+    const FuzzRule *rule = &model->rules[i];
+    int rank = fuzz_rule_rank(rule);
+    if (rank > 1)
+      break;
+    if (fuzz_rule_matches(rule, NULL, table, column, 1) != YES)
+      continue;
+
+    if (!*inout_domain) {
+      *inout_domain = rule->domain;
+    } else if (strcmp(*inout_domain, rule->domain) != 0) {
+      return ERR;
+    }
+    found = 1;
+  }
+
+  return found ? YES : NO;
+}
+
+/* Finds the expected sensitive-domain result for one lookup according to the
+ * canonical reference model. It borrows all inputs and performs no
+ * allocations. Column-only lookups are invalid and therefore return ERR.
+ * On YES, it writes one borrowed expected domain through 'out_domain'.
+ */
+static AdbxTriStatus fuzz_model_find_domain(const FuzzModel *model,
+                                            const char *schema,
+                                            const char *table,
+                                            const char *column,
+                                            const char **out_domain) {
+  ASSERT_TRUE(model);
+  ASSERT_TRUE(out_domain);
+
+  *out_domain = NULL;
+  if (!table || !column || table[0] == '\0' || column[0] == '\0')
+    return ERR;
+
+  const char *schema_norm = (schema && schema[0] != '\0') ? schema : NULL;
+  if (schema_norm) {
+    return fuzz_model_find_first_match(model, 0, 5, schema_norm, table, column,
+                                       0, out_domain);
+  }
+
+  const char *tc_domain = NULL;
+  AdbxTriStatus rc = fuzz_model_find_first_match(model, 2, 5, NULL, table,
+                                                 column, 0, &tc_domain);
+
+  const char *stc_domain = NULL;
+  AdbxTriStatus src =
+      fuzz_model_collect_unique_stc_domain(model, table, column, &stc_domain);
+  if (src == ERR)
+    return ERR;
+  if (src == NO) {
+    *out_domain = tc_domain;
+    return rc;
+  }
+  if (rc == NO) {
+    *out_domain = stc_domain;
+    return YES;
+  }
+  if (strcmp(stc_domain, tc_domain) != 0)
+    return ERR;
+  *out_domain = tc_domain;
+  return YES;
 }
 
 /* Returns one owned concrete identifier that matches the caller-borrowed glob
@@ -768,8 +870,9 @@ static void fuzz_lookup_generate(const FuzzModel *model, FuzzLookup *out,
  */
 static void fail_fuzz_case(uint64_t case_seed, size_t lookup_idx,
                            const char *json, const FuzzLookup *lookup,
-                           const char *exp_domain, AdbxTriStatus got_rc,
-                           const char *got_domain, const char *err_msg) {
+                           AdbxTriStatus exp_rc, const char *exp_domain,
+                           AdbxTriStatus got_rc, const char *got_domain,
+                           const char *err_msg) {
   fprintf(stderr,
           "fuzz conn_catalog failure\n"
           "  suite_seed: 0x%016" PRIx64 "\n"
@@ -778,6 +881,7 @@ static void fail_fuzz_case(uint64_t case_seed, size_t lookup_idx,
           "  schema: %s\n"
           "  table: %s\n"
           "  column: %s\n"
+          "  exp_rc: %d\n"
           "  expected: %s\n"
           "  got_rc: %d\n"
           "  got_domain: %s\n",
@@ -785,7 +889,7 @@ static void fail_fuzz_case(uint64_t case_seed, size_t lookup_idx,
           (lookup && lookup->schema) ? lookup->schema : "(null)",
           (lookup && lookup->table) ? lookup->table : "(null)",
           (lookup && lookup->column) ? lookup->column : "(null)",
-          exp_domain ? exp_domain : "(none)", (int)got_rc,
+          (int)exp_rc, exp_domain ? exp_domain : "(none)", (int)got_rc,
           got_domain ? got_domain : "(null)");
   if (err_msg)
     fprintf(stderr, "  error: %s\n", err_msg);
@@ -844,7 +948,7 @@ static void test_valid_random_configs_match_reference(void) {
     unlink(path);
     free(path);
     if (!cat)
-      fail_fuzz_case(case_seed, 0, json, NULL, NULL, ERR, NULL, err);
+      fail_fuzz_case(case_seed, 0, json, NULL, ERR, NULL, ERR, NULL, err);
 
     ConnProfile *cp = NULL;
     ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
@@ -857,17 +961,19 @@ static void test_valid_random_configs_match_reference(void) {
       FuzzLookup lookup = {0};
       fuzz_lookup_generate(&model, &lookup, &lookup_rng);
 
-      const char *exp_domain = fuzz_model_find_domain(
-          &model, lookup.schema, lookup.table, lookup.column);
-      const char *got_domain = NULL;
+      const char *exp_domain = NULL;
+      AdbxTriStatus exp = fuzz_model_find_domain(
+          &model, lookup.schema, lookup.table, lookup.column, &exp_domain);
+      SensDomainOut out = {0};
       AdbxTriStatus got = connp_get_sensitive_domain(
-          cp, lookup.schema, lookup.table, lookup.column, &got_domain);
+          cp, lookup.schema, lookup.table, lookup.column, &out);
 
-      if ((exp_domain && got != YES) || (!exp_domain && got != NO) ||
-          (exp_domain &&
-           (!got_domain || strcmp(exp_domain, got_domain) != 0))) {
-        fail_fuzz_case(case_seed, lookup_ix, json, &lookup, exp_domain, got,
-                       got_domain, NULL);
+      if (got != exp ||
+          (exp == YES &&
+           (!out.domain || strcmp(exp_domain, out.domain) != 0))) {
+        fail_fuzz_case(case_seed, lookup_ix, json, &lookup, exp, exp_domain,
+                       got, out.domain, out.err.msg[0] != '\0' ? out.err.msg
+                                                               : NULL);
       }
 
       fuzz_lookup_clean(&lookup);
