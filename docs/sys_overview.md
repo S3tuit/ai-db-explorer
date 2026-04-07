@@ -156,13 +156,14 @@ If a session expires or the Broker exits, that session state is lost.
 
 ## Sensitive data handling
 
-Sensitive-data handling is driven by per-connection `sensitiveColumns`
+Sensitive-data handling is driven by per-connection `sensitiveDomains`
 configuration.
 
-When a query touches a configured sensitive column, the Broker switches to a
-stricter validation path. If a sensitive value is returned in the result set,
-the Broker does not return the plaintext. It returns an opaque handle instead
-and keeps the underlying value in Broker memory.
+When a query touches a column that belongs to a configured sensitive domain,
+the Broker switches to a stricter validation path. If a sensitive value is
+returned in the result set, the Broker does not return the plaintext. It
+returns an opaque handle instead and keeps the underlying value in Broker
+memory.
 
 Those handles can later be passed back to the Broker in restricted query forms
 so the agent can keep refining a search without learning the original value.

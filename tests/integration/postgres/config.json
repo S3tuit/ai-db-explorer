@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "configNamespace": "IntegrationPostgres",
 
   "safetyPolicy": {
@@ -35,10 +35,14 @@
           "strategy": "randomized"
         }
       },
-      "sensitiveColumns": [
-        "zfighter_intel.scouter_serial",
-        "zfighter_intel.home_coordinates"
-      ]
+      "sensitiveDomains": {
+        "scouter_serial": [
+          "*scouter_serial*"
+        ],
+        "home_coordinates": [
+          "zfighter_intel.home_coordinates"
+        ]
+      }
     },
     {
       "type": "postgres",
@@ -50,9 +54,17 @@
       "safeFunctions": [
         "get_weight"
       ],
-      "sensitiveColumns":[
-        "gym_bros.real_name"
-      ]
+      "sensitiveDomains": {
+        "real_name": [
+          "*real_name"
+        ],
+        "badge_code": [
+          "badge_code"
+        ],
+        "order_code": [
+          "orders.code"
+        ]
+      }
     }
   ]
 }

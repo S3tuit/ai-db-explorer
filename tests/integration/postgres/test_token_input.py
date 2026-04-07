@@ -134,6 +134,40 @@ def test_token_input_happy_path_two_params_from_two_queries():
             shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+def test_token_input_cross_column_same_domain_happy_path():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    try:
+        broker, server, privdir, runtime_dir, _ = do_full_handshake(req_id=215)
+
+        tok_serial = _extract_one_token(
+            server,
+            "tok-cross-col-src",
+            "MyPostgres",
+            "SELECT i.scouter_serial FROM zfighter_intel i WHERE i.fighter_id = 1 LIMIT 1;",
+        )
+
+        resp = send_tokens_tools_call(
+            server,
+            "tok-cross-col-run",
+            "MyPostgres",
+            "SELECT l.sighting_note FROM scouter_logs l "
+            "WHERE l.seen_scouter_serial = $1 ORDER BY l.sighting_note LIMIT 10;",
+            [tok_serial],
+        )
+        data = _assert_tools_call_ok(resp, "tok-cross-col-run")
+        assert data["rows"] == [["Kame house"], ["West City perimeter"]]
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
 def test_token_input_wrong_column_fails():
     broker = None
     server = None
@@ -338,6 +372,7 @@ def test_token_input_runtime_error_does_not_leak_bound_secret():
 def main():
     test_token_input_happy_path_one_param()
     test_token_input_happy_path_two_params_from_two_queries()
+    test_token_input_cross_column_same_domain_happy_path()
     test_token_input_wrong_column_fails()
     test_token_input_fewer_tokens_than_params_fails()
     test_token_input_more_tokens_than_params_fails()

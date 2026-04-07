@@ -660,14 +660,14 @@ BrokerResponse *bresp_create_relation_info(const McpId *id,
         return NULL;
       }
 
-      AdbxTriStatus is_sensitive = connp_is_col_sensitive(
-          profile, info->schema_name, info->relation_name, col->name);
-      if (is_sensitive == ERR) {
+      AdbxTriStatus rc = connp_get_sensitive_domain(
+          profile, info->schema_name, info->relation_name, col->name, NULL);
+      if (rc == ERR) {
         free(sensitive_cols);
         bresp_destroy(bresp);
         return NULL;
       }
-      sensitive_cols[i] = (uint8_t)(is_sensitive == YES ? 1 : 0);
+      sensitive_cols[i] = (uint8_t)(rc == YES ? 1 : 0);
     }
   }
 

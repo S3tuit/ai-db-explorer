@@ -228,8 +228,8 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
       (const ValidatorColPlan *)parr_cat(out.plan.cols, 1);
   ASSERT_TRUE(vcol1 != NULL);
   ASSERT_TRUE(vcol1->kind == VCOL_OUT_TOKEN);
-  ASSERT_TRUE(vcol1->col_id != NULL);
-  ASSERT_TRUE(vcol1->col_id_len > 0);
+  ASSERT_TRUE(vcol1->domain != NULL);
+  ASSERT_TRUE(vcol1->domain_len > 0);
 
   Arena arena = {0};
   ASSERT_TRUE(arena_init(&arena, NULL, NULL) == OK);
@@ -278,9 +278,9 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
   ASSERT_TRUE(st->value != NULL);
   ASSERT_TRUE(st->value_len == strlen("RSSMRA80A01H501U"));
   ASSERT_TRUE(memcmp(st->value, "RSSMRA80A01H501U", st->value_len) == 0);
-  ASSERT_TRUE(st->col_ref != NULL);
-  ASSERT_TRUE(st->col_ref_len == vcol1->col_id_len);
-  ASSERT_TRUE(memcmp(st->col_ref, vcol1->col_id, st->col_ref_len) == 0);
+  ASSERT_TRUE(st->domain != NULL);
+  ASSERT_TRUE(st->domain_len == vcol1->domain_len);
+  ASSERT_TRUE(memcmp(st->domain, vcol1->domain, st->domain_len) == 0);
   ASSERT_TRUE(st->pg_oid == 25u);
 
   qr_destroy(qr);
@@ -356,8 +356,10 @@ static void test_qb_sensitive_col_missing_store_returns_err(void) {
   vq_out_clean(&out);
 }
 
-/* Verifies sensitive-token columns fail closed when plan metadata is missing. */
-static void test_qb_sensitive_col_missing_col_id_returns_err(void) {
+/* Verifies sensitive-token columns fail closed when plan domain metadata is
+ * missing.
+ */
+static void test_qb_sensitive_col_missing_domain_returns_err(void) {
   char sql[] =
       "SELECT u.name, u.fiscal_code FROM users u WHERE u.id = 1 LIMIT 10;";
   ValidateQueryOut out = {0};
@@ -386,12 +388,12 @@ static void test_qb_sensitive_col_missing_col_id_returns_err(void) {
   ASSERT_TRUE(qb_set_col(&qb, 0, "name", "text", 25u) == OK);
   ASSERT_TRUE(qb_set_col(&qb, 1, "fiscal_code", "text", 25u) == OK);
 
-  vcol1->col_id = NULL;
-  vcol1->col_id_len = 0;
+  vcol1->domain = NULL;
+  vcol1->domain_len = 0;
   ASSERT_TRUE(set_cell_plain(&qb, 0, 1, "RSSMRA80A01H501U") == ERR);
 
-  vcol1->col_id = "users.fiscal_code";
-  vcol1->col_id_len = 0;
+  vcol1->domain = "fiscal_code";
+  vcol1->domain_len = 0;
   ASSERT_TRUE(set_cell_plain(&qb, 0, 1, "RSSMRA80A01H501U") == ERR);
 
   qr_destroy(qr);
@@ -411,7 +413,7 @@ int main(void) {
   test_qb_tokenizes_sensitive_column_and_store_roundtrip();
   test_qb_sensitive_null_remains_null();
   test_qb_sensitive_col_missing_store_returns_err();
-  test_qb_sensitive_col_missing_col_id_returns_err();
+  test_qb_sensitive_col_missing_domain_returns_err();
 
   fprintf(stderr, "OK: test_query_result\n");
   return 0;

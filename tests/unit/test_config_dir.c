@@ -14,7 +14,7 @@
 
 static const char TEST_CONFIG_JSON[] =
     "{"
-    "\"version\":\"1.0\","
+    "\"version\":\"1.1\","
     "\"configNamespace\":\"TestNamespace\","
     "\"safetyPolicy\":{},"
     "\"databases\":[{"

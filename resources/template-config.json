@@ -1,5 +1,5 @@
 {
-  "version":"1.0",
+  "version":"1.1",
   "configNamespace":"Project51DevEnv",
 
   "safetyPolicy":{
@@ -22,13 +22,19 @@
       "username":"postgres",
       "database":"postgres",
       "safeFunctions": [
-        "md1",
-        "private.md2"
+        "calc_user_balance",
+        "private.custom_hash"
       ],
-      "sensitiveColumns": [
-        "users.email",
-        "private.users.phone"
-      ]
+      "sensitiveDomains": {
+        "fiscal_code": [
+          "users.fiscal_code",
+          "*_cf"
+        ],
+        "phone": [
+          "private.users.phone",
+          "ph_num"
+        ]
+      }
     },
 
     {

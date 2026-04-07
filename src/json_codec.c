@@ -735,6 +735,97 @@ static int find_value_tok_path(const JsonGetter *jg, const char *path) {
   return -1;
 }
 
+/* Resolves a key path relative to 'jg' or, when 'key' is NULL, returns the
+ * current root token. It borrows 'jg'.
+ * Returns a token index on success, -1 when the keyed value is missing, -2 on
+ * invalid input or malformed token navigation.
+ */
+static int resolve_value_tok_or_root(const JsonGetter *jg, const char *key) {
+  if (!jg)
+    return -2;
+  if (!key) {
+    if (jg->root < 0 || jg->root >= jg->ntok)
+      return -2;
+    return jg->root;
+  }
+  return find_value_tok_path(jg, key);
+}
+
+/* Initializes 'out' as a borrowed JsonGetter view rooted at 'root_tok'. It
+ * borrows the JSON buffer and token storage from 'jg'. When narrowing in
+ * place, it preserves owned token storage so jsget_destroy() remains correct.
+ * Returns OK on success, ERR on invalid input or token index.
+ */
+static AdbxStatus set_view_root(const JsonGetter *jg, int root_tok,
+                                JsonGetter *out) {
+  if (!jg || !out)
+    return ERR;
+  if (root_tok < 0 || root_tok >= jg->ntok)
+    return ERR;
+
+  jsmntok_t *owned_toks = (out == jg) ? out->owned_toks : NULL;
+  out->json = jg->json;
+  out->json_len = jg->json_len;
+  out->toks = jg->toks;
+  out->ntok = jg->ntok;
+  out->root = root_tok;
+  out->owned_toks = owned_toks;
+  return OK;
+}
+
+/* Initializes an array iterator from the token index 'arr_tok'. It borrows
+ * 'jg' and mutates caller-owned 'it'. Explicit JSON null is treated as absent.
+ * Returns YES on success, NO on null, ERR on invalid input or non-array type.
+ */
+static AdbxTriStatus array_iter_begin_from_tok(const JsonGetter *jg, int arr_tok,
+                                               JsonArrIter *it) {
+  if (!jg || !it)
+    return ERR;
+  if (arr_tok < 0 || arr_tok >= jg->ntok)
+    return ERR;
+
+  memset(it, 0, sizeof(*it));
+
+  const jsmntok_t *tv = &jg->toks[arr_tok];
+  if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv))
+    return NO;
+  if (tv->type != JSMN_ARRAY)
+    return ERR;
+
+  it->arr_tok = arr_tok;
+  it->idx = 0;
+  it->count = tv->size;
+  it->next_tok = arr_tok + 1;
+  return YES;
+}
+
+/* Initializes an object-member iterator from token index 'obj_tok'. It borrows
+ * 'jg' and mutates caller-owned 'it'. Explicit JSON null is treated as
+ * absent. Returns YES on success, NO on null, ERR on invalid input or
+ * non-object type.
+ */
+static AdbxTriStatus object_iter_begin_from_tok(const JsonGetter *jg, int obj_tok,
+                                                JsonObjIter *it) {
+  if (!jg || !it)
+    return ERR;
+  if (obj_tok < 0 || obj_tok >= jg->ntok)
+    return ERR;
+
+  memset(it, 0, sizeof(*it));
+
+  const jsmntok_t *tv = &jg->toks[obj_tok];
+  if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv))
+    return NO;
+  if (tv->type != JSMN_OBJECT)
+    return ERR;
+
+  it->obj_tok = obj_tok;
+  it->idx = 0;
+  it->count = tv->size;
+  it->next_tok = obj_tok + 1;
+  return YES;
+}
+
 /*
  * Parses an unsigned 32-bit integer from a JSMN_PRIMITIVE token.
  * Return OK on success, ERR on error/bad input.
@@ -1118,44 +1209,22 @@ AdbxTriStatus jsget_object(const JsonGetter *jg, const char *key,
   if (tv->type != JSMN_OBJECT)
     return ERR;
 
-  // Preserve ownership only for in-place narrowing (out == jg).
-  jsmntok_t *owned_toks = (out == jg) ? out->owned_toks : NULL;
-  out->json = jg->json;
-  out->json_len = jg->json_len;
-  out->toks = jg->toks;
-  out->ntok = jg->ntok;
-  out->root = val_i;
-  out->owned_toks = owned_toks;
+  if (set_view_root(jg, val_i, out) != OK)
+    return ERR;
   return YES;
 }
 
 AdbxTriStatus jsget_array_strings_begin(const JsonGetter *jg, const char *key,
                                         JsonArrIter *it) {
-  if (!jg || !key || !it)
+  if (!jg || !it)
     return ERR;
 
-  memset(it, 0, sizeof(*it));
-
-  int val_i = find_value_tok_path(jg, key);
+  int val_i = resolve_value_tok_or_root(jg, key);
   if (val_i == -1)
     return NO;
   if (val_i == -2)
     return ERR;
-
-  const jsmntok_t *tv = &jg->toks[val_i];
-
-  // treat explicit null as "missing"
-  if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv))
-    return NO;
-
-  if (tv->type != JSMN_ARRAY)
-    return ERR;
-
-  it->arr_tok = val_i;
-  it->idx = 0;
-  it->count = tv->size;
-  it->next_tok = val_i + 1; // first element token
-  return YES;
+  return array_iter_begin_from_tok(jg, val_i, it);
 }
 
 AdbxTriStatus jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
@@ -1189,28 +1258,15 @@ AdbxTriStatus jsget_array_strings_next(const JsonGetter *jg, JsonArrIter *it,
 
 AdbxTriStatus jsget_array_objects_begin(const JsonGetter *jg, const char *key,
                                         JsonArrIter *it) {
-  if (!jg || !key || !it)
+  if (!jg || !it)
     return ERR;
 
-  memset(it, 0, sizeof(*it));
-
-  int val_i = find_value_tok_path(jg, key);
+  int val_i = resolve_value_tok_or_root(jg, key);
   if (val_i == -1)
     return NO;
   if (val_i == -2)
     return ERR;
-
-  const jsmntok_t *tv = &jg->toks[val_i];
-  if (tv->type == JSMN_PRIMITIVE && tok_is_null(jg->json, tv))
-    return NO;
-  if (tv->type != JSMN_ARRAY)
-    return ERR;
-
-  it->arr_tok = val_i;
-  it->idx = 0;
-  it->count = tv->size;
-  it->next_tok = val_i + 1;
-  return YES;
+  return array_iter_begin_from_tok(jg, val_i, it);
 }
 
 AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
@@ -1228,16 +1284,57 @@ AdbxTriStatus jsget_array_objects_next(const JsonGetter *jg, JsonArrIter *it,
   if (te->type != JSMN_OBJECT)
     return ERR;
 
-  // Preserve ownership only for in-place narrowing (out_obj == jg).
-  jsmntok_t *owned_toks = (out_obj == jg) ? out_obj->owned_toks : NULL;
-  out_obj->json = jg->json;
-  out_obj->json_len = jg->json_len;
-  out_obj->toks = jg->toks;
-  out_obj->ntok = jg->ntok;
-  out_obj->root = i;
-  out_obj->owned_toks = owned_toks;
+  if (set_view_root(jg, i, out_obj) != OK)
+    return ERR;
 
   int next = skip_token(jg->toks, jg->ntok, i);
+  if (next < 0)
+    return ERR;
+
+  it->next_tok = next;
+  it->idx++;
+  return YES;
+}
+
+AdbxTriStatus jsget_object_members_begin(const JsonGetter *jg,
+                                         const char *key, JsonObjIter *it) {
+  if (!jg || !it)
+    return ERR;
+
+  int val_i = resolve_value_tok_or_root(jg, key);
+  if (val_i == -1)
+    return NO;
+  if (val_i == -2)
+    return ERR;
+  return object_iter_begin_from_tok(jg, val_i, it);
+}
+
+AdbxTriStatus jsget_object_members_next(const JsonGetter *jg, JsonObjIter *it,
+                                        JsonStrSpan *out_key,
+                                        JsonGetter *out_val) {
+  if (!jg || !it || !out_key || !out_val)
+    return ERR;
+  if (it->idx >= it->count)
+    return NO;
+
+  int key_i = it->next_tok;
+  if (key_i < 0 || key_i >= jg->ntok)
+    return ERR;
+
+  const jsmntok_t *tkey = &jg->toks[key_i];
+  if (tkey->type != JSMN_STRING)
+    return ERR;
+
+  int val_i = key_i + 1;
+  if (val_i < 0 || val_i >= jg->ntok)
+    return ERR;
+
+  out_key->ptr = jg->json + tkey->start;
+  out_key->len = (size_t)(tkey->end - tkey->start);
+  if (set_view_root(jg, val_i, out_val) != OK)
+    return ERR;
+
+  int next = skip_token(jg->toks, jg->ntok, val_i);
   if (next < 0)
     return ERR;
 

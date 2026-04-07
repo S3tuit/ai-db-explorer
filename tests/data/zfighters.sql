@@ -1,8 +1,3 @@
-DROP TABLE IF EXISTS zfighter_intel;
-DROP TABLE IF EXISTS zfighter_registry;
-DROP TABLE IF EXISTS zfighters;
-DROP TABLE IF EXISTS races;
-
 CREATE TABLE races (
   id        INT PRIMARY KEY,
   race_name TEXT NOT NULL UNIQUE,
@@ -18,11 +13,6 @@ CREATE TABLE zfighters (
 
 CREATE INDEX idx_zfighters_race_id ON zfighters(race_id);
 
-CREATE TABLE zfighter_registry (
-  fighter_id     INT PRIMARY KEY REFERENCES zfighters(id) ON UPDATE CASCADE ON DELETE CASCADE,
-  archival_code  TEXT NOT NULL UNIQUE
-);
-
 CREATE TABLE zfighter_intel (
   fighter_id       INT  PRIMARY KEY REFERENCES zfighters(id) ON UPDATE CASCADE ON DELETE CASCADE,
   codename         TEXT NOT NULL,
@@ -30,12 +20,12 @@ CREATE TABLE zfighter_intel (
   home_coordinates TEXT NOT NULL
 );
 
-ALTER TABLE zfighter_intel
-  ADD CONSTRAINT zfighter_intel_fighter_registry_fk
-  FOREIGN KEY (fighter_id)
-  REFERENCES zfighter_registry(fighter_id)
-  ON UPDATE CASCADE
-  ON DELETE CASCADE;
+CREATE TABLE scouter_logs (
+  seen_scouter_serial TEXT NOT NULL,
+  sighting_note       TEXT NOT NULL
+);
+
+CREATE INDEX idx_scouter_logs_scouter_serial ON scouter_logs(seen_scouter_serial);
 
 
 -- =========================
@@ -63,18 +53,6 @@ FROM (
 ) AS v(id, name, race_name, height_cm)
 JOIN races r ON r.race_name = v.race_name;
 
-INSERT INTO zfighter_registry (fighter_id, archival_code)
-SELECT z.id, v.archival_code
-FROM (
-  VALUES
-    ('Goku',   'REG-0001'),
-    ('Vegeta', 'REG-0002'),
-    ('Gohan',  'REG-0003'),
-    ('Trunks', 'REG-0004'),
-    ('Broly',  'REG-0005')
-) AS v(name, archival_code)
-JOIN zfighters z ON z.name = v.name;
-
 INSERT INTO zfighter_intel (fighter_id, codename, scouter_serial, home_coordinates)
 SELECT z.id, v.codename, v.scouter_serial, v.home_coordinates
 FROM (
@@ -86,3 +64,15 @@ FROM (
     ('Broly',  'Berserker', 'SCT-9005-E', 'X:200-Y:900')
 ) AS v(name, codename, scouter_serial, home_coordinates)
 JOIN zfighters z ON z.name = v.name;
+
+INSERT INTO scouter_logs (seen_scouter_serial, sighting_note)
+SELECT v.seen_scouter_serial, v.sighting_note
+FROM (
+  VALUES
+    ('SCT-9001-A', 'West City perimeter'),
+    ('SCT-9002-B', 'Capsule Corp approach'),
+    ('SCT-9003-C', 'Orange Star overflight'),
+    ('SCT-9001-A', 'Kame house'),
+    ('SCT-9004-D', 'Time machine hangar'),
+    ('SCT-9005-E', 'Remote canyon sighting')
+) AS v(seen_scouter_serial, sighting_note);

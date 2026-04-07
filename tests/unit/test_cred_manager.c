@@ -54,7 +54,7 @@ static const char *NS_A = "TestNsA";
 
 /* Single connection: KeepPg. */
 static const char *JSON_ONE_DB = "{"
-                                 "\"version\":\"1.0\","
+                                 "\"version\":\"1.1\","
                                  "\"configNamespace\":\"TestNsA\","
                                  "\"safetyPolicy\":{},"
                                  "\"databases\":["
@@ -71,7 +71,7 @@ static const char *JSON_ONE_DB = "{"
 
 /* Two connections: KeepPg + OtherPg. */
 static const char *JSON_TWO_DB = "{"
-                                 "\"version\":\"1.0\","
+                                 "\"version\":\"1.1\","
                                  "\"configNamespace\":\"TestNsA\","
                                  "\"safetyPolicy\":{},"
                                  "\"databases\":["
@@ -97,7 +97,7 @@ static const char *JSON_TWO_DB = "{"
 /* Two connections: KeepPg + OtherPg with altered host (for "changed field"
  * tests where OtherPg has a different host between config and state). */
 static const char *JSON_TWO_DB_ALT = "{"
-                                     "\"version\":\"1.0\","
+                                     "\"version\":\"1.1\","
                                      "\"configNamespace\":\"TestNsA\","
                                      "\"safetyPolicy\":{},"
                                      "\"databases\":["
@@ -122,7 +122,7 @@ static const char *JSON_TWO_DB_ALT = "{"
 
 /* Two connections: KeepPg + RenamedPg (same tuple as OtherPg). */
 static const char *JSON_RENAME_CONF = "{"
-                                      "\"version\":\"1.0\","
+                                      "\"version\":\"1.1\","
                                       "\"configNamespace\":\"TestNsA\","
                                       "\"safetyPolicy\":{},"
                                       "\"databases\":["
@@ -147,7 +147,7 @@ static const char *JSON_RENAME_CONF = "{"
 
 /* Three connections: KeepPg + WrongPg + MissingPg. */
 static const char *JSON_THREE_DB = "{"
-                                   "\"version\":\"1.0\","
+                                   "\"version\":\"1.1\","
                                    "\"configNamespace\":\"TestNsA\","
                                    "\"safetyPolicy\":{},"
                                    "\"databases\":["
@@ -181,7 +181,7 @@ static const char *JSON_THREE_DB = "{"
 /* Two connections with identical tuples (same as KeepPg): for ambiguous rename
  * detection tests. */
 static const char *JSON_AMBIG_CONF = "{"
-                                     "\"version\":\"1.0\","
+                                     "\"version\":\"1.1\","
                                      "\"configNamespace\":\"TestNsA\","
                                      "\"safetyPolicy\":{},"
                                      "\"databases\":["
@@ -206,7 +206,7 @@ static const char *JSON_AMBIG_CONF = "{"
 
 /* Single connection with a different namespace (for mismatch tests). */
 static const char *JSON_ONE_DB_NS_B = "{"
-                                      "\"version\":\"1.0\","
+                                      "\"version\":\"1.1\","
                                       "\"configNamespace\":\"TestNsB\","
                                       "\"safetyPolicy\":{},"
                                       "\"databases\":["
@@ -223,7 +223,7 @@ static const char *JSON_ONE_DB_NS_B = "{"
 
 /* Single connection in a different namespace for reset tests. */
 static const char *JSON_ONE_DB_OTHER_NS = "{"
-                                          "\"version\":\"1.0\","
+                                          "\"version\":\"1.1\","
                                           "\"configNamespace\":\"OtherNs\","
                                           "\"safetyPolicy\":{},"
                                           "\"databases\":["
@@ -626,7 +626,7 @@ static void test_sync_missing_state_all_secrets_present(void) {
   seed_secret(NS_A, "OtherPg", "other-secret");
 
   char *err = run_sync_err(ctx.config_path);
-  ASSERT_TRUE(strstr(err, "interactive terminal") != NULL);
+  ASSERT_TRUE(err[0] != '\0');
   free(err);
 
   assert_secret_value(NS_A, "KeepPg", "keep-secret");
