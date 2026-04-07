@@ -40,6 +40,12 @@ typedef struct {
   char *column; // owned and never NULL on success
 } FuzzLookup;
 
+typedef enum {
+  FUZZ_CONFLICT_EXACT_EQUIV = 0,
+  FUZZ_CONFLICT_GLOB_EQUIV,
+  FUZZ_CONFLICT_ESCAPED_EQUIV,
+} FuzzConflictKind;
+
 static uint64_t g_suite_seed = 0;
 
 static const char *const g_schema_pool[] = {"public", "private", "crm", "sales",
@@ -156,6 +162,63 @@ static void sb_append_json_hex_escape(StrBuf *sb, unsigned char c) {
 
   AdbxStatus rc = sb_append_bytes(sb, buf, 6);
   ASSERT_TRUE(rc == OK);
+}
+
+/* Appends one JSON string literal that preserves the logical input string
+ * while only perturbing alphabetic case. It borrows all inputs and grows 'sb'
+ * as needed. Aborts on invalid input or append failure.
+ */
+static void sb_append_case_noisy_json_string(StrBuf *sb, const char *input,
+                                             FuzzRng *rng) {
+  ASSERT_TRUE(sb);
+  ASSERT_TRUE(input);
+  ASSERT_TRUE(rng);
+
+  sb_append_char(sb, '"');
+  for (size_t i = 0; input[i] != '\0'; i++) {
+    char c = input[i];
+    if (c >= 'a' && c <= 'z' && rng_bool(rng))
+      c = (char)toupper((unsigned char)c);
+    if ((unsigned char)c < 0x20 || c == '"' || c == '\\') {
+      sb_append_json_hex_escape(sb, (unsigned char)c);
+      continue;
+    }
+    sb_append_char(sb, c);
+  }
+  sb_append_char(sb, '"');
+}
+
+/* Appends one JSON string literal that decodes to the same logical value as
+ * 'input' while guaranteeing that at least one alphanumeric byte is written as
+ * a \uXXXX escape. It borrows all inputs and grows 'sb' as needed. Aborts on
+ * invalid input or append failure.
+ */
+static void sb_append_forced_escaped_json_string(StrBuf *sb, const char *input,
+                                                 FuzzRng *rng) {
+  ASSERT_TRUE(sb);
+  ASSERT_TRUE(input);
+  ASSERT_TRUE(rng);
+
+  int forced = 0;
+  sb_append_char(sb, '"');
+  for (size_t i = 0; input[i] != '\0'; i++) {
+    char c = input[i];
+    if (c >= 'a' && c <= 'z' && rng_bool(rng))
+      c = (char)toupper((unsigned char)c);
+
+    if (!forced && isalnum((unsigned char)c)) {
+      sb_append_json_hex_escape(sb, (unsigned char)c);
+      forced = 1;
+      continue;
+    }
+    if ((unsigned char)c < 0x20 || c == '"' || c == '\\') {
+      sb_append_json_hex_escape(sb, (unsigned char)c);
+      continue;
+    }
+    sb_append_char(sb, c);
+  }
+  ASSERT_TRUE(forced == 1);
+  sb_append_char(sb, '"');
 }
 
 /* Appends one noisy JSON string literal that still decodes to the intended
@@ -280,6 +343,66 @@ static char *make_glob_pattern(const char *exact, FuzzRng *rng) {
   char *out = normalize_pattern_copy(tmp);
   free(tmp);
   ASSERT_TRUE(out != NULL);
+  return out;
+}
+
+/* Returns one owned fully-qualified pattern string for the caller-borrowed
+ * rule using [schema.][table.]column_pat shape. Aborts on invalid input or
+ * allocation failure.
+ */
+static char *fuzz_rule_full_pattern_copy(const FuzzRule *rule) {
+  ASSERT_TRUE(rule);
+  ASSERT_TRUE(rule->column_pat);
+
+  StrBuf sb;
+  sb_init(&sb);
+  if (rule->schema) {
+    sb_append_cstr(&sb, rule->schema);
+    sb_append_char(&sb, '.');
+  }
+  if (rule->table) {
+    sb_append_cstr(&sb, rule->table);
+    sb_append_char(&sb, '.');
+  }
+  sb_append_cstr(&sb, rule->column_pat);
+
+  char *out = dup_or_null(sb_to_cstr(&sb));
+  ASSERT_TRUE(out != NULL);
+  sb_clean(&sb);
+  return out;
+}
+
+/* Returns one owned variant of the normalized glob 'pattern' where one '*'
+ * has been duplicated, so conn_catalog normalization should collapse it back to
+ * the original pattern. Aborts on invalid input or allocation failure.
+ */
+static char *make_glob_conflict_pattern(const char *pattern, FuzzRng *rng) {
+  ASSERT_TRUE(pattern);
+  ASSERT_TRUE(rng);
+
+  size_t n = strlen(pattern);
+  ASSERT_TRUE(n > 0);
+
+  size_t star_count = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (pattern[i] == '*')
+      star_count++;
+  }
+  ASSERT_TRUE(star_count > 0);
+
+  size_t chosen = rng_range(rng, star_count);
+  char *out = (char *)xmalloc(n + 2);
+  size_t w = 0;
+  size_t seen = 0;
+  for (size_t i = 0; i < n; i++) {
+    out[w++] = pattern[i];
+    if (pattern[i] == '*') {
+      if (seen == chosen)
+        out[w++] = '*';
+      seen++;
+    }
+  }
+  out[w] = '\0';
   return out;
 }
 
@@ -490,6 +613,40 @@ static void fuzz_model_generate(FuzzModel *model, uint64_t case_seed) {
   qsort(model->rules, model->n_rules, sizeof(*model->rules), fuzz_rule_cmp);
 }
 
+/* Returns one random rule index matching the requested star shape.
+ * 'want_star' must be -1 for any rule, 0 for exact rules, or 1 for glob
+ * rules. It borrows 'model', uses '*rng', and performs no allocations.
+ * Returns SIZE_MAX when no matching rule exists.
+ */
+static size_t fuzz_pick_rule_idx(const FuzzModel *model, int want_star,
+                                 FuzzRng *rng) {
+  ASSERT_TRUE(model);
+  ASSERT_TRUE(rng);
+  ASSERT_TRUE(want_star >= -1 && want_star <= 1);
+
+  size_t count = 0;
+  for (size_t i = 0; i < model->n_rules; i++) {
+    int has_star = (model->rules[i].star_count > 0) ? 1 : 0;
+    if (want_star != -1 && has_star != want_star)
+      continue;
+    count++;
+  }
+  if (count == 0)
+    return SIZE_MAX;
+
+  size_t want = rng_range(rng, count);
+  for (size_t i = 0; i < model->n_rules; i++) {
+    int has_star = (model->rules[i].star_count > 0) ? 1 : 0;
+    if (want_star != -1 && has_star != want_star)
+      continue;
+    if (want == 0)
+      return i;
+    want--;
+  }
+
+  return SIZE_MAX;
+}
+
 /* Shuffles one caller-owned index array in place using Fisher-Yates.
  * Side effects: mutates 'values' and '*rng'. Aborts on invalid input.
  */
@@ -607,6 +764,93 @@ static char *fuzz_model_emit_noisy_json(const FuzzModel *model,
   ASSERT_TRUE(json != NULL);
   sb_clean(&sb);
   return json;
+}
+
+/* Emits one invalid JSON config derived from a valid model by injecting one
+ * extra domain entry whose pattern normalizes to the same rule as an existing
+ * domain. It borrows 'model', chooses one conflict shape using '*rng', and
+ * returns one caller-owned JSON string plus the chosen kind.
+ * Aborts on invalid input or allocation failure.
+ */
+static char *fuzz_model_emit_noisy_json_with_conflict(
+    const FuzzModel *model, uint64_t case_seed, FuzzConflictKind *out_kind) {
+  ASSERT_TRUE(model);
+  ASSERT_TRUE(model->n_rules > 0);
+  ASSERT_TRUE(out_kind);
+
+  FuzzRng rng = {.state = case_seed ^ UINT64_C(0x434f4e464c494354)};
+  FuzzConflictKind kinds[3];
+  size_t nkinds = 0;
+
+  if (fuzz_pick_rule_idx(model, 0, &rng) != SIZE_MAX)
+    kinds[nkinds++] = FUZZ_CONFLICT_EXACT_EQUIV;
+  if (fuzz_pick_rule_idx(model, 1, &rng) != SIZE_MAX)
+    kinds[nkinds++] = FUZZ_CONFLICT_GLOB_EQUIV;
+  kinds[nkinds++] = FUZZ_CONFLICT_ESCAPED_EQUIV;
+  ASSERT_TRUE(nkinds > 0);
+
+  FuzzConflictKind kind = kinds[rng_range(&rng, nkinds)];
+  *out_kind = kind;
+
+  size_t rule_ix = SIZE_MAX;
+  if (kind == FUZZ_CONFLICT_EXACT_EQUIV)
+    rule_ix = fuzz_pick_rule_idx(model, 0, &rng);
+  else if (kind == FUZZ_CONFLICT_GLOB_EQUIV)
+    rule_ix = fuzz_pick_rule_idx(model, 1, &rng);
+  else
+    rule_ix = fuzz_pick_rule_idx(model, -1, &rng);
+  ASSERT_TRUE(rule_ix != SIZE_MAX);
+
+  char *full_pat = fuzz_rule_full_pattern_copy(&model->rules[rule_ix]);
+  ASSERT_TRUE(full_pat != NULL);
+
+  char *conflict_pat = NULL;
+  if (kind == FUZZ_CONFLICT_GLOB_EQUIV) {
+    conflict_pat = make_glob_conflict_pattern(full_pat, &rng);
+  } else {
+    conflict_pat = dup_or_null(full_pat);
+  }
+  ASSERT_TRUE(conflict_pat != NULL);
+
+  StrBuf pat_sb;
+  sb_init(&pat_sb);
+  if (kind == FUZZ_CONFLICT_ESCAPED_EQUIV) {
+    sb_append_forced_escaped_json_string(&pat_sb, conflict_pat, &rng);
+  } else {
+    sb_append_case_noisy_json_string(&pat_sb, conflict_pat, &rng);
+  }
+
+  char *json = fuzz_model_emit_noisy_json(model, case_seed);
+  ASSERT_TRUE(json != NULL);
+  size_t json_len = strlen(json);
+  ASSERT_TRUE(json_len >= 4);
+  ASSERT_TRUE(memcmp(json + json_len - 4, "}}]}", 4) == 0);
+
+  const char *frag_mid = ",\"conflict_domain\":[";
+  const char *frag_tail = "]";
+  size_t pat_len = strlen(sb_to_cstr(&pat_sb));
+  size_t out_len = (json_len - 4) + strlen(frag_mid) + pat_len +
+                   strlen(frag_tail) + 4;
+  char *out = (char *)xmalloc(out_len + 1);
+
+  size_t w = 0;
+  memcpy(out + w, json, json_len - 4);
+  w += json_len - 4;
+  memcpy(out + w, frag_mid, strlen(frag_mid));
+  w += strlen(frag_mid);
+  memcpy(out + w, sb_to_cstr(&pat_sb), pat_len);
+  w += pat_len;
+  memcpy(out + w, frag_tail, strlen(frag_tail));
+  w += strlen(frag_tail);
+  memcpy(out + w, "}}]}", 4);
+  w += 4;
+  out[w] = '\0';
+
+  sb_clean(&pat_sb);
+  free(conflict_pat);
+  free(full_pat);
+  free(json);
+  return out;
 }
 
 /* Matches one normalized wildcard pattern against one normalized candidate
@@ -898,6 +1142,38 @@ static void fail_fuzz_case(uint64_t case_seed, size_t lookup_idx,
   exit(1);
 }
 
+/* Prints one invalid-config fuzz failure and terminates the process so the
+ * failing seed and injected conflict kind remain visible in CI logs.
+ * It borrows all inputs and does not return.
+ */
+static void fail_invalid_fuzz_case(uint64_t case_seed, FuzzConflictKind kind,
+                                   const char *json, const char *err) {
+  const char *kind_name = "unknown";
+  switch (kind) {
+  case FUZZ_CONFLICT_EXACT_EQUIV:
+    kind_name = "exact_equivalent";
+    break;
+  case FUZZ_CONFLICT_GLOB_EQUIV:
+    kind_name = "glob_equivalent";
+    break;
+  case FUZZ_CONFLICT_ESCAPED_EQUIV:
+    kind_name = "escaped_equivalent";
+    break;
+  }
+
+  fprintf(stderr,
+          "fuzz conn_catalog invalid-config failure\n"
+          "  suite_seed: 0x%016" PRIx64 "\n"
+          "  case_seed: 0x%016" PRIx64 "\n"
+          "  conflict_kind: %s\n",
+          g_suite_seed, case_seed, kind_name);
+  if (err)
+    fprintf(stderr, "  error: %s\n", err);
+  if (json)
+    fprintf(stderr, "  json: %s\n", json);
+  exit(1);
+}
+
 /* Initializes the fuzz-suite seed. When ADBX_FUZZ_SUITE_SEED is set, it uses
  * that value (base 0, so hex is accepted). Otherwise it mixes current wall
  * time with process id to produce a different seed on each run.
@@ -986,14 +1262,52 @@ static void test_valid_random_configs_match_reference(void) {
   }
 }
 
-// TODO: maybe random conflicting normalized patterns across different domains
-// should reject
+/* Generates valid canonical models, injects one random cross-domain pattern
+ * conflict after normalization, and asserts that catalog parsing fails with
+ * the expected sensitiveDomains duplicate-pattern error.
+ */
+static void test_invalid_random_conflicting_patterns_reject(void) {
+  FuzzRng suite_rng = {.state = g_suite_seed ^ UINT64_C(0x17c1f0bada55eedd)};
+
+  for (size_t case_ix = 0; case_ix < FUZZ_CONFIG_CASES; case_ix++) {
+    uint64_t case_seed = rng_next_u64(&suite_rng);
+    FuzzModel model = {0};
+    fuzz_model_generate(&model, case_seed);
+
+    FuzzConflictKind kind = FUZZ_CONFLICT_EXACT_EQUIV;
+    char *json = fuzz_model_emit_noisy_json_with_conflict(&model, case_seed,
+                                                          &kind);
+    ASSERT_TRUE(json != NULL);
+
+    char *path = write_tmp_config(json);
+    ASSERT_TRUE(path != NULL);
+
+    char *err = NULL;
+    ConnCatalog *cat = catalog_load_from_file(path, &err);
+    unlink(path);
+    free(path);
+
+    if (cat != NULL || err == NULL ||
+        strstr(err, "same normalized pattern resolves to different domains") ==
+            NULL ||
+        strstr(err, "sensitiveDomains") == NULL) {
+      if (cat)
+        catalog_destroy(cat);
+      fail_invalid_fuzz_case(case_seed, kind, json, err);
+    }
+
+    free(err);
+    free(json);
+    fuzz_model_clean(&model);
+  }
+}
 
 int main(void) {
   init_suite_seed();
   fprintf(stderr, "test_fuzz_conn_catalog suite_seed=0x%016" PRIx64 "\n",
           g_suite_seed);
   test_valid_random_configs_match_reference();
+  test_invalid_random_conflicting_patterns_reject();
   fprintf(stderr, "OK: test_fuzz_conn_catalog\n");
   return 0;
 }

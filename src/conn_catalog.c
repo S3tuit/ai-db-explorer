@@ -1030,8 +1030,8 @@ static AdbxStatus parse_db_entry(ConnCatalog *cat, const JsonGetter *jg,
       "username",      "database",       "options", "sensitiveDomains",
       "safeFunctions", "safetyPolicy"};
   JsonStrSpan unknown = {0};
-  AdbxTriStatus vrc = jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys),
-                                                 &unknown);
+  AdbxTriStatus vrc =
+      jsget_top_level_validation(jg, NULL, keys, ARRLEN(keys), &unknown);
   if (vrc != YES) {
     set_parse_unknown_key_err(err_out, db_path, &unknown, "in database entry");
     return ERR;
@@ -1230,8 +1230,7 @@ static AdbxTriStatus parse_version(const JsonGetter *jg) {
   if (rc != YES)
     return ERR;
 
-  AdbxTriStatus ok =
-      (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) ? YES : NO;
+  AdbxTriStatus ok = (strcmp(ver, CURR_CONN_CAT_VERSION) == 0) ? YES : NO;
   free(ver);
   return ok;
 }
@@ -1454,7 +1453,8 @@ static AdbxTriStatus glob_match_column_pattern(const char *pattern,
 /* Searches one sensitive-rule bucket and writes '*out_domain', if not NULL, to
  * a caller-borrowed string identifying the sensitive domain. Returns YES on
  * first matching rule, NO when no rule matches, ERR on invalid input or
- * malformed rule state.
+ * malformed rule state. This intentionally uses a linear scan because
+ * sensitive-domain configs are expected to stay small in practice.
  */
 static AdbxTriStatus
 sensitive_bucket_find_domain(const SensitiveRuleBucket *bucket,
@@ -1533,22 +1533,19 @@ static void sensitive_lookup_out_set_err(SensDomainOut *out,
   va_end(ap);
 }
 
-/* Scans one schema-qualified bucket while ignoring schema, and collects one
- * unique matching domain across all schemas for the caller-supplied
- * table/column pair. It borrows all inputs and writes the borrowed unique
- * domain through 'inout_domain' when provided. When it detects a conflicting
- * second domain, it writes that borrowed domain through
- * 'out_conflict_domain' when provided.
- * Side effects: mutates '*inout_domain' when it discovers the first match.
- * Error semantics: returns YES when at least one rule matches without domain
- * conflict, NO when nothing matches, ERR on invalid input, malformed rule
- * state, or conflicting matched domains.
+/* Scans one schema-qualified bucket while ignoring schema and collects the
+ * matching domains. If '*inout_domain' is NULL, this assigns the first match to
+ * it. If it's not NULL, this makes sure the domains are the same. Collects one
+ * In any case, when it detects a conflicting second domain, it writes that
+ * borrowed domain through 'out_conflict_domain' when provided. Returns YES when
+ * at least one rule matches without domain conflict, NO when nothing matches,
+ * ERR on invalid input, malformed rule state, or conflicting matched domains.
+ * This also uses a linear scan intentionally because configs are expected to
+ * stay small.
  */
-static AdbxTriStatus
-sensitive_bucket_collect_unique_domain(const SensitiveRuleBucket *bucket,
-                                       const char *table, const char *column,
-                                       const char **inout_domain,
-                                       const char **out_conflict_domain) {
+static AdbxTriStatus sensitive_bucket_collect_unique_domain(
+    const SensitiveRuleBucket *bucket, const char *table, const char *column,
+    const char **inout_domain, const char **out_conflict_domain) {
   if (!bucket || !table || !column || !inout_domain)
     return ERR;
   if (out_conflict_domain)
@@ -1609,6 +1606,10 @@ AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
   const char *domain = NULL;
   AdbxTriStatus rc = NO;
   if (schema_norm) {
+    // If the input is schema-qualified we just have to search the buckets in
+    // precedence order; from the most specific to the least.
+    // We return on first match since we handle schema-qualified conflicts at
+    // parse time.
     rc = sensitive_bucket_find_domain(&pol->exact_stc, schema_norm, table,
                                       column, &domain);
     if (rc != NO)
@@ -1636,6 +1637,10 @@ AdbxTriStatus connp_get_sensitive_domain(const ConnProfile *cp,
     return rc;
   }
 
+  // If the input is not schema-qualified we cannot be sure about which schema
+  // it refers to since we don't resolve search path. Thus, we first schan the
+  // table-column and column groups, then make sure that inside the
+  // schema-qualified groups we don't get a conflicting domain.
   const char *tc_domain = NULL;
   rc = sensitive_bucket_find_domain(&pol->exact_tc, NULL, table, column,
                                     &tc_domain);

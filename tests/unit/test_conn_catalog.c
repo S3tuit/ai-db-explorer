@@ -1326,6 +1326,40 @@ static void test_sensitive_domains_v11_underqualified_glob_stc_ambiguous(void) {
   free(err);
 }
 
+/* Ensures underqualified table.column fails closed when one schema-qualified
+ * exact rule and one schema-qualified glob rule match different domains.
+ */
+static void
+test_sensitive_domains_v11_underqualified_exact_and_glob_stc_ambiguous(void) {
+  char *err = NULL;
+  ConnCatalog *cat = load_sensitive_domains_catalog_fmt(
+      &err, "dcdc", "domain1", "schema1.tab1.col1", "domain2",
+      "schema2.tab1.col*");
+  ASSERT_TRUE(cat != NULL);
+  ASSERT_TRUE(err == NULL);
+
+  ConnProfile *cp = catalog_get_by_name(cat, "SensitiveDomainsDb");
+  ASSERT_TRUE(cp != NULL);
+
+  assert_sensitive_domain_lookup(cp, "schema1", "tab1", "col1", YES, "domain1");
+  assert_sensitive_domain_lookup(cp, "schema2", "tab1", "col1", YES, "domain2");
+
+  SensDomainOut out = {
+      .domain = "stale",
+      .err = {.code = CONNCAT_ERR_INTERNAL, .msg = "stale"},
+  };
+  ASSERT_TRUE(connp_get_sensitive_domain(cp, NULL, "tab1", "col1", &out) ==
+              ERR);
+  ASSERT_TRUE(out.domain == NULL);
+  ASSERT_TRUE(out.err.code == CONNCAT_ERR_AMBIGUOUS_DOMAIN);
+  ASSERT_TRUE(strstr(out.err.msg, "tab1.col1") != NULL);
+  ASSERT_TRUE(strstr(out.err.msg, "domain1") != NULL);
+  ASSERT_TRUE(strstr(out.err.msg, "domain2") != NULL);
+
+  catalog_destroy(cat);
+  free(err);
+}
+
 /* Ensures underqualified table.column falls back to one unique schema-
  * qualified rule when no table/column or column-only rules match.
  */
@@ -1464,6 +1498,7 @@ int main(void) {
   test_sensitive_domains_v11_glob_prefers_lexicographic();
   test_sensitive_domains_v11_underqualified_exact_stc_ambiguous();
   test_sensitive_domains_v11_underqualified_glob_stc_ambiguous();
+  test_sensitive_domains_v11_underqualified_exact_and_glob_stc_ambiguous();
   test_sensitive_domains_v11_underqualified_unique_stc_fallback();
   test_sensitive_domains_v11_underqualified_tc_and_stc_agree();
   test_connp_get_sensitive_domain_shapes();

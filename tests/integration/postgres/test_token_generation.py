@@ -55,7 +55,6 @@ def _assert_is_token(token, exp_connection):
     assert generation >= 0
     assert index >= 0
 
-
 def test_my_postgres_randomized_same_value_yields_different_tokens():
     broker = None
     server = None
@@ -134,6 +133,86 @@ def test_another_postgres_deterministic_same_value_yields_same_token():
 
         resp2 = send_tools_call(server, "another-det-2", "AnotherPostgres", q)
         data2 = _assert_tools_call_ok(resp2, "another-det-2")
+
+        tok1 = data1["rows"][0][0]
+        tok2 = data2["rows"][0][0]
+        assert tok1 != "Angelo"
+        assert tok2 != "Angelo"
+        _assert_is_token(tok1, "AnotherPostgres")
+        _assert_is_token(tok2, "AnotherPostgres")
+        assert tok1 == tok2
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def test_another_postgres_same_value_different_domains_yield_different_tokens():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    try:
+        broker, server, privdir, runtime_dir, _ = do_full_handshake(req_id=125)
+
+        resp1 = send_tools_call(
+            server,
+            "another-diff-dom-1",
+            "AnotherPostgres",
+            "SELECT g.badge_code FROM gym_bros g WHERE g.id = 2 LIMIT 1;",
+        )
+        data1 = _assert_tools_call_ok(resp1, "another-diff-dom-1")
+
+        resp2 = send_tools_call(
+            server,
+            "another-diff-dom-2",
+            "AnotherPostgres",
+            "SELECT o.code FROM orders o WHERE o.description = 'Whey' LIMIT 1;",
+        )
+        data2 = _assert_tools_call_ok(resp2, "another-diff-dom-2")
+
+        tok1 = data1["rows"][0][0]
+        tok2 = data2["rows"][0][0]
+        assert tok1 != "002"
+        assert tok2 != "002"
+        _assert_is_token(tok1, "AnotherPostgres")
+        _assert_is_token(tok2, "AnotherPostgres")
+        assert tok1 != tok2
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def test_another_postgres_same_value_same_domain_yields_same_token():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    try:
+        broker, server, privdir, runtime_dir, _ = do_full_handshake(req_id=126)
+
+        resp1 = send_tools_call(
+            server,
+            "another-same-dom-1",
+            "AnotherPostgres",
+            "SELECT g.real_name FROM gym_bros g WHERE g.id = 2 LIMIT 1;",
+        )
+        data1 = _assert_tools_call_ok(resp1, "another-same-dom-1")
+
+        resp2 = send_tools_call(
+            server,
+            "another-same-dom-2",
+            "AnotherPostgres",
+            "SELECT l.athlete_real_name FROM lifts l WHERE l.gym_bro_id = 2 LIMIT 1;",
+        )
+        data2 = _assert_tools_call_ok(resp2, "another-same-dom-2")
 
         tok1 = data1["rows"][0][0]
         tok2 = data2["rows"][0][0]
@@ -262,6 +341,8 @@ def main():
     test_my_postgres_randomized_same_value_yields_different_tokens()
     test_my_postgres_only_sensitive_columns_are_tokenized()
     test_another_postgres_deterministic_same_value_yields_same_token()
+    test_another_postgres_same_value_different_domains_yield_different_tokens()
+    test_another_postgres_same_value_same_domain_yields_same_token()
     test_another_postgres_only_sensitive_columns_are_tokenized()
     test_my_postgres_run_sql_query_tokens_still_masks_sensitive_output()
     test_another_postgres_run_sql_query_tokens_still_masks_sensitive_output()
