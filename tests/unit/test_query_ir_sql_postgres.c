@@ -213,19 +213,31 @@ static void test_pg_set_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 8. Recursive CTE should be rejected. */
-static void test_pg_recursive_cte_rejected(void) {
-  const char *sql = "WITH RECURSIVE t(n) AS ("
-                    "  SELECT 1 "
-                    "  UNION ALL "
-                    "  SELECT n+1 FROM t WHERE n < 5"
+/* 8. WITH RECURSIVE should parse like a regular CTE. */
+static void test_pg_recursive_cte(void) {
+  const char *sql = "WITH RECURSIVE t AS ("
+                    "  SELECT p.id AS id "
+                    "  FROM private.people AS p"
                     ") "
-                    "SELECT t.n AS n FROM t LIMIT 10;";
+                    "SELECT t.id AS id "
+                    "FROM t AS t "
+                    "LIMIT 10;";
 
   QirQueryHandle h = {0};
   parse_sql_postgres(sql, &h);
+
   ASSERT_TRUE(h.q != NULL);
-  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "t");
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "id");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "t", "id");
+  qir_touch_report_destroy(tr);
+
   qir_handle_destroy(&h);
 }
 
@@ -347,6 +359,37 @@ static void test_pg_cast_chains(void) {
   qir_handle_destroy(&h);
 }
 
+/* 16. ILIKE should normalize to LIKE-style predicates in IR. */
+static void test_pg_ilike_operators(void) {
+  const char *sql = "SELECT p.name AS name "
+                    "FROM private.people AS p "
+                    "WHERE p.name ILIKE $1 OR p.region NOT ILIKE $2 "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_OR);
+
+  const QirExpr *lhs = h.q->where->u.bin.l;
+  const QirExpr *rhs = h.q->where->u.bin.r;
+  ASSERT_TRUE(lhs != NULL);
+  ASSERT_TRUE(rhs != NULL);
+  ASSERT_TRUE(lhs->kind == QIR_EXPR_LIKE);
+  ASSERT_TRUE(lhs->u.bin.r != NULL);
+  ASSERT_TRUE(lhs->u.bin.r->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(lhs->u.bin.r->u.param_index == 1);
+  ASSERT_TRUE(rhs->kind == QIR_EXPR_NOT_LIKE);
+  ASSERT_TRUE(rhs->u.bin.r != NULL);
+  ASSERT_TRUE(rhs->u.bin.r->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(rhs->u.bin.r->u.param_index == 2);
+
+  qir_handle_destroy(&h);
+}
+
 /*------------ CURRENTLY NOT SUPPORTED BUT WE MAY IN THE FUTURE --------------*/
 
 static void test_pg_interval_literal_rejected(void) {
@@ -397,7 +440,7 @@ int main(void) {
   test_pg_copy_rejected();
   test_pg_do_rejected();
   test_pg_set_rejected();
-  test_pg_recursive_cte_rejected();
+  test_pg_recursive_cte();
   test_pg_quoted_identifiers();
   test_pg_any_all_as_in();
   test_pg_row_comparison_rejected();
@@ -405,6 +448,7 @@ int main(void) {
   test_pg_set_returning_rejected();
   test_pg_json_operator_touch();
   test_pg_cast_chains();
+  test_pg_ilike_operators();
   test_pg_interval_literal_rejected();
   test_pg_array_literal_rejected();
   test_pg_bitwise_op_rejected();

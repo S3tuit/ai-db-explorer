@@ -1030,9 +1030,19 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, Arena *a, QirQuery *q) {
     kind = QIR_EXPR_LIKE;
   else if (strcmp(op, "LIKE") == 0)
     kind = QIR_EXPR_LIKE;
+  // QueryIR does not distinguish case-sensitive from case-insensitive
+  // pattern matching; both are validated as LIKE-style predicates.
+  else if (strcmp(op, "~~*") == 0)
+    kind = QIR_EXPR_LIKE;
+  else if (strcmp(op, "ILIKE") == 0)
+    kind = QIR_EXPR_LIKE;
   else if (strcmp(op, "!~~") == 0)
     kind = QIR_EXPR_NOT_LIKE;
   else if (strcmp(op, "NOT LIKE") == 0)
+    kind = QIR_EXPR_NOT_LIKE;
+  else if (strcmp(op, "!~~*") == 0)
+    kind = QIR_EXPR_NOT_LIKE;
+  else if (strcmp(op, "NOT ILIKE") == 0)
     kind = QIR_EXPR_NOT_LIKE;
   else if (strcmp(op, "->") == 0 || strcmp(op, "->>") == 0 ||
            strcmp(op, "#>") == 0 || strcmp(op, "#>>") == 0) {
@@ -1998,10 +2008,6 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
   // CTEs
   JsonGetter wcjg = {0};
   if (jsget_object(jg, "withClause", &wcjg) == YES) {
-    int rec = 0;
-    if (jsget_bool01(&wcjg, "recursive", &rec) == YES && rec) {
-      qir_set_status(q, a, QIR_UNSUPPORTED, "recursive CTE not supported");
-    }
     PtrVec ctes = {0};
     if (jsget_array_objects_begin(&wcjg, "ctes", &it) == YES) {
       JsonGetter elem = {0};
