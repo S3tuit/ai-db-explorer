@@ -32,6 +32,7 @@ AdbxStatus qir_handle_init(QirQueryHandle *h) {
   q->status = QIR_OK;
   q->status_reason = NULL;
   q->kind = QIR_STMT_SELECT;
+  q->stmt_flags = QIR_STMTF_NONE;
   q->limit_value = -1;
   h->q = q;
   return OK;

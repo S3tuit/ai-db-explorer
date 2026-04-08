@@ -194,7 +194,7 @@ AdbxStatus qb_set_col(QueryResultBuilder *qb, uint32_t col, const char *name,
     return ERR;
 
   QRColType kind = QRCOL_V_PLAINTEXT;
-  if (qb->plan) {
+  if (qb->plan && qb->plan->mode == VPLAN_MODE_SELECT) {
     const ValidatorColPlan *vcol =
         (const ValidatorColPlan *)parr_cat(qb->plan->cols, col);
     if (!vcol)
@@ -225,11 +225,10 @@ AdbxTriStatus qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
   if (!qb->plan)
     return qr_set_cell(qb->qr, row, col, value, v_len);
 
-  const ValidatorColPlan *vcol =
-      (const ValidatorColPlan *)parr_cat(qb->plan->cols, col);
-  if (!vcol)
+  const QRColumn *qcol = qr_get_col(qb->qr, col);
+  if (!qcol)
     return ERR;
-  if (vcol->kind != VCOL_OUT_TOKEN) {
+  if (qcol->value_type != QRCOL_V_TOKEN) {
     // not sensitive
     return qr_set_cell(qb->qr, row, col, value, v_len);
   }
@@ -240,10 +239,10 @@ AdbxTriStatus qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
   if (!qb->store)
     return ERR;
 
-  const QRColumn *qcol = qr_get_col(qb->qr, col);
-  if (!qcol)
+  const ValidatorColPlan *vcol =
+      (const ValidatorColPlan *)parr_cat(qb->plan->cols, col);
+  if (!vcol)
     return ERR;
-
   SensitiveTokIn in = {
       .value = value,
       .value_len = (uint32_t)v_len,

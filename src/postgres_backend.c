@@ -249,6 +249,7 @@ static inline QirQuery *pg_qir_new_query(Arena *a) {
     return NULL;
   q->status = QIR_OK;
   q->kind = QIR_STMT_SELECT;
+  q->stmt_flags = QIR_STMTF_NONE;
   q->limit_value = -1;
   return q;
 }
@@ -1317,6 +1318,57 @@ static AdbxStatus pg_parse_typename(const JsonGetter *jg, Arena *a,
 static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
                                        QirQuery *q);
 
+/* Parses an EXPLAIN wrapper and maps the inner supported statement to QueryIR.
+ * It borrows the JSON object and mutates the caller-owned query.
+ * Side effects: sets statement wrapper flags and parses the wrapped SELECT.
+ * We intentionally record only the ANALYZE option because it changes
+ * execution semantics; other EXPLAIN options are accepted but not modeled.
+ * Returns OK on success, ERR on allocation failure.
+ */
+static AdbxStatus pg_parse_explain_stmt(const JsonGetter *jg, Arena *a,
+                                        QirQuery *q) {
+  if (!jg || !a || !q)
+    return ERR;
+
+  qir_query_add_stmt_flags(q, (uint32_t)QIR_STMTF_EXPLAIN);
+
+  JsonArrIter it = {0};
+  if (jsget_array_objects_begin(jg, "options", &it) == YES) {
+    JsonGetter elem = {0};
+    int rc = 0;
+    while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
+      JsonGetter dejg = {0};
+      if (jsget_object(&elem, "DefElem", &dejg) != YES) {
+        qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported EXPLAIN option");
+        return OK;
+      }
+
+      JsonStrSpan defname;
+      if (jsget_string_span(&dejg, "defname", &defname) != YES)
+        return ERR;
+      if (memcmp(defname.ptr, "analyze", defname.len) == 0) {
+        qir_query_add_stmt_flags(q, (uint32_t)QIR_STMTF_ANALYZE);
+      }
+    }
+    if (rc == ERR)
+      return ERR;
+  }
+
+  JsonGetter qjg = {0};
+  if (jsget_object(jg, "query", &qjg) != YES) {
+    qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported EXPLAIN target");
+    return OK;
+  }
+
+  JsonGetter seljg = {0};
+  if (jsget_object(&qjg, "SelectStmt", &seljg) != YES) {
+    qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported EXPLAIN target");
+    return OK;
+  }
+
+  return pg_parse_select_stmt(&seljg, a, q);
+}
+
 /* Parses an expression node into a QirExpr.
  * Ownership: returned expression is arena-owned.
  * Side effects: may set query flags.
@@ -2164,8 +2216,21 @@ static AdbxStatus pg_make_query_ir(DbBackend *db, const char *sql,
       return ERR;
     }
   } else {
-    qir_set_status(q, &out->arena, QIR_UNSUPPORTED,
-                   "unsupported statement type");
+    JsonGetter exjg = {0};
+    if (jsget_object(&stg, "ExplainStmt", &exjg) == YES) {
+      if (pg_parse_explain_stmt(&exjg, &out->arena, q) != OK) {
+        ADBX_ERR_SETF(out_err, DBERR_GENERIC,
+                      "postgres query-ir creation failed while building the "
+                      "QueryIR tree.");
+        qir_handle_destroy(out);
+        jsget_destroy(&root);
+        pg_query_free_parse_result(res);
+        return ERR;
+      }
+    } else {
+      qir_set_status(q, &out->arena, QIR_UNSUPPORTED,
+                     "unsupported statement type");
+    }
   }
 
 free_pg_parse_result:
@@ -3125,7 +3190,8 @@ fail_bad_input:
 }
 
 // This generated allowlist is a pure-function policy input. Keep time/random
-// and other server-state-dependent functions out of docs/pg_safe_functions.json.
+// and other server-state-dependent functions out of
+// docs/pg_safe_functions.json.
 #include "pg_safe_func.generated.inc"
 
 static const DbSafeFuncList *pg_safe_functions(DbBackend *db) {

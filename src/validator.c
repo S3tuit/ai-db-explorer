@@ -117,6 +117,7 @@ static AdbxStatus vq_out_reset(ValidateQueryOut *out) {
   if (!out->plan.cols)
     return ERR;
 
+  out->plan.mode = VPLAN_MODE_SELECT;
   out->err.code = VERR_NONE;
   sb_reset(&out->err.msg);
   return OK;
@@ -201,9 +202,10 @@ validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
   return YES;
 }
 
-/* Builds the output column plan aligned with main SELECT output indexes.
+/* Builds the output-column policy for one validated query.
  * It borrows query and policy metadata and writes into 'out_plan'.
- * Side effects: appends entries to out_plan->cols.
+ * Side effects: appends entries to out_plan->cols or switches the plan into
+ * passthrough-plaintext mode for backend-shaped results like EXPLAIN.
  * Error semantics: returns OK on success, ERR on invalid input/allocation
  * failures; may set validator errors.
  */
@@ -213,6 +215,13 @@ static AdbxStatus validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
   assert(q != NULL);
   assert(out_plan != NULL);
   assert(out_plan->cols != NULL);
+
+  if (qir_query_is_explain(q)) {
+    // EXPLAIN returns backend-generated plan rows rather than the wrapped
+    // SELECT output columns, so the validator must not assume column alignment.
+    out_plan->mode = VPLAN_MODE_PASSTHROUGH_PLAINTEXT;
+    return OK;
+  }
 
   for (uint32_t i = 0; i < q->nselect; i++) {
     assert(q->select_items != NULL);
@@ -1549,6 +1558,7 @@ AdbxStatus vq_out_init(ValidateQueryOut *out) {
 
   memset(out, 0, sizeof(*out));
   sb_init(&out->err.msg);
+  out->plan.mode = VPLAN_MODE_SELECT;
   out->plan.cols = parr_create(sizeof(ValidatorColPlan));
   if (!out->plan.cols)
     return ERR;
@@ -1606,6 +1616,17 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     const char *reason =
         (q && q->status_reason) ? q->status_reason : "Invalid query.";
     set_err(&ctx, VERR_UNSUPPORTED_QUERY, reason);
+    qir_handle_destroy(&h);
+    free(param_used);
+    sb_clean(&ctx.scratch);
+    return ERR;
+  }
+  if (qir_query_is_explain(q) && req->nparams != 0) {
+    // EXPLAIN output can echo bound parameter values, so we fail closed and
+    // forbid input parameters for EXPLAIN and EXPLAIN ANALYZE.
+    set_err(&ctx, VERR_EXPLAIN_PARAMS_FORBIDDEN,
+            "EXPLAIN and EXPLAIN ANALYZE do not allow bound input "
+            "parameters.");
     qir_handle_destroy(&h);
     free(param_used);
     sb_clean(&ctx.scratch);

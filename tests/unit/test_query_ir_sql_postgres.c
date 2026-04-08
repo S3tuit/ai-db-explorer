@@ -32,6 +32,19 @@ static void assert_ident_eq(const QirIdent *id, const char *expected,
 #define ASSERT_IDENT_EQ(id, expected)                                          \
   assert_ident_eq((id), (expected), __FILE__, __LINE__)
 
+/* Asserts that the parsed statement flags match one EXPLAIN expectation. */
+static void assert_stmt_flags(const QirQuery *q, bool explain, bool analyze,
+                              const char *file, int line) {
+  ASSERT_TRUE_AT(q != NULL, file, line);
+  ASSERT_TRUE_AT(qir_query_is_explain(q) == explain, file, line);
+  ASSERT_TRUE_AT(qir_query_is_explain_analyze(q) == analyze, file, line);
+  if (analyze) {
+    ASSERT_TRUE_AT(qir_query_is_explain(q), file, line);
+  }
+}
+#define ASSERT_STMT_FLAGS(q, explain, analyze)                                 \
+  assert_stmt_flags((q), (explain), (analyze), __FILE__, __LINE__)
+
 /* Extracts a touch report for a parsed query.
  * Ownership: caller must destroy the report with qir_touch_report_destroy().
  * Side effects: allocates memory for the report.
@@ -282,7 +295,93 @@ static void test_pg_any_all_as_in(void) {
   qir_handle_destroy(&h);
 }
 
-/* 11. Row comparison should be rejected. */
+/* 11. EXPLAIN SELECT should preserve the wrapped SELECT in IR. */
+static void test_pg_explain_select(void) {
+  const char *sql = "EXPLAIN SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, false);
+  ASSERT_TRUE(h.q->limit_value == 10);
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* 12. EXPLAIN ANALYZE should set both EXPLAIN and ANALYZE flags. */
+static void test_pg_explain_analyze_select(void) {
+  const char *sql = "EXPLAIN ANALYZE SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, true);
+
+  qir_handle_destroy(&h);
+}
+
+/* 13. EXPLAIN ANALYSE should map to the same ANALYZE flag. */
+static void test_pg_explain_analyse_select(void) {
+  const char *sql = "EXPLAIN ANALYSE SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, true);
+
+  qir_handle_destroy(&h);
+}
+
+/* 14. EXPLAIN options we do not model should still keep EXPLAIN semantics. */
+static void test_pg_explain_generic_plan_select(void) {
+  const char *sql = "EXPLAIN (GENERIC_PLAN) SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, false);
+
+  qir_handle_destroy(&h);
+}
+
+/* 15. EXPLAIN only supports wrapped SELECT statements. */
+static void test_pg_explain_delete_rejected(void) {
+  const char *sql = "EXPLAIN DELETE FROM private.people WHERE id = 1;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+
+  qir_handle_destroy(&h);
+}
+
+/* 16. Row comparison should be rejected. */
 static void test_pg_row_comparison_rejected(void) {
   const char *sql = "SELECT p.name AS name "
                     "FROM private.people AS p "
@@ -296,7 +395,7 @@ static void test_pg_row_comparison_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 12. LATERAL should be rejected. */
+/* 17. LATERAL should be rejected. */
 static void test_pg_lateral_rejected(void) {
   const char *sql = "SELECT p.id AS pid, x.v AS v "
                     "FROM private.people AS p "
@@ -310,7 +409,7 @@ static void test_pg_lateral_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 13. Set-returning function in FROM should be rejected. */
+/* 18. Set-returning function in FROM should be rejected. */
 static void test_pg_set_returning_rejected(void) {
   const char *sql = "SELECT x.val AS val "
                     "FROM unnest(ARRAY[1,2,3]) AS x(val) "
@@ -323,7 +422,7 @@ static void test_pg_set_returning_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 14. JSON operators should preserve base column touch. */
+/* 19. JSON operators should preserve base column touch. */
 static void test_pg_json_operator_touch(void) {
   const char *sql = "SELECT p.profile->>'ssn' AS ssn "
                     "FROM private.people AS p "
@@ -342,7 +441,7 @@ static void test_pg_json_operator_touch(void) {
   qir_handle_destroy(&h);
 }
 
-/* 15. Cast chains. */
+/* 20. Cast chains. */
 static void test_pg_cast_chains(void) {
   const char *sql = "SELECT (p.age::text)::varchar AS age_txt "
                     "FROM private.people AS p "
@@ -359,7 +458,7 @@ static void test_pg_cast_chains(void) {
   qir_handle_destroy(&h);
 }
 
-/* 16. ILIKE should normalize to LIKE-style predicates in IR. */
+/* 21. ILIKE should normalize to LIKE-style predicates in IR. */
 static void test_pg_ilike_operators(void) {
   const char *sql = "SELECT p.name AS name "
                     "FROM private.people AS p "
@@ -443,6 +542,11 @@ int main(void) {
   test_pg_recursive_cte();
   test_pg_quoted_identifiers();
   test_pg_any_all_as_in();
+  test_pg_explain_select();
+  test_pg_explain_analyze_select();
+  test_pg_explain_analyse_select();
+  test_pg_explain_generic_plan_select();
+  test_pg_explain_delete_rejected();
   test_pg_row_comparison_rejected();
   test_pg_lateral_rejected();
   test_pg_set_returning_rejected();

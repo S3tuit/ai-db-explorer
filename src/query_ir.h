@@ -32,6 +32,13 @@ typedef enum QirStmtKind {
   QIR_STMT_SELECT = 1 // only SELECT supported for now
 } QirStmtKind;
 
+// This models how is that statement wrapped/executed
+typedef enum QirStmtFlags {
+  QIR_STMTF_NONE = 0,
+  QIR_STMTF_EXPLAIN = 1u << 0,
+  QIR_STMTF_ANALYZE = 1u << 1,
+} QirStmtFlags;
+
 // Used by validators/touch-extractors to distinguish top-level query scope
 // from any nested query (CTE body, subquery in FROM, scalar subquery, EXISTS,
 // etc.).
@@ -263,6 +270,7 @@ struct QirQuery {
   const char *status_reason; // arena-owned; NULL if unset. Indicates the
                              // reason why the status is not QIR_OK
   QirStmtKind kind;
+  QirStmtFlags stmt_flags;
 
   // Conservative feature flags (backend sets these).
   bool has_star; // SELECT * or table.*
@@ -307,8 +315,31 @@ struct QirQuery {
 // Handle that owns the arena backing a QueryIR.
 typedef struct QirQueryHandle {
   Arena arena; // owns all allocations reachable from q
-  QirQuery *q;   // pointer inside arena
+  QirQuery *q; // pointer inside arena
 } QirQueryHandle;
+
+/*-------------------------------- FLAG HELPERS -----------------------------*/
+/* Sets one or more statement wrapper 'flags' to 'q' while preserving
+ * invariants.
+ */
+static inline void qir_query_add_stmt_flags(QirQuery *q, uint32_t flags) {
+  if (!q)
+    return;
+  q->stmt_flags = (QirStmtFlags)(((uint32_t)q->stmt_flags) | flags);
+}
+
+/* Returns 1 when the query is wrapped by EXPLAIN or EXPLAIN ANALYZE.
+ */
+static inline int qir_query_is_explain(const QirQuery *q) {
+  return q && ((((uint32_t)q->stmt_flags) & (uint32_t)QIR_STMTF_EXPLAIN) != 0);
+}
+
+/* Returns 1 when the query is wrapped by EXPLAIN ANALYZE.
+ */
+static inline int qir_query_is_explain_analyze(const QirQuery *q) {
+  return q && ((((uint32_t)q->stmt_flags) & (uint32_t)QIR_STMTF_ANALYZE) != 0);
+}
+/*---------------------------------------------------------------------------*/
 
 // ----------------------------
 // Touch extraction results

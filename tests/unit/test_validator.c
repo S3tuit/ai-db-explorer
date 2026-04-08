@@ -1023,6 +1023,63 @@ static void test_validator_plan(void) {
   catalog_destroy(cat);
 }
 
+/* Verifies EXPLAIN validation rules and passthrough result planning. */
+static void test_validator_explain(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+  SafetyPolicy *policy = &cp->safe_policy;
+  ASSERT_TRUE(policy != NULL);
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  ValidateQueryOut out = {0};
+  ASSERT_TRUE(vq_out_init(&out) == OK);
+
+  ValidatorRequest req_explain = {
+      .db = db,
+      .profile = cp,
+      .sql = "EXPLAIN SELECT u.name FROM users u WHERE u.id = 1;",
+  };
+  ASSERT_TRUE(validate_query(&req_explain, &out) == OK);
+  ASSERT_TRUE(out.err.code == VERR_NONE);
+  ASSERT_TRUE(out.plan.mode == VPLAN_MODE_PASSTHROUGH_PLAINTEXT);
+  ASSERT_TRUE(out.plan.cols != NULL);
+  ASSERT_TRUE(parr_len(out.plan.cols) == 0);
+
+  ValidatorRequest req_explain_sensitive = {
+      .db = db,
+      .profile = cp,
+      .sql = "EXPLAIN ANALYZE SELECT u.fiscal_code FROM users u LIMIT 10;",
+  };
+  ASSERT_TRUE(validate_query(&req_explain_sensitive, &out) == OK);
+  ASSERT_TRUE(out.err.code == VERR_NONE);
+  ASSERT_TRUE(out.plan.mode == VPLAN_MODE_PASSTHROUGH_PLAINTEXT);
+  ASSERT_TRUE(out.plan.cols != NULL);
+  ASSERT_TRUE(parr_len(out.plan.cols) == 0);
+
+  vq_out_clean(&out);
+
+  const SensitiveTok tok_fc1[] = {make_param_domain("fiscal_code")};
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "EXPLAIN SELECT u.id FROM users u WHERE u.id = $1 LIMIT 10;", 0,
+      VERR_EXPLAIN_PARAMS_FORBIDDEN,
+      "EXPLAIN and EXPLAIN ANALYZE do not allow bound input parameters.",
+      tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "EXPLAIN ANALYZE SELECT u.id FROM users u WHERE u.id = $1 LIMIT 10;", 0,
+      VERR_EXPLAIN_PARAMS_FORBIDDEN,
+      "EXPLAIN and EXPLAIN ANALYZE do not allow bound input parameters.",
+      tok_fc1, ARRLEN(tok_fc1));
+
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
 // Verifies validator correctly categorizes safe/unsafe functions
 static void test_validator_safe_funcs_pg(void) {
   ConnCatalog *cat = load_test_catalog();
@@ -1087,6 +1144,7 @@ int main(void) {
   test_validator_token_param_binding();
   test_validator_ambiguous_domain_message();
   test_validator_plan();
+  test_validator_explain();
   test_validator_safe_funcs_pg();
   fprintf(stderr, "OK: test_validator\n");
   return 0;
