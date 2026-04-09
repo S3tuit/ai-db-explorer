@@ -32,6 +32,19 @@ static void assert_ident_eq(const QirIdent *id, const char *expected,
 #define ASSERT_IDENT_EQ(id, expected)                                          \
   assert_ident_eq((id), (expected), __FILE__, __LINE__)
 
+/* Asserts that expression is a qualified column reference. */
+static void assert_colref_expr(const QirExpr *e, const char *qual,
+                               const char *col, const char *file, int line) {
+  ASSERT_TRUE_AT(e != NULL, file, line);
+  ASSERT_TRUE_AT(e->kind == QIR_EXPR_COLREF, file, line);
+  ASSERT_TRUE_AT(e->u.colref.qualifier.name != NULL, file, line);
+  ASSERT_TRUE_AT(e->u.colref.column.name != NULL, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.colref.qualifier.name, qual) == 0, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.colref.column.name, col) == 0, file, line);
+}
+#define ASSERT_COLREF(e, qual, col)                                            \
+  assert_colref_expr((e), (qual), (col), __FILE__, __LINE__)
+
 /* Asserts that the parsed statement flags match one EXPLAIN expectation. */
 static void assert_stmt_flags(const QirQuery *q, bool explain, bool analyze,
                               const char *file, int line) {
@@ -296,6 +309,81 @@ static void test_pg_any_all_as_in(void) {
 }
 
 /* 11. EXPLAIN SELECT should preserve the wrapped SELECT in IR. */
+static void test_pg_filter_normalized_to_case(void) {
+  const char *sql =
+      "SELECT SUM(p.amount) FILTER (WHERE p.kind = 'invoice') AS total, "
+      "COUNT(*) FILTER (WHERE p.kind = 'invoice') AS cnt "
+      "FROM payments AS p;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nselect == 2);
+
+  ASSERT_TRUE(h.q->select_items[0]->value != NULL);
+  ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *sum = &h.q->select_items[0]->value->u.funcall;
+  ASSERT_IDENT_EQ(&sum->schema, "");
+  ASSERT_IDENT_EQ(&sum->name, "sum");
+  ASSERT_TRUE(sum->is_star == false);
+  ASSERT_TRUE(sum->nargs == 1);
+  ASSERT_TRUE(sum->args != NULL);
+  ASSERT_TRUE(sum->args[0] != NULL);
+  ASSERT_TRUE(sum->args[0]->kind == QIR_EXPR_CASE);
+  ASSERT_TRUE(sum->args[0]->u.case_.arg == NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.nwhens == 1);
+  ASSERT_TRUE(sum->args[0]->u.case_.else_expr == NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0] != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->kind == QIR_EXPR_EQ);
+  ASSERT_COLREF(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.l, "p",
+                "kind");
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r->kind ==
+              QIR_EXPR_LITERAL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r->u.lit.kind ==
+              QIR_LIT_STRING);
+  ASSERT_TRUE(strcmp(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r->u.lit
+                         .v.s,
+                     "invoice") == 0);
+  ASSERT_COLREF(sum->args[0]->u.case_.whens[0]->then_expr, "p", "amount");
+
+  ASSERT_TRUE(h.q->select_items[1]->value != NULL);
+  ASSERT_TRUE(h.q->select_items[1]->value->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *count = &h.q->select_items[1]->value->u.funcall;
+  ASSERT_IDENT_EQ(&count->schema, "");
+  ASSERT_IDENT_EQ(&count->name, "count");
+  ASSERT_TRUE(count->is_star == false);
+  ASSERT_TRUE(count->nargs == 1);
+  ASSERT_TRUE(count->args != NULL);
+  ASSERT_TRUE(count->args[0] != NULL);
+  ASSERT_TRUE(count->args[0]->kind == QIR_EXPR_CASE);
+  ASSERT_TRUE(count->args[0]->u.case_.arg == NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.nwhens == 1);
+  ASSERT_TRUE(count->args[0]->u.case_.else_expr == NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens != NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0] != NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr != NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr->kind ==
+              QIR_EXPR_LITERAL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr->u.lit.kind ==
+              QIR_LIT_INT64);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr->u.lit.v.i64 == 1);
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "amount");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "kind");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* 11. EXPLAIN SELECT should preserve the wrapped SELECT in IR. */
 static void test_pg_explain_select(void) {
   const char *sql = "EXPLAIN SELECT p.id AS id "
                     "FROM private.people AS p "
@@ -542,6 +630,7 @@ int main(void) {
   test_pg_recursive_cte();
   test_pg_quoted_identifiers();
   test_pg_any_all_as_in();
+  test_pg_filter_normalized_to_case();
   test_pg_explain_select();
   test_pg_explain_analyze_select();
   test_pg_explain_analyse_select();

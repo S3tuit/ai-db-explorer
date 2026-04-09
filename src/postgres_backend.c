@@ -365,8 +365,15 @@ static QirExpr *pg_parse_literal(const JsonGetter *jg, Arena *a, QirQuery *q) {
   JsonGetter ijg = {0};
   if (jsget_object(&vjg, "ival", &ijg) == YES) {
     int64_t i64 = 0;
-    if (jsget_i64(&ijg, "ival", &i64) != YES)
+    AdbxTriStatus irc = jsget_i64(&ijg, "ival", &i64);
+    if (irc == ERR)
       return NULL;
+    if (irc == NO) {
+      // libpg_query encodes integer zero as an empty {"ival": {}} object for
+      // some A_Const shapes. Treating that as 0 preserves valid SQL literals
+      // instead of rejecting expressions like COALESCE(col, 0).
+      i64 = 0;
+    }
     e->u.lit.kind = QIR_LIT_INT64;
     e->u.lit.v.i64 = i64;
     return e;
@@ -426,8 +433,14 @@ static QirExpr *pg_parse_literal(const JsonGetter *jg, Arena *a, QirQuery *q) {
   JsonGetter ijg2 = {0};
   if (jsget_object(&vjg, "Integer", &ijg2) == YES) {
     int64_t i64 = 0;
-    if (jsget_i64(&ijg2, "ival", &i64) != YES)
+    AdbxTriStatus irc = jsget_i64(&ijg2, "ival", &i64);
+    if (irc == ERR)
       return NULL;
+    if (irc == NO) {
+      // Keep Integer nodes consistent with A_Const handling when zero is
+      // encoded as an empty object by the parser JSON.
+      i64 = 0;
+    }
     e->u.lit.kind = QIR_LIT_INT64;
     e->u.lit.v.i64 = i64;
     return e;
@@ -1067,6 +1080,109 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, Arena *a, QirQuery *q) {
   return e;
 }
 
+/* Builds an INT64 literal expression with the provided value.
+ * Ownership: returned expression is arena-owned by 'a'.
+ * Returns the new literal expression on success, NULL on allocation failure.
+ */
+static QirExpr *pg_new_i64_literal(Arena *a, int64_t value) {
+  if (!a)
+    return NULL;
+
+  QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_LITERAL);
+  if (!e)
+    return NULL;
+  e->u.lit.kind = QIR_LIT_INT64;
+  e->u.lit.v.i64 = value;
+  return e;
+}
+
+/* Wraps 'then_expr' behind a searched CASE WHEN 'cond_expr' THEN ... END.
+ * It borrows the already arena-owned child expressions and returns a new
+ * arena-owned CASE node that references them without taking over ownership.
+ * Side effects: allocates one CASE expression and one WHEN clause in 'a'.
+ * Returns the wrapped CASE expression on success, NULL on allocation failure.
+ */
+static QirExpr *pg_wrap_expr_with_filter_case(Arena *a, QirExpr *cond_expr,
+                                              QirExpr *then_expr) {
+  if (!a || !cond_expr || !then_expr)
+    return NULL;
+
+  QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_CASE);
+  if (!e)
+    return NULL;
+
+  QirCaseWhen *w = (QirCaseWhen *)arena_calloc(a, (uint32_t)sizeof(*w));
+  if (!w)
+    return NULL;
+  w->when_expr = cond_expr;
+  w->then_expr = then_expr;
+
+  QirCaseWhen **whens =
+      (QirCaseWhen **)arena_calloc(a, (uint32_t)sizeof(*whens));
+  if (!whens)
+    return NULL;
+  whens[0] = w;
+
+  e->u.case_.arg = NULL;
+  e->u.case_.whens = whens;
+  e->u.case_.nwhens = 1;
+  e->u.case_.else_expr = NULL;
+  return e;
+}
+
+/* Rewrites PostgreSQL aggregate FILTER syntax into CASE-wrapped arguments.
+ * It borrows 'filter_jg' and mutates the caller-owned temporary args vector and
+ * star flag in place before they are flattened into the final QirFuncCall.
+ * Side effects: parses the filter expression, allocates CASE/literal nodes in
+ * 'a', and may mark the query unsupported when FILTER has no argument to wrap.
+ * Returns OK on success, ERR on allocation/parse failure.
+ */
+static AdbxStatus pg_normalize_filter_to_case(const JsonGetter *filter_jg,
+                                              Arena *a, QirQuery *q,
+                                              PtrVec *args, int *is_star01) {
+  if (!filter_jg || !a || !q || !args || !is_star01)
+    return ERR;
+
+  QirExpr *filter_expr = pg_parse_expr(filter_jg, a, q);
+  if (!filter_expr)
+    return ERR;
+
+  if (*is_star01 != 0) {
+    if (args->len != 0) {
+      qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported FILTER aggregate");
+      return OK;
+    }
+
+    // COUNT(*) FILTER (...) becomes COUNT(CASE WHEN ... THEN 1 END) in IR so
+    // the validator can analyze the filter without needing a dedicated node.
+    QirExpr *one = pg_new_i64_literal(a, 1);
+    if (!one)
+      return ERR;
+    QirExpr *wrapped = pg_wrap_expr_with_filter_case(a, filter_expr, one);
+    if (!wrapped)
+      return ERR;
+
+    if (ptrvec_push(args, wrapped) != OK)
+      return ERR;
+    *is_star01 = 0;
+    return OK;
+  }
+
+  if (args->len == 0) {
+    qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported FILTER aggregate");
+    return OK;
+  }
+
+  for (uint32_t i = 0; i < args->len; i++) {
+    QirExpr *wrapped = pg_wrap_expr_with_filter_case(a, filter_expr,
+                                                     (QirExpr *)args->items[i]);
+    if (!wrapped)
+      return ERR;
+    args->items[i] = wrapped;
+  }
+  return OK;
+}
+
 /* Parses a FuncCall node into a QirExpr.
  * Ownership: returned expression is arena-owned.
  * Side effects: may mark QIR_UNSUPPORTED.
@@ -1123,19 +1239,16 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, Arena *a,
     goto fail;
   schema_to_tr = NULL;
 
-  // Reject FILTER for now (agents can use CASE WHEN instead).
-  if (jsget_exists_nonnull(jg, "agg_filter") == YES) {
-    qir_set_status(q, a, QIR_UNSUPPORTED, "FILTER not supported");
-    return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
-  }
-
   QirFuncCall fc = {0};
   fc.schema.name = schema;
   fc.name.name = fname;
 
   // parse args
   PtrVec args = {0};
-  if (jsget_array_objects_begin(jg, "args", &it) == YES) {
+  AdbxTriStatus args_rc = jsget_array_objects_begin(jg, "args", &it);
+  if (args_rc == ERR)
+    goto fail;
+  if (args_rc == YES) {
     JsonGetter arg = {0};
     while ((rc = jsget_array_objects_next(jg, &it, &arg)) == YES) {
       QirExpr *ae = pg_parse_expr(&arg, a, q);
@@ -1149,14 +1262,9 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, Arena *a,
       }
     }
   }
-
-  if (args.len > 0) {
-    fc.args = (QirExpr **)ptrvec_flatten(&args, a);
-    fc.nargs = args.len;
-    if (!fc.args) {
-      ptrvec_clean(&args);
-      goto fail;
-    }
+  if (rc == ERR) {
+    ptrvec_clean(&args);
+    goto fail;
   }
   int is_distinct = 0;
   if (jsget_bool01(jg, "agg_distinct", &is_distinct) == YES) {
@@ -1169,6 +1277,32 @@ static QirExpr *pg_parse_func_call(const JsonGetter *jg, Arena *a,
     fc.is_star = (is_star != 0);
   } else {
     fc.is_star = false;
+  }
+
+  // Normalizes FILTER clauses into CASE-wrapped aggregate arguments.
+  // That's because we don't care about modelling SQL perfectly, we just have
+  // to model the safety of the SQL.
+  JsonGetter filterjg = {0};
+  AdbxTriStatus frc = jsget_object(jg, "agg_filter", &filterjg);
+  if (frc == ERR) {
+    ptrvec_clean(&args);
+    goto fail;
+  }
+  if (frc == YES) {
+    if (pg_normalize_filter_to_case(&filterjg, a, q, &args, &is_star) != OK) {
+      ptrvec_clean(&args);
+      goto fail;
+    }
+  }
+  fc.is_star = (is_star != 0);
+
+  if (args.len > 0) {
+    fc.args = (QirExpr **)ptrvec_flatten(&args, a);
+    fc.nargs = args.len;
+    if (!fc.args) {
+      ptrvec_clean(&args);
+      goto fail;
+    }
   }
   ptrvec_clean(&args);
 
@@ -1206,6 +1340,94 @@ fail:
   if (schema_to_tr && schema_to_tr != fname_to_tr)
     free(schema_to_tr);
   return NULL;
+}
+
+/* Parses a function-like AST node that only carries an "args" array.
+ * Ownership: returned expression is arena-owned.
+ * Side effects: recursively parses child expressions and may propagate
+ * query status changes from nested expressions.
+ * Returns a QIR_EXPR_FUNCALL on success, NULL on allocation/parse failure.
+ */
+static QirExpr *pg_parse_simple_func_like_call(const JsonGetter *jg, Arena *a,
+                                               QirQuery *q, const char *fname) {
+  if (!jg || !a || !q || !fname)
+    return NULL;
+
+  QirExpr *e = pg_qir_new_expr(a, QIR_EXPR_FUNCALL);
+  if (!e)
+    return NULL;
+
+  e->u.funcall.schema.name = (char *)arena_add_nul(a, (void *)"", 0);
+  e->u.funcall.name.name =
+      (char *)arena_add_nul(a, (void *)fname, strlen(fname));
+  if (!e->u.funcall.schema.name || !e->u.funcall.name.name)
+    return NULL;
+
+  PtrVec args = {0};
+  JsonArrIter it = {0};
+  if (jsget_array_objects_begin(jg, "args", &it) != YES)
+    return NULL;
+
+  JsonGetter argjg = {0};
+  int rc = 0;
+  while ((rc = jsget_array_objects_next(jg, &it, &argjg)) == YES) {
+    QirExpr *arg = pg_parse_expr(&argjg, a, q);
+    if (!arg) {
+      rc = ERR;
+      break;
+    }
+    if (ptrvec_push(&args, arg) != OK) {
+      rc = ERR;
+      break;
+    }
+  }
+  if (rc == ERR) {
+    ptrvec_clean(&args);
+    return NULL;
+  }
+
+  if (args.len > 0) {
+    e->u.funcall.args = (QirExpr **)ptrvec_flatten(&args, a);
+    e->u.funcall.nargs = args.len;
+    if (!e->u.funcall.args) {
+      ptrvec_clean(&args);
+      return NULL;
+    }
+  }
+  ptrvec_clean(&args);
+  return e;
+}
+
+/* Parses a CoalesceExpr node by normalizing it to a regular function call.
+ * Returns a QIR_EXPR_FUNCALL on success, NULL on allocation/parse failure.
+ */
+static QirExpr *pg_parse_coalesce_expr(const JsonGetter *jg, Arena *a,
+                                       QirQuery *q) {
+  return pg_parse_simple_func_like_call(jg, a, q, "coalesce");
+}
+
+/* Parses a MinMaxExpr node by normalizing it to greatest/least function calls.
+ * Returns a QIR_EXPR_FUNCALL on success, an unsupported expression for
+ * unknown operators, or NULL on allocation/parse failure.
+ */
+static QirExpr *pg_parse_minmax_expr(const JsonGetter *jg, Arena *a,
+                                     QirQuery *q) {
+  if (!jg || !a || !q)
+    return NULL;
+
+  JsonStrSpan op = {0};
+  if (jsget_string_span(jg, "op", &op) != YES)
+    return NULL;
+
+  if (op.len == (sizeof("IS_GREATEST") - 1) &&
+      memcmp(op.ptr, "IS_GREATEST", sizeof("IS_GREATEST") - 1) == 0)
+    return pg_parse_simple_func_like_call(jg, a, q, "greatest");
+  if (op.len == (sizeof("IS_LEAST") - 1) &&
+      memcmp(op.ptr, "IS_LEAST", sizeof("IS_LEAST") - 1) == 0)
+    return pg_parse_simple_func_like_call(jg, a, q, "least");
+
+  qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported min/max expression");
+  return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
 }
 
 /* Parses a TypeName into a QirTypeRef.
@@ -1346,7 +1568,8 @@ static AdbxStatus pg_parse_explain_stmt(const JsonGetter *jg, Arena *a,
       JsonStrSpan defname;
       if (jsget_string_span(&dejg, "defname", &defname) != YES)
         return ERR;
-      if (memcmp(defname.ptr, "analyze", defname.len) == 0) {
+      if (defname.len == (sizeof("analyze") - 1) &&
+          memcmp(defname.ptr, "analyze", sizeof("analyze") - 1) == 0) {
         qir_query_add_stmt_flags(q, (uint32_t)QIR_STMTF_ANALYZE);
       }
     }
@@ -1447,6 +1670,14 @@ static QirExpr *pg_parse_expr(const JsonGetter *jg, Arena *a, QirQuery *q) {
 
   if (jsget_object(jg, "FuncCall", &sub) == YES) {
     return pg_parse_func_call(&sub, a, q);
+  }
+
+  if (jsget_object(jg, "CoalesceExpr", &sub) == YES) {
+    return pg_parse_coalesce_expr(&sub, a, q);
+  }
+
+  if (jsget_object(jg, "MinMaxExpr", &sub) == YES) {
+    return pg_parse_minmax_expr(&sub, a, q);
   }
 
   if (jsget_object(jg, "CaseExpr", &sub) == YES) {

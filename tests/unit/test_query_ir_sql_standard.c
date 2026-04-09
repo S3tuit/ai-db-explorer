@@ -365,6 +365,61 @@ static void test_sql_standard_func_call(void) {
   qir_handle_destroy(&h);
 }
 
+/* A8b. COALESCE/GREATEST/LEAST normalize to regular function calls. */
+static void test_sql_standard_minmax_and_coalesce(void) {
+  const char *sql =
+      "SELECT GREATEST(COALESCE(p.score, 0), LEAST(p.cap, 100)) AS amount "
+      "FROM private.people AS p;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nselect == 1);
+  ASSERT_TRUE(h.q->select_items[0]->value != NULL);
+  ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
+
+  const QirFuncCall *greatest = &h.q->select_items[0]->value->u.funcall;
+  ASSERT_IDENT_EQ(&greatest->schema, "");
+  ASSERT_IDENT_EQ(&greatest->name, "greatest");
+  ASSERT_TRUE(greatest->nargs == 2);
+  ASSERT_TRUE(greatest->args != NULL);
+
+  ASSERT_TRUE(greatest->args[0] != NULL);
+  ASSERT_TRUE(greatest->args[0]->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *coalesce = &greatest->args[0]->u.funcall;
+  ASSERT_IDENT_EQ(&coalesce->schema, "");
+  ASSERT_IDENT_EQ(&coalesce->name, "coalesce");
+  ASSERT_TRUE(coalesce->nargs == 2);
+  ASSERT_COLREF(coalesce->args[0], "p", "score");
+  ASSERT_TRUE(coalesce->args[1] != NULL);
+  ASSERT_TRUE(coalesce->args[1]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(coalesce->args[1]->u.lit.kind == QIR_LIT_INT64);
+  ASSERT_TRUE(coalesce->args[1]->u.lit.v.i64 == 0);
+
+  ASSERT_TRUE(greatest->args[1] != NULL);
+  ASSERT_TRUE(greatest->args[1]->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *least = &greatest->args[1]->u.funcall;
+  ASSERT_IDENT_EQ(&least->schema, "");
+  ASSERT_IDENT_EQ(&least->name, "least");
+  ASSERT_TRUE(least->nargs == 2);
+  ASSERT_COLREF(least->args[0], "p", "cap");
+  ASSERT_TRUE(least->args[1] != NULL);
+  ASSERT_TRUE(least->args[1]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(least->args[1]->u.lit.kind == QIR_LIT_INT64);
+  ASSERT_TRUE(least->args[1]->u.lit.v.i64 == 100);
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_NO_UNKNOWN_TOUCHES(tr);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "score");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "cap");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
 /* A9. INNER JOIN + ON predicate. */
 static void test_sql_standard_join_inner(void) {
   const char *sql =
@@ -1158,6 +1213,7 @@ int main(void) {
   test_sql_standard_order_by_alias();
   test_sql_standard_distinct();
   test_sql_standard_func_call();
+  test_sql_standard_minmax_and_coalesce();
   test_sql_standard_join_inner();
   test_sql_standard_join_cross();
   test_sql_standard_offset();
