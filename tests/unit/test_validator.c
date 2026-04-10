@@ -214,6 +214,37 @@ static void assert_validate_reject_empty_plan_at(DbBackend *db,
   assert_validate_reject_empty_plan_at((db), (cp), (sql), (code), __FILE__,    \
                                        __LINE__)
 
+/* Runs one validation with token parameters expected to fail and asserts that
+ * the output plan is empty after failure.
+ */
+static void assert_validate_reject_empty_plan_params_at(
+    DbBackend *db, const ConnProfile *cp, const char *sql,
+    ValidatorErrCode expect_code, const SensitiveTok *params, uint32_t nparams,
+    const char *file, int line) {
+  ValidateQueryOut out = {0};
+  ASSERT_TRUE_AT(vq_out_init(&out) == OK, file, line);
+
+  ValidatorRequest req = {
+      .db = db,
+      .profile = cp,
+      .sql = sql,
+      .params = params,
+      .nparams = nparams,
+  };
+
+  int rc = validate_query(&req, &out);
+  ASSERT_TRUE_AT(rc == ERR, file, line);
+  ASSERT_TRUE_AT(out.err.code == expect_code, file, line);
+  ASSERT_TRUE_AT(out.plan.cols != NULL, file, line);
+  ASSERT_TRUE_AT(parr_len(out.plan.cols) == 0, file, line);
+
+  vq_out_clean(&out);
+}
+#define ASSERT_VALIDATE_REJECT_EMPTY_PLAN_PARAMS(db, cp, sql, code, params,    \
+                                                 nparams)                      \
+  assert_validate_reject_empty_plan_params_at(                                 \
+      (db), (cp), (sql), (code), (params), (nparams), __FILE__, __LINE__)
+
 /* Basic validation cases for the policy rules and error codes. */
 static void test_validator_accepts(void) {
   ConnCatalog *cat = load_test_catalog();
@@ -249,6 +280,7 @@ static void test_validator_rejects_rules(void) {
 
   DbBackend *db = postgres_backend_create();
   ASSERT_TRUE(db != NULL);
+  const SensitiveTok tok_fc1[] = {make_param_domain("fiscal_code")};
 
   ASSERT_VALIDATE(db, cp, policy, "SELECT * FROM users u WHERE u.id = 1;", 0,
                   VERR_STAR);
@@ -258,15 +290,16 @@ static void test_validator_rejects_rules(void) {
                       "u.user_id WHERE u.id = 1;",
                       0, VERR_NO_TABLE_ALIAS, "Missing alias in JOIN item");
 
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id FROM users u WHERE u.status = $1;", 0,
-                  VERR_PARAM_NON_SENSITIVE);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy, "SELECT u.id FROM users u WHERE u.status = $1;", 0,
+      VERR_PARAM_NON_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
 
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u LEFT JOIN expenses e ON "
-                  "e.user_id = u.id "
-                  "WHERE u.fiscal_code = $1 LIMIT 10;",
-                  0, VERR_JOIN_NOT_INNER);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u LEFT JOIN expenses e ON "
+      "e.user_id = u.id "
+      "WHERE u.fiscal_code = $1 LIMIT 10;",
+      0, VERR_JOIN_NOT_INNER, NULL, tok_fc1, ARRLEN(tok_fc1));
 
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
@@ -371,19 +404,47 @@ static void test_validator_from_notes(void) {
                   1, VERR_NONE);
 
   /* REJECT cases */
-  ASSERT_VALIDATE(
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.status, COUNT(*) FROM users u WHERE u.fiscal_code = $1 "
       "GROUP BY u.status HAVING COUNT(*) > $2 LIMIT 200;",
-      0, VERR_PARAM_OUTSIDE_WHERE);
+      0, VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc2, ARRLEN(tok_fc2));
   ASSERT_VALIDATE(
       db, cp, policy,
       "SELECT LOWER(c.balance) AS lb FROM private.cards c LIMIT 10;", 0,
       VERR_SENSITIVE_SELECT_EXPR);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, u.name FROM users u WHERE u.status = $1 AND "
+      "u.fiscal_code = $2 LIMIT 200;",
+      0, VERR_PARAM_NON_SENSITIVE, NULL, tok_fc2, ARRLEN(tok_fc2));
   ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, u.name FROM users u WHERE u.status = $1 AND "
-                  "u.fiscal_code = $2 LIMIT 200;",
-                  0, VERR_PARAM_NON_SENSITIVE);
+                  "SELECT u.id FROM users u WHERE u.age > $1 LIMIT 10;", 0,
+                  VERR_PARAM_OUTSIDE_WHERE);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code > $1 LIMIT 10;", 0,
+      VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE LOWER(u.fiscal_code) = $1 LIMIT 10;", 0,
+      VERR_PARAM_NON_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = LOWER($1) LIMIT 10;", 0,
+      VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code IN (LOWER($1)) LIMIT 10;",
+      0, VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE $1 IN (u.fiscal_code) LIMIT 10;", 0,
+      VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.status IN ($1, $2) LIMIT 10;", 0,
+      VERR_PARAM_NON_SENSITIVE, NULL, tok_fc2, ARRLEN(tok_fc2));
   ASSERT_VALIDATE(db, cp, policy, "SELECT * FROM users u WHERE u.id = 1;", 0,
                   VERR_STAR);
   ASSERT_VALIDATE(db, cp, policy, "SELECT u.* FROM users u WHERE u.id = 101;",
@@ -410,26 +471,28 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code IN ('A', 'B') LIMIT 200;",
       0, VERR_SENSITIVE_CMP);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id FROM users u WHERE u.fiscal_code = $1 OR "
-                  "u.status = false LIMIT 200;",
-                  0, VERR_WHERE_NOT_CONJ);
-  ASSERT_VALIDATE(
+  ASSERT_VALIDATE_PARAMS(db, cp, policy,
+                         "SELECT u.id FROM users u WHERE u.fiscal_code = $1 OR "
+                         "u.status = false LIMIT 200;",
+                         0, VERR_WHERE_NOT_CONJ, NULL, tok_fc1,
+                         ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE NOT (u.fiscal_code = $1) LIMIT 200;", 0,
-      VERR_WHERE_NOT_CONJ);
-  ASSERT_VALIDATE(
+      VERR_WHERE_NOT_CONJ, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code <> $1 LIMIT 200;", 0,
-      VERR_SENSITIVE_CMP);
-  ASSERT_VALIDATE(
+      VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code LIKE $1 LIMIT 200;", 0,
-      VERR_SENSITIVE_CMP);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id FROM users u WHERE u.fiscal_code BETWEEN $1 AND "
-                  "$2 LIMIT 200;",
-                  0, VERR_SENSITIVE_CMP);
+      VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code BETWEEN $1 AND $2 LIMIT "
+      "200;",
+      0, VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc2, ARRLEN(tok_fc2));
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.id FROM users u WHERE u.fiscal_code = (SELECT 'A' "
                   "FROM users x WHERE x.id = 1) "
@@ -440,33 +503,38 @@ static void test_validator_from_notes(void) {
                   "e.receiver = u.fiscal_code "
                   "WHERE u.id = 1 LIMIT 200;",
                   0, VERR_JOIN_ON_SENSITIVE);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u LEFT JOIN expenses e ON "
-                  "e.user_id = u.id "
-                  "WHERE u.fiscal_code = $1 LIMIT 10;",
-                  0, VERR_JOIN_NOT_INNER);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u CROSS JOIN expenses e "
-                  "WHERE u.fiscal_code = $1 LIMIT 200;",
-                  0, VERR_JOIN_NOT_INNER);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
-                  "e.user_id = u.id OR e.user_id = 1 "
-                  "WHERE u.fiscal_code = $2 LIMIT 200;",
-                  0, VERR_JOIN_ON_INVALID);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
-                  "e.user_id > u.id "
-                  "WHERE u.fiscal_code = $1 LIMIT 200;",
-                  0, VERR_JOIN_ON_INVALID);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u LEFT JOIN expenses e ON "
+      "e.user_id = u.id "
+      "WHERE u.fiscal_code = $1 LIMIT 10;",
+      0, VERR_JOIN_NOT_INNER, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u CROSS JOIN expenses e "
+      "WHERE u.fiscal_code = $1 LIMIT 200;",
+      0, VERR_JOIN_NOT_INNER, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
+      "e.user_id = u.id OR e.user_id = 1 "
+      "WHERE u.fiscal_code = $1 LIMIT 200;",
+      0, VERR_JOIN_ON_INVALID, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
+      "e.user_id > u.id "
+      "WHERE u.fiscal_code = $1 LIMIT 200;",
+      0, VERR_JOIN_ON_INVALID, NULL, tok_fc1, ARRLEN(tok_fc1));
   // TODO: we might relax this; allow subqueries and functions inside JOIN ON
   // if both side are non-sensitive, func are safe and JOIN ON still has only
   // = and AND.
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
-                  "LOWER(e.category) = u.status "
-                  "WHERE u.fiscal_code = $1 LIMIT 200;",
-                  0, VERR_JOIN_ON_INVALID);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "
+      "LOWER(e.category) = u.status "
+      "WHERE u.fiscal_code = $1 LIMIT 200;",
+      0, VERR_JOIN_ON_INVALID, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.fiscal_code, COUNT(*) FROM users u WHERE u.status "
                   "= true GROUP BY u.fiscal_code LIMIT 200;",
@@ -480,26 +548,28 @@ static void test_validator_from_notes(void) {
                   "false GROUP BY u.status "
                   "HAVING MAX(u.fiscal_code) IS NOT NULL LIMIT 200;",
                   0, VERR_SENSITIVE_LOC);
-  ASSERT_VALIDATE(
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT DISTINCT u.status FROM users u WHERE u.fiscal_code = $1;", 0,
-      VERR_DISTINCT_SENSITIVE);
-  ASSERT_VALIDATE(
+      VERR_DISTINCT_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10 OFFSET 10;",
-      0, VERR_OFFSET_SENSITIVE);
+      0, VERR_OFFSET_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(db, cp, policy,
                   "WITH tab1 AS (SELECT u.fiscal_code FROM users u WHERE u.id "
                   "= 2) SELECT t.fiscal_code FROM tab1 t LIMIT 10;",
                   0, VERR_SENSITIVE_OUTSIDE_MAIN);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id FROM users u WHERE u.id = (SELECT x.id FROM "
-                  "users x WHERE x.fiscal_code = $1) LIMIT 10;",
-                  0, VERR_SENSITIVE_OUTSIDE_MAIN);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT t.id FROM (SELECT u.id FROM users u WHERE "
-                  "u.fiscal_code = $1) t LIMIT 10;",
-                  0, VERR_SENSITIVE_OUTSIDE_MAIN);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.id = (SELECT x.id FROM users x WHERE "
+      "x.fiscal_code = $1) LIMIT 10;",
+      0, VERR_SENSITIVE_OUTSIDE_MAIN, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT t.id FROM (SELECT u.id FROM users u WHERE u.fiscal_code = $1) t "
+      "LIMIT 10;",
+      0, VERR_SENSITIVE_OUTSIDE_MAIN, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT public.u FROM users u WHERE u.id = 1;", 0,
                   VERR_NO_COLUMN_ALIAS);
@@ -513,6 +583,11 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, 'X') LIMIT 10;", 0,
       VERR_SENSITIVE_CMP, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code IN ($1, u.fiscal_code) "
+      "LIMIT 10;",
+      0, VERR_SENSITIVE_CMP, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(db, cp, policy, "SELECT $1 AS trick FROM users u LIMIT 1;", 0,
                   VERR_PARAM_OUTSIDE_WHERE);
   ASSERT_VALIDATE(db, cp, policy,
@@ -534,13 +609,15 @@ static void test_validator_from_notes(void) {
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.id FROM users u WHERE $1 = $2 LIMIT 10;", 0,
                   VERR_PARAM_NON_SENSITIVE);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id FROM users u WHERE u.status = $1 LIMIT 10;", 0,
-                  VERR_PARAM_NON_SENSITIVE);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.id FROM users u WHERE u.id = (SELECT x.id FROM "
-                  "users x WHERE x.id = $1) LIMIT 10;",
-                  0, VERR_PARAM_NON_SENSITIVE);
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.status = $1 LIMIT 10;", 0,
+      VERR_PARAM_NON_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.id = (SELECT x.id FROM users x WHERE "
+      "x.id = $1) LIMIT 10;",
+      0, VERR_PARAM_NON_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE(
       db, cp, policy,
       "SELECT u.status, MAX(u.fiscal_code) AS m FROM users u GROUP BY u.status "
@@ -632,8 +709,7 @@ static void test_validator_token_param_binding(void) {
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 10;", 1,
-      VERR_NONE, NULL, tok_private_users_fc_1,
-      ARRLEN(tok_private_users_fc_1));
+      VERR_NONE, NULL, tok_private_users_fc_1, ARRLEN(tok_private_users_fc_1));
 
   // token from a different sensitive domain must be rejected.
   ASSERT_VALIDATE_PARAMS(
@@ -675,8 +751,7 @@ static void test_validator_token_param_binding(void) {
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT t.name FROM a_table t WHERE t.a_cf IN ($1, $2) LIMIT 5;", 0,
-      VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_in_cf_bad,
-      ARRLEN(tok_in_cf_bad));
+      VERR_PARAM_DOMAIN_MISMATCH, NULL, tok_in_cf_bad, ARRLEN(tok_in_cf_bad));
 
   // Missing token parameters must reject sensitive predicates.
   ASSERT_VALIDATE(db, cp, policy,
@@ -979,9 +1054,9 @@ static void test_validator_plan(void) {
   // failure paths must not leave partial plan state
   ASSERT_VALIDATE_REJECT_EMPTY_PLAN(
       db, cp, "SELECT u.fiscal_code FROM users u;", VERR_LIMIT_REQUIRED);
-  ASSERT_VALIDATE_REJECT_EMPTY_PLAN(
+  ASSERT_VALIDATE_REJECT_EMPTY_PLAN_PARAMS(
       db, cp, "SELECT u.id FROM users u WHERE u.fiscal_code = $1 LIMIT 201;",
-      VERR_LIMIT_EXCEEDS);
+      VERR_LIMIT_EXCEEDS, tok_fc1, ARRLEN(tok_fc1));
 
   // reuse the same ValidateQueryOut to ensure reset removes old token plan.
   ValidateQueryOut out = {0};

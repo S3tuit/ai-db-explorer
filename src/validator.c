@@ -12,7 +12,7 @@
 #define MAX_ROWS_SENS_ON 200
 
 /*---------------------------- QUERY VALIDATION -----------------------------*/
-/* To validate a query we combine the QirTouchReport and a two-pass approach:
+/* To validate a query we combine the QirTouchReport and a three-pass approach:
  *  - QirTouchReport used for:
  *      + All column references resolve to an alias (via QirTouchReport).
  *      + Sensitive columns can be referenced only inside the main query.
@@ -20,19 +20,28 @@
  *        mode on. Vault should be opened, else, it fails.
  *
  *  - Pass A. It contains all the validations that are independent of the mode
- *    (sensitive mode on/off). Pass A checks that:
+ *    (sensitive mode on/off) and independent of token parameters. Pass A
+ *    checks that:
  *      + All tables have aliases (FROM/JOIN).
  *      + All functions are safe to call.
  *      + No SELECT * / alias.* (rejects q->has_star).
+ *      + Nested subqueries satisfy the same Pass A rules.
  *
- *  - Pass B. This runs only if sensitive mode is on.
- *    It applies the same rules recursively to all nested queries (CTEs
- *    and subqueries) and checks that:
+ *  - Pass B. It validates token parameter usage regardless of sensitive mode.
+ *    Pass B checks that:
+ *      + Parameters are used only inside WHERE.
+ *      + Parameters only appear as direct operands of '=' or items in IN().
+ *      + Parameters only compare to direct sensitive columns.
+ *      + Parameter metadata matches the sensitive domain and every provided
+ *        token is used.
+ *
+ *  - Pass C. This runs only if sensitive mode is on.
+ *    It applies the extra sensitive-column restrictions recursively to all
+ *    nested queries (CTEs and subqueries) and checks that:
  *      + Sensitive columns are not referenced by casts or functions.
  *      + Sensitive columns appear only in SELECT (as simple colref) or WHERE.
  *      + Sensitive columns can only be compared using = or IN() and only to
  *        parameters.
- *      + Parameters can be compared only to sensitive columns.
  *      + WHERE must be a conjunction of predicates: `pred (AND pred)`. No
  *        `NOT`, no `OR`.
  *      + All JOINs must be INNER and use only = and AND; JOIN ON cannot
@@ -45,14 +54,14 @@
  * by the parser/IR layer before validation runs.
  */
 
-typedef enum SensitiveLoc {
-  SENS_LOC_SELECT = 1,
-  SENS_LOC_WHERE,
-  SENS_LOC_JOIN_ON,
-  SENS_LOC_GROUP_BY,
-  SENS_LOC_HAVING,
-  SENS_LOC_ORDER_BY
-} SensitiveLoc;
+typedef enum QueryLoc {
+  QLOC_SELECT = 1,
+  QLOC_WHERE,
+  QLOC_JOIN_ON,
+  QLOC_GROUP_BY,
+  QLOC_HAVING,
+  QLOC_ORDER_BY
+} QueryLoc;
 
 typedef struct ValidatorCtx {
   DbBackend *db;
@@ -68,6 +77,10 @@ typedef struct ValidatorCtx {
 
 static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
                                            const QirQuery *q);
+static AdbxTriStatus validate_query_pass_b_params(ValidatorCtx *ctx,
+                                                  const QirQuery *q);
+static AdbxTriStatus validate_query_pass_c_sensitive(ValidatorCtx *ctx,
+                                                     const QirQuery *q);
 static inline const QirFromItem *find_from_alias(const QirQuery *q,
                                                  const char *alias);
 
@@ -350,9 +363,10 @@ validator_validate_param_domain_for_col(ValidatorCtx *ctx, const QirQuery *q,
                                                &domain_len);
   if (mrc == ERR)
     return ERR;
-  if (mrc != YES) {
-    set_err(ctx, VERR_ANALYZE_FAIL,
-            "Unable to resolve sensitive domain during token validation.");
+  if (mrc == NO) {
+    set_err(ctx, VERR_PARAM_NON_SENSITIVE,
+            "Parameters can only be compared to direct columns of the same "
+            "sensitive domain.");
     return ERR;
   }
   if (tok->domain_len != domain_len ||
@@ -403,7 +417,7 @@ typedef AdbxTriStatus (*ValidateQueryFn)(ValidatorCtx *, const QirQuery *);
 
 /* Walks an expression tree and validates all nested subqueries via the
  * callback provided by the caller. The callback controls the policy (Pass A
- * vs Pass B). */
+ * vs Pass B vs Pass C). */
 static AdbxTriStatus
 validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
                          ValidateQueryFn validate_query_fn) {
@@ -948,53 +962,117 @@ static AdbxTriStatus expr_has_param(const QirExpr *e) {
   return ERR;
 }
 
-/* Validates that parameters are only used inside WHERE and only compared to
- * sensitive columns. This is enforced in Pass A to avoid data exfiltration. */
-static AdbxTriStatus validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
-                                           const QirExpr *e) {
-  if (!q || !ctx || !e)
+/* Returns YES when 'other' is a direct sensitive column with the same domain
+ * as parameter 'param_idx', NO on policy mismatch, ERR on malformed input or
+ * resolution failure.
+ * It borrows all inputs and performs no allocations. On success it also marks
+ * the matched parameter as used.
+ */
+static AdbxTriStatus
+validate_param_direct_sensitive_target(ValidatorCtx *ctx, const QirQuery *q,
+                                       const QirExpr *other, int param_idx) {
+  if (!ctx || !q || !other)
     return ERR;
 
+  if (other->kind != QIR_EXPR_COLREF) {
+    set_err(ctx, VERR_PARAM_NON_SENSITIVE,
+            "Parameters can only compare to direct sensitive columns.");
+    return NO;
+  }
+
+  return validator_validate_param_domain_for_col(ctx, q, &other->u.colref,
+                                                 param_idx);
+}
+
+/* Validates parameter usage for one expression tree in one query clause.
+ * It borrows 'ctx', 'q', and 'e'. Nested subqueries are intentionally treated
+ * as separate query scopes and are NOT recursively validate.
+ * Side effects: marks parameters as used, and  writes one validator error on
+ * rejection. Returns YES on success, NO on policy mismatch, ERR on malformed
+ * input or internal failure.
+ */
+static AdbxTriStatus validate_param_expr(ValidatorCtx *ctx, const QirQuery *q,
+                                         const QirExpr *e, QueryLoc loc) {
+  if (!ctx || !q || !e)
+    return ERR;
+
+  if (loc != QLOC_WHERE) {
+    AdbxTriStatus has_param = expr_has_param(e);
+    if (has_param == ERR)
+      return ERR;
+    if (has_param == YES) {
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+              "Parameters are only allowed as direct operands of WHERE '=' or "
+              "IN predicates.");
+      return NO;
+    }
+    return YES;
+  }
+
   switch (e->kind) {
-  case QIR_EXPR_AND: {
-    int rc = validate_params_where(ctx, q, e->u.bin.l);
+  case QIR_EXPR_SUBQUERY:
+  case QIR_EXPR_LITERAL:
+  case QIR_EXPR_COLREF:
+    return YES;
+  case QIR_EXPR_AND:
+  case QIR_EXPR_OR: {
+    AdbxTriStatus rc = validate_param_expr(ctx, q, e->u.bin.l, loc);
     if (rc != YES)
       return rc;
-    return validate_params_where(ctx, q, e->u.bin.r);
+    return validate_param_expr(ctx, q, e->u.bin.r, loc);
   }
+  case QIR_EXPR_NOT:
+    return validate_param_expr(ctx, q, e->u.bin.l, loc);
   case QIR_EXPR_EQ: {
-    int left_param = (e->u.bin.l && e->u.bin.l->kind == QIR_EXPR_PARAM);
-    if (left_param) {
-      // We don't check whether the sensitive column is a base reference
-      // because it's not the responsibility of this function
-      int sens_r = expr_has_sensitive(ctx, q, e->u.bin.r);
-      if (sens_r == ERR)
-        return ERR;
-      if (sens_r != YES) {
-        set_err(ctx, VERR_PARAM_NON_SENSITIVE,
-                "Parameters can only compare to sensitive columns.");
-        return NO;
-      }
+    if (!e->u.bin.l || !e->u.bin.r) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL WHERE operand).");
+      return ERR;
     }
-    int right_param = (e->u.bin.r && e->u.bin.r->kind == QIR_EXPR_PARAM);
-    if (right_param) {
-      int sens_l = expr_has_sensitive(ctx, q, e->u.bin.l);
-      if (sens_l == ERR)
-        return ERR;
-      if (sens_l != YES) {
-        set_err(ctx, VERR_PARAM_NON_SENSITIVE,
-                "Parameters can only compare to sensitive columns.");
-        return NO;
-      }
+
+    if (e->u.bin.l->kind == QIR_EXPR_PARAM) {
+      return validate_param_direct_sensitive_target(ctx, q, e->u.bin.r,
+                                                    e->u.bin.l->u.param_index);
+    }
+    if (e->u.bin.r->kind == QIR_EXPR_PARAM) {
+      return validate_param_direct_sensitive_target(ctx, q, e->u.bin.l,
+                                                    e->u.bin.r->u.param_index);
+    }
+
+    // this code is reached only if parameters are not referenced directly
+    // inside bin.l and bin.r
+    AdbxTriStatus left_has_param = expr_has_param(e->u.bin.l);
+    if (left_has_param == ERR)
+      return ERR;
+    AdbxTriStatus right_has_param = expr_has_param(e->u.bin.r);
+    if (right_has_param == ERR)
+      return ERR;
+
+    if (left_has_param == YES || right_has_param == YES) {
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+              "Parameters are only allowed as direct operands of WHERE '=' or "
+              "IN predicates.");
+      return NO;
     }
     return YES;
   }
   case QIR_EXPR_IN: {
-    if (!e->u.in_.lhs)
+    if (!e->u.in_.lhs) {
+      set_err(ctx, VERR_ANALYZE_FAIL, "Invalid query structure (NULL IN lhs).");
       return ERR;
-    int sens_l = expr_has_sensitive(ctx, q, e->u.in_.lhs);
-    if (sens_l == ERR)
+    }
+
+    int lhs_has_param = expr_has_param(e->u.in_.lhs);
+    if (lhs_has_param == ERR)
       return ERR;
+    if (lhs_has_param == YES) {
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+              "Parameters are only allowed as direct operands of WHERE '=' or "
+              "IN predicates.");
+      return NO;
+    }
+
+    int saw_param = 0;
     for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
       const QirExpr *it = e->u.in_.items[i];
       if (!it) {
@@ -1003,27 +1081,44 @@ static AdbxTriStatus validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
         return ERR;
       }
       if (it->kind == QIR_EXPR_PARAM) {
-        if (sens_l != YES) {
-          set_err(
-              ctx, VERR_PARAM_NON_SENSITIVE,
-              "Parameters inside IN() can only compare to sensitive columns.");
-          return NO;
-        }
+        saw_param = 1;
+        continue;
+      }
+
+      int item_has_param = expr_has_param(it);
+      if (item_has_param == ERR)
+        return ERR;
+      if (item_has_param == YES) {
+        set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+                "Parameters are only allowed as direct operands of WHERE '=' "
+                "or IN predicates.");
+        return NO;
       }
     }
-    return YES;
-  }
-  case QIR_EXPR_OR:
-  case QIR_EXPR_NOT: {
-    // Allow parameters inside WHERE boolean structure; Pass B will enforce
-    // sensitive-mode restrictions (AND-only, etc).
-    if (e->u.bin.r) {
-      int rc = validate_params_where(ctx, q, e->u.bin.r);
+
+    if (!saw_param)
+      return YES;
+
+    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
+      const QirExpr *it = e->u.in_.items[i];
+      if (!it || it->kind != QIR_EXPR_PARAM)
+        continue;
+      AdbxTriStatus rc = validate_param_direct_sensitive_target(
+          ctx, q, e->u.in_.lhs, it->u.param_index);
       if (rc != YES)
         return rc;
     }
-    return validate_params_where(ctx, q, e->u.bin.l);
+    return YES;
   }
+  case QIR_EXPR_PARAM:
+    set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+            "Parameters are only allowed as direct operands of WHERE '=' or "
+            "IN predicates.");
+    return NO;
+  case QIR_EXPR_FUNCALL:
+  case QIR_EXPR_CAST:
+  case QIR_EXPR_CASE:
+  case QIR_EXPR_WINDOWFUNC:
   case QIR_EXPR_NE:
   case QIR_EXPR_GT:
   case QIR_EXPR_GE:
@@ -1031,32 +1126,26 @@ static AdbxTriStatus validate_params_where(ValidatorCtx *ctx, const QirQuery *q,
   case QIR_EXPR_LE:
   case QIR_EXPR_LIKE:
   case QIR_EXPR_NOT_LIKE: {
-    // Comparisons are valid WHERE contexts for parameters in Pass A.
-    // Sensitive-mode constraints are enforced later in Pass B.
-    return YES;
-  }
-  case QIR_EXPR_PARAM:
-    // we should not see a dangling param inside the WHERE
-    set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-            "Parameters are only allowed inside WHERE comparisons.");
-    return NO;
-  case QIR_EXPR_SUBQUERY:
-  case QIR_EXPR_LITERAL:
-  case QIR_EXPR_COLREF:
-  case QIR_EXPR_FUNCALL:
-  case QIR_EXPR_CAST:
-  case QIR_EXPR_CASE:
-  case QIR_EXPR_WINDOWFUNC:
-    if (expr_has_param(e) == YES) {
+    AdbxTriStatus has_param = expr_has_param(e);
+    if (has_param == ERR)
+      return ERR;
+    if (has_param == YES) {
       set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed inside WHERE comparisons,");
+              "Parameters are only allowed as direct operands of WHERE '=' or "
+              "IN predicates.");
       return NO;
     }
     return YES;
+  }
   case QIR_EXPR_UNSUPPORTED:
     return ERR;
   }
   return ERR;
+}
+
+static AdbxTriStatus validate_expr_subqueries_pass_b_params(ValidatorCtx *ctx,
+                                                            const QirExpr *e) {
+  return validate_expr_subqueries(ctx, e, validate_query_pass_b_params);
 }
 
 /* Pass A: validates alias requirements, function safety, and validates
@@ -1085,11 +1174,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
     int rc = validate_expr_functions(ctx, q->select_items[i]->value);
     if (rc != YES)
       return rc;
-    if (expr_has_param(q->select_items[i]->value) == YES) {
-      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed inside WHERE.");
-      return NO;
-    }
     rc = validate_expr_subqueries_pass_a(ctx, q->select_items[i]->value);
     if (rc != YES)
       return rc;
@@ -1097,9 +1181,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
   // WHERE
   if (q->where) {
     int rc = validate_expr_functions(ctx, q->where);
-    if (rc != YES)
-      return rc;
-    rc = validate_params_where(ctx, q, q->where);
     if (rc != YES)
       return rc;
     rc = validate_expr_subqueries_pass_a(ctx, q->where);
@@ -1111,11 +1192,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
     int rc = validate_expr_functions(ctx, q->group_by[i]);
     if (rc != YES)
       return rc;
-    if (expr_has_param(q->group_by[i]) == YES) {
-      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed inside WHERE.");
-      return NO;
-    }
     rc = validate_expr_subqueries_pass_a(ctx, q->group_by[i]);
     if (rc != YES)
       return rc;
@@ -1125,11 +1201,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
     int rc = validate_expr_functions(ctx, q->having);
     if (rc != YES)
       return rc;
-    if (expr_has_param(q->having) == YES) {
-      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed inside WHERE.");
-      return NO;
-    }
     rc = validate_expr_subqueries_pass_a(ctx, q->having);
     if (rc != YES)
       return rc;
@@ -1139,11 +1210,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
     int rc = validate_expr_functions(ctx, q->order_by[i]);
     if (rc != YES)
       return rc;
-    if (expr_has_param(q->order_by[i]) == YES) {
-      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed inside WHERE.");
-      return NO;
-    }
     rc = validate_expr_subqueries_pass_a(ctx, q->order_by[i]);
     if (rc != YES)
       return rc;
@@ -1153,11 +1219,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
     int rc = validate_expr_functions(ctx, q->joins[i]->on);
     if (rc != YES)
       return rc;
-    if (expr_has_param(q->joins[i]->on) == YES) {
-      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed inside WHERE.");
-      return NO;
-    }
     rc = validate_expr_subqueries_pass_a(ctx, q->joins[i]->on);
     if (rc != YES)
       return rc;
@@ -1185,14 +1246,124 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
   return YES;
 }
 
-// PASS B START
+/* Pass B: validates token parameter placement and binding rules for this query
+ * and all nested queries.
+ */
+static AdbxTriStatus validate_query_pass_b_params(ValidatorCtx *ctx,
+                                                  const QirQuery *q) {
+  if (!ctx || !ctx->db || !ctx->cp || !q)
+    return ERR;
 
-static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
-                                           const QirQuery *q);
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
+    if (!si || !si->value) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL SELECT item).");
+      return ERR;
+    }
+    AdbxTriStatus rc = validate_param_expr(ctx, q, si->value, QLOC_SELECT);
+    if (rc != YES)
+      return rc;
+    rc = validate_expr_subqueries_pass_b_params(ctx, si->value);
+    if (rc != YES)
+      return rc;
+  }
 
-static AdbxTriStatus validate_expr_subqueries_pass_b(ValidatorCtx *ctx,
-                                                     const QirExpr *e) {
-  return validate_expr_subqueries(ctx, e, validate_query_pass_b);
+  if (q->where) {
+    AdbxTriStatus rc = validate_param_expr(ctx, q, q->where, QLOC_WHERE);
+    if (rc != YES)
+      return rc;
+    rc = validate_expr_subqueries_pass_b_params(ctx, q->where);
+    if (rc != YES)
+      return rc;
+  }
+
+  for (uint32_t i = 0; i < q->n_group_by; i++) {
+    QirExpr *e = q->group_by ? q->group_by[i] : NULL;
+    if (!e) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL GROUP BY item).");
+      return ERR;
+    }
+    AdbxTriStatus rc = validate_param_expr(ctx, q, e, QLOC_GROUP_BY);
+    if (rc != YES)
+      return rc;
+    rc = validate_expr_subqueries_pass_b_params(ctx, e);
+    if (rc != YES)
+      return rc;
+  }
+
+  if (q->having) {
+    AdbxTriStatus rc = validate_param_expr(ctx, q, q->having, QLOC_HAVING);
+    if (rc != YES)
+      return rc;
+    rc = validate_expr_subqueries_pass_b_params(ctx, q->having);
+    if (rc != YES)
+      return rc;
+  }
+
+  for (uint32_t i = 0; i < q->n_order_by; i++) {
+    QirExpr *e = q->order_by ? q->order_by[i] : NULL;
+    if (!e) {
+      set_err(ctx, VERR_ANALYZE_FAIL,
+              "Invalid query structure (NULL ORDER BY item).");
+      return ERR;
+    }
+    AdbxTriStatus rc = validate_param_expr(ctx, q, e, QLOC_ORDER_BY);
+    if (rc != YES)
+      return rc;
+    rc = validate_expr_subqueries_pass_b_params(ctx, e);
+    if (rc != YES)
+      return rc;
+  }
+
+  for (uint32_t i = 0; i < q->njoins; i++) {
+    const QirJoin *j = q->joins ? q->joins[i] : NULL;
+    if (!j) {
+      set_err(ctx, VERR_ANALYZE_FAIL, "Invalid query structure (NULL JOIN).");
+      return ERR;
+    }
+    if (!j->on)
+      continue;
+    AdbxTriStatus rc = validate_param_expr(ctx, q, j->on, QLOC_JOIN_ON);
+    if (rc != YES)
+      return rc;
+    rc = validate_expr_subqueries_pass_b_params(ctx, j->on);
+    if (rc != YES)
+      return rc;
+  }
+
+  for (uint32_t i = 0; i < q->nctes; i++) {
+    AdbxTriStatus rc = validate_query_pass_b_params(ctx, q->ctes[i]->query);
+    if (rc != YES)
+      return rc;
+  }
+  if (q->from_root && q->from_root->kind == QIR_FROM_SUBQUERY) {
+    AdbxTriStatus rc =
+        validate_query_pass_b_params(ctx, q->from_root->u.subquery);
+    if (rc != YES)
+      return rc;
+  }
+  for (uint32_t i = 0; i < q->njoins; i++) {
+    const QirFromItem *fi = q->joins ? q->joins[i]->rhs : NULL;
+    if (fi && fi->kind == QIR_FROM_SUBQUERY) {
+      AdbxTriStatus rc = validate_query_pass_b_params(ctx, fi->u.subquery);
+      if (rc != YES)
+        return rc;
+    }
+  }
+
+  return YES;
+}
+
+// PASS C START
+
+static AdbxTriStatus validate_query_pass_c_sensitive(ValidatorCtx *ctx,
+                                                     const QirQuery *q);
+
+static AdbxTriStatus
+validate_expr_subqueries_pass_c_sensitive(ValidatorCtx *ctx, const QirExpr *e) {
+  return validate_expr_subqueries(ctx, e, validate_query_pass_c_sensitive);
 }
 
 static inline bool expr_is_simple_operand(const QirExpr *e) {
@@ -1206,13 +1377,12 @@ static inline bool expr_is_simple_operand(const QirExpr *e) {
  * Read the start of validator.c for doc. */
 static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
                                              const QirQuery *main_q,
-                                             const QirExpr *e,
-                                             SensitiveLoc loc) {
+                                             const QirExpr *e, QueryLoc loc) {
   if (!ctx || !main_q || !e)
     return ERR;
 
   switch (loc) {
-  case SENS_LOC_SELECT: {
+  case QLOC_SELECT: {
     int sens = expr_has_sensitive(ctx, main_q, e);
     if (sens == ERR)
       return ERR;
@@ -1224,7 +1394,7 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
     return YES;
   }
 
-  case SENS_LOC_JOIN_ON: {
+  case QLOC_JOIN_ON: {
     switch (e->kind) {
     case QIR_EXPR_AND: {
       int rc = validate_sensitive_expr(ctx, main_q, e->u.bin.l, loc);
@@ -1264,10 +1434,10 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
     }
   }
 
-  case SENS_LOC_WHERE: {
+  case QLOC_WHERE: {
     switch (e->kind) {
     case QIR_EXPR_SUBQUERY: {
-      return validate_query_pass_b(ctx, e->u.subquery);
+      return validate_query_pass_c_sensitive(ctx, e->u.subquery);
     }
     case QIR_EXPR_AND: {
       int rc = validate_sensitive_expr(ctx, main_q, e->u.bin.l, loc);
@@ -1299,10 +1469,6 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
                   desc);
           return NO;
         }
-        int prc = validator_validate_param_domain_for_col(
-            ctx, main_q, &e->u.bin.l->u.colref, e->u.bin.r->u.param_index);
-        if (prc != YES)
-          return prc;
       }
       if (sens_r == YES) {
         if (e->u.bin.r->kind != QIR_EXPR_COLREF) {
@@ -1320,10 +1486,6 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
                   desc);
           return NO;
         }
-        int prc = validator_validate_param_domain_for_col(
-            ctx, main_q, &e->u.bin.r->u.colref, e->u.bin.l->u.param_index);
-        if (prc != YES)
-          return prc;
       }
       return YES;
     }
@@ -1356,10 +1518,6 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
                     desc);
             return NO;
           }
-          int prc = validator_validate_param_domain_for_col(
-              ctx, main_q, &e->u.in_.lhs->u.colref, it->u.param_index);
-          if (prc != YES)
-            return prc;
         }
 
         int sens_i = expr_has_sensitive(ctx, main_q, it);
@@ -1387,23 +1545,23 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
       return NO;
     }
   }
-  case SENS_LOC_GROUP_BY:
-  case SENS_LOC_HAVING:
-  case SENS_LOC_ORDER_BY: {
+  case QLOC_GROUP_BY:
+  case QLOC_HAVING:
+  case QLOC_ORDER_BY: {
     int sens = expr_has_sensitive(ctx, main_q, e);
     if (sens == ERR)
       return ERR;
     if (sens == YES) {
       const char *desc = validator_expr_diag(ctx, e);
-      if (loc == SENS_LOC_GROUP_BY) {
+      if (loc == QLOC_GROUP_BY) {
         set_err(ctx, VERR_SENSITIVE_LOC,
                 "GROUP BY cannot reference sensitive column '%s'.", desc);
       }
-      if (loc == SENS_LOC_HAVING) {
+      if (loc == QLOC_HAVING) {
         set_err(ctx, VERR_SENSITIVE_LOC,
                 "HAVING cannot reference sensitive column '%s'.", desc);
       }
-      if (loc == SENS_LOC_ORDER_BY) {
+      if (loc == QLOC_ORDER_BY) {
         set_err(ctx, VERR_SENSITIVE_LOC,
                 "ORDER BY cannot reference sensitive column '%s'.", desc);
       }
@@ -1417,8 +1575,8 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
 
 /* Pass B: enforces Sensitive Mode rules on this query and all nested queries.
  * This pass should only be executed when Sensitive Mode is enabled. */
-static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
-                                           const QirQuery *q) {
+static AdbxTriStatus validate_query_pass_c_sensitive(ValidatorCtx *ctx,
+                                                     const QirQuery *q) {
   if (!ctx || !ctx->db || !ctx->cp || !q)
     return ERR;
 
@@ -1458,7 +1616,7 @@ static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
       return NO;
     }
     if (j->on) {
-      int rc = validate_sensitive_expr(ctx, q, j->on, SENS_LOC_JOIN_ON);
+      int rc = validate_sensitive_expr(ctx, q, j->on, QLOC_JOIN_ON);
       if (rc != YES)
         return rc;
     }
@@ -1466,7 +1624,7 @@ static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
 
   // WHERE
   if (q->where) {
-    int rc = validate_sensitive_expr(ctx, q, q->where, SENS_LOC_WHERE);
+    int rc = validate_sensitive_expr(ctx, q, q->where, QLOC_WHERE);
     if (rc != YES)
       return rc;
   }
@@ -1479,10 +1637,10 @@ static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
               "Invalid query structure (NULL SELECT item).");
       return ERR;
     }
-    int rc = validate_sensitive_expr(ctx, q, si->value, SENS_LOC_SELECT);
+    int rc = validate_sensitive_expr(ctx, q, si->value, QLOC_SELECT);
     if (rc != YES)
       return rc;
-    rc = validate_expr_subqueries_pass_b(ctx, si->value);
+    rc = validate_expr_subqueries_pass_c_sensitive(ctx, si->value);
     if (rc != YES)
       return rc;
   }
@@ -1495,20 +1653,20 @@ static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
               "Invalid query structure (NULL GROUP BY item).");
       return ERR;
     }
-    int rc = validate_sensitive_expr(ctx, q, e, SENS_LOC_GROUP_BY);
+    int rc = validate_sensitive_expr(ctx, q, e, QLOC_GROUP_BY);
     if (rc != YES)
       return rc;
-    rc = validate_expr_subqueries_pass_b(ctx, e);
+    rc = validate_expr_subqueries_pass_c_sensitive(ctx, e);
     if (rc != YES)
       return rc;
   }
 
   // HAVING
   if (q->having) {
-    int rc = validate_sensitive_expr(ctx, q, q->having, SENS_LOC_HAVING);
+    int rc = validate_sensitive_expr(ctx, q, q->having, QLOC_HAVING);
     if (rc != YES)
       return rc;
-    rc = validate_expr_subqueries_pass_b(ctx, q->having);
+    rc = validate_expr_subqueries_pass_c_sensitive(ctx, q->having);
     if (rc != YES)
       return rc;
   }
@@ -1521,29 +1679,29 @@ static AdbxTriStatus validate_query_pass_b(ValidatorCtx *ctx,
               "Invalid query structure (NULL ORDER BY item).");
       return ERR;
     }
-    int rc = validate_sensitive_expr(ctx, q, e, SENS_LOC_ORDER_BY);
+    int rc = validate_sensitive_expr(ctx, q, e, QLOC_ORDER_BY);
     if (rc != YES)
       return rc;
-    rc = validate_expr_subqueries_pass_b(ctx, e);
+    rc = validate_expr_subqueries_pass_c_sensitive(ctx, e);
     if (rc != YES)
       return rc;
   }
 
   // Recurse into nested queries to enforce the same Sensitive Mode rules.
   for (uint32_t i = 0; i < q->nctes; i++) {
-    int rc = validate_query_pass_b(ctx, q->ctes[i]->query);
+    int rc = validate_query_pass_c_sensitive(ctx, q->ctes[i]->query);
     if (rc != YES)
       return rc;
   }
   if (q->from_root && q->from_root->kind == QIR_FROM_SUBQUERY) {
-    int rc = validate_query_pass_b(ctx, q->from_root->u.subquery);
+    int rc = validate_query_pass_c_sensitive(ctx, q->from_root->u.subquery);
     if (rc != YES)
       return rc;
   }
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirFromItem *fi = q->joins ? q->joins[i]->rhs : NULL;
     if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      int rc = validate_query_pass_b(ctx, fi->u.subquery);
+      int rc = validate_query_pass_c_sensitive(ctx, fi->u.subquery);
       if (rc != YES)
         return rc;
     }
@@ -1674,7 +1832,7 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     return ERR;
   }
 
-  // Pass A/Pass B design. Read the start of validator.c for doc.
+  // Pass A / Pass B / Pass C design. Read the start of validator.c for doc.
   rc = validate_query_pass_a(&ctx, q);
   if (rc != YES) {
     if (rc == ERR && out->err.code == VERR_NONE) {
@@ -1687,8 +1845,21 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     return ERR;
   }
 
+  rc = validate_query_pass_b_params(&ctx, q);
+  if (rc != YES) {
+    if (rc == ERR && out->err.code == VERR_NONE) {
+      set_err(&ctx, VERR_ANALYZE_FAIL,
+              "Unable to analyze query parameter usage.");
+    }
+    qir_touch_report_destroy(tr);
+    qir_handle_destroy(&h);
+    free(param_used);
+    sb_clean(&ctx.scratch);
+    return ERR;
+  }
+
   if (sensitive_mode == YES) {
-    rc = validate_query_pass_b(&ctx, q);
+    rc = validate_query_pass_c_sensitive(&ctx, q);
     if (rc != YES) {
       if (rc == ERR && out->err.code == VERR_NONE) {
         set_err(&ctx, VERR_ANALYZE_FAIL, "Unable to analyze sensitive query.");
