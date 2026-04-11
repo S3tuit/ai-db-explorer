@@ -45,6 +45,18 @@ static void assert_colref_expr(const QirExpr *e, const char *qual,
 #define ASSERT_COLREF(e, qual, col)                                            \
   assert_colref_expr((e), (qual), (col), __FILE__, __LINE__)
 
+/* Asserts that expression is one generalized operator node. */
+static void assert_op_expr(const QirExpr *e, QirOpClass cls,
+                           const char *op_name, const char *file, int line) {
+  ASSERT_TRUE_AT(e != NULL, file, line);
+  ASSERT_TRUE_AT(e->kind == QIR_EXPR_OP, file, line);
+  ASSERT_TRUE_AT(e->u.op.cls == cls, file, line);
+  ASSERT_TRUE_AT(e->u.op.op_name != NULL, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.op.op_name, op_name) == 0, file, line);
+}
+#define ASSERT_OP(e, cls, op_name)                                             \
+  assert_op_expr((e), (cls), (op_name), __FILE__, __LINE__)
+
 /* Asserts that the parsed statement flags match one EXPLAIN expectation. */
 static void assert_stmt_flags(const QirQuery *q, bool explain, bool analyze,
                               const char *file, int line) {
@@ -117,12 +129,14 @@ static void test_pg_params_predicates(void) {
   const QirExpr *lhs = h.q->where->u.bin.l;
   const QirExpr *rhs = h.q->where->u.bin.r;
   ASSERT_TRUE(lhs && rhs);
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_GE);
-  ASSERT_TRUE(lhs->u.bin.r->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(lhs->u.bin.r->u.param_index == 1);
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(rhs->u.bin.r->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(rhs->u.bin.r->u.param_index == 2);
+  ASSERT_OP(lhs, QIR_OP_OTHER, ">=");
+  ASSERT_TRUE(lhs->u.op.nargs == 1);
+  ASSERT_TRUE(lhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.param_index == 1);
+  ASSERT_OP(rhs, QIR_OP_EQ, "=");
+  ASSERT_TRUE(rhs->u.op.nargs == 1);
+  ASSERT_TRUE(rhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(rhs->u.op.args[0]->u.param_index == 2);
 
   qir_handle_destroy(&h);
 }
@@ -140,12 +154,12 @@ static void test_pg_in_list_params(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 3);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->u.param_index == 1);
-  ASSERT_TRUE(h.q->where->u.in_.items[1]->u.param_index == 2);
-  ASSERT_TRUE(h.q->where->u.in_.items[2]->u.param_index == 3);
+  ASSERT_OP(h.q->where, QIR_OP_IN, "=");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 3);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.param_index == 1);
+  ASSERT_TRUE(h.q->where->u.op.args[1]->u.param_index == 2);
+  ASSERT_TRUE(h.q->where->u.op.args[2]->u.param_index == 3);
 
   qir_handle_destroy(&h);
 }
@@ -287,7 +301,7 @@ static void test_pg_quoted_identifiers(void) {
   qir_handle_destroy(&h);
 }
 
-/* 10. ANY/ALL array comparisons should map to IN. */
+/* 10. ANY/ALL array comparisons should stay opaque operators in IR. */
 static void test_pg_any_all_as_in(void) {
   const char *sql = "SELECT p.name AS name "
                     "FROM private.people AS p "
@@ -300,10 +314,10 @@ static void test_pg_any_all_as_in(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 1);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->u.param_index == 1);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "=");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.param_index == 1);
 
   qir_handle_destroy(&h);
 }
@@ -338,16 +352,16 @@ static void test_pg_filter_normalized_to_case(void) {
   ASSERT_TRUE(sum->args[0]->u.case_.whens != NULL);
   ASSERT_TRUE(sum->args[0]->u.case_.whens[0] != NULL);
   ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr != NULL);
-  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->kind == QIR_EXPR_EQ);
-  ASSERT_COLREF(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.l, "p",
+  ASSERT_OP(sum->args[0]->u.case_.whens[0]->when_expr, QIR_OP_EQ, "=");
+  ASSERT_COLREF(sum->args[0]->u.case_.whens[0]->when_expr->u.op.lhs, "p",
                 "kind");
-  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r != NULL);
-  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r->kind ==
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0] != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0]->kind ==
               QIR_EXPR_LITERAL);
-  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r->u.lit.kind ==
-              QIR_LIT_STRING);
-  ASSERT_TRUE(strcmp(sum->args[0]->u.case_.whens[0]->when_expr->u.bin.r->u.lit
-                         .v.s,
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0]
+                  ->u.lit.kind == QIR_LIT_STRING);
+  ASSERT_TRUE(strcmp(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0]
+                         ->u.lit.v.s,
                      "invoice") == 0);
   ASSERT_COLREF(sum->args[0]->u.case_.whens[0]->then_expr, "p", "amount");
 
@@ -546,7 +560,7 @@ static void test_pg_cast_chains(void) {
   qir_handle_destroy(&h);
 }
 
-/* 21. ILIKE should normalize to LIKE-style predicates in IR. */
+/* 21. ILIKE should remain one opaque operator in IR. */
 static void test_pg_ilike_operators(void) {
   const char *sql = "SELECT p.name AS name "
                     "FROM private.people AS p "
@@ -565,14 +579,16 @@ static void test_pg_ilike_operators(void) {
   const QirExpr *rhs = h.q->where->u.bin.r;
   ASSERT_TRUE(lhs != NULL);
   ASSERT_TRUE(rhs != NULL);
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_LIKE);
-  ASSERT_TRUE(lhs->u.bin.r != NULL);
-  ASSERT_TRUE(lhs->u.bin.r->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(lhs->u.bin.r->u.param_index == 1);
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_NOT_LIKE);
-  ASSERT_TRUE(rhs->u.bin.r != NULL);
-  ASSERT_TRUE(rhs->u.bin.r->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(rhs->u.bin.r->u.param_index == 2);
+  ASSERT_OP(lhs, QIR_OP_OTHER, "~~*");
+  ASSERT_TRUE(lhs->u.op.nargs == 1);
+  ASSERT_TRUE(lhs->u.op.args[0] != NULL);
+  ASSERT_TRUE(lhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.param_index == 1);
+  ASSERT_OP(rhs, QIR_OP_OTHER, "!~~*");
+  ASSERT_TRUE(rhs->u.op.nargs == 1);
+  ASSERT_TRUE(rhs->u.op.args[0] != NULL);
+  ASSERT_TRUE(rhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(rhs->u.op.args[0]->u.param_index == 2);
 
   qir_handle_destroy(&h);
 }

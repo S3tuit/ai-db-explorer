@@ -441,14 +441,17 @@ validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
   }
   case QIR_EXPR_CAST:
     return validate_expr_subqueries(ctx, e->u.cast.expr, validate_query_fn);
-  case QIR_EXPR_EQ:
-  case QIR_EXPR_NE:
-  case QIR_EXPR_GT:
-  case QIR_EXPR_GE:
-  case QIR_EXPR_LT:
-  case QIR_EXPR_LE:
-  case QIR_EXPR_LIKE:
-  case QIR_EXPR_NOT_LIKE:
+  case QIR_EXPR_OP: {
+    int rc = validate_expr_subqueries(ctx, e->u.op.lhs, validate_query_fn);
+    if (rc != YES)
+      return rc;
+    for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+      rc = validate_expr_subqueries(ctx, e->u.op.args[i], validate_query_fn);
+      if (rc != YES)
+        return rc;
+    }
+    return YES;
+  }
   case QIR_EXPR_AND:
   case QIR_EXPR_OR: {
     int rc = validate_expr_subqueries(ctx, e->u.bin.l, validate_query_fn);
@@ -458,17 +461,6 @@ validate_expr_subqueries(ValidatorCtx *ctx, const QirExpr *e,
   }
   case QIR_EXPR_NOT:
     return validate_expr_subqueries(ctx, e->u.bin.l, validate_query_fn);
-  case QIR_EXPR_IN: {
-    int rc = validate_expr_subqueries(ctx, e->u.in_.lhs, validate_query_fn);
-    if (rc != YES)
-      return rc;
-    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      rc = validate_expr_subqueries(ctx, e->u.in_.items[i], validate_query_fn);
-      if (rc != YES)
-        return rc;
-    }
-    return YES;
-  }
   case QIR_EXPR_CASE: {
     if (e->u.case_.arg) {
       int rc = validate_expr_subqueries(ctx, e->u.case_.arg, validate_query_fn);
@@ -692,14 +684,17 @@ static AdbxTriStatus validate_expr_functions(ValidatorCtx *ctx,
   }
   case QIR_EXPR_CAST:
     return validate_expr_functions(ctx, e->u.cast.expr);
-  case QIR_EXPR_EQ:
-  case QIR_EXPR_NE:
-  case QIR_EXPR_GT:
-  case QIR_EXPR_GE:
-  case QIR_EXPR_LT:
-  case QIR_EXPR_LE:
-  case QIR_EXPR_LIKE:
-  case QIR_EXPR_NOT_LIKE:
+  case QIR_EXPR_OP: {
+    int rc = validate_expr_functions(ctx, e->u.op.lhs);
+    if (rc != YES)
+      return rc;
+    for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+      rc = validate_expr_functions(ctx, e->u.op.args[i]);
+      if (rc != YES)
+        return rc;
+    }
+    return YES;
+  }
   case QIR_EXPR_AND:
   case QIR_EXPR_OR: {
     int rc = validate_expr_functions(ctx, e->u.bin.l);
@@ -709,17 +704,6 @@ static AdbxTriStatus validate_expr_functions(ValidatorCtx *ctx,
   }
   case QIR_EXPR_NOT:
     return validate_expr_functions(ctx, e->u.bin.l);
-  case QIR_EXPR_IN: {
-    int rc = validate_expr_functions(ctx, e->u.in_.lhs);
-    if (rc != YES)
-      return rc;
-    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      rc = validate_expr_functions(ctx, e->u.in_.items[i]);
-      if (rc != YES)
-        return rc;
-    }
-    return YES;
-  }
   case QIR_EXPR_CASE: {
     if (e->u.case_.arg) {
       int rc = validate_expr_functions(ctx, e->u.case_.arg);
@@ -767,8 +751,10 @@ static AdbxTriStatus validate_expr_functions(ValidatorCtx *ctx,
  */
 static AdbxTriStatus expr_has_sensitive(ValidatorCtx *ctx, const QirQuery *q,
                                         const QirExpr *e) {
-  if (!ctx || !q || !e)
+  if (!ctx || !q)
     return ERR;
+  if (!e)
+    return NO;
 
   switch (e->kind) {
   case QIR_EXPR_COLREF:
@@ -777,9 +763,8 @@ static AdbxTriStatus expr_has_sensitive(ValidatorCtx *ctx, const QirQuery *q,
   case QIR_EXPR_LITERAL:
     return NO;
   case QIR_EXPR_SUBQUERY:
-    // we ignore subqueries since this func is used in Pass B and we know that
-    // if a query reaches Pass B it doesn't have sensitive columns inside
-    // subqueries or CTEs
+    // Subqueries are validated independently and do not contribute sensitivity
+    // to the enclosing expression tree.
     return NO;
   case QIR_EXPR_FUNCALL: {
     for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
@@ -791,14 +776,21 @@ static AdbxTriStatus expr_has_sensitive(ValidatorCtx *ctx, const QirQuery *q,
   }
   case QIR_EXPR_CAST:
     return expr_has_sensitive(ctx, q, e->u.cast.expr);
-  case QIR_EXPR_EQ:
-  case QIR_EXPR_NE:
-  case QIR_EXPR_GT:
-  case QIR_EXPR_GE:
-  case QIR_EXPR_LT:
-  case QIR_EXPR_LE:
-  case QIR_EXPR_LIKE:
-  case QIR_EXPR_NOT_LIKE:
+  case QIR_EXPR_OP: {
+    int rc = NO;
+    if (e->u.op.lhs) {
+      rc = expr_has_sensitive(ctx, q, e->u.op.lhs);
+      if (rc != NO)
+        return rc;
+    }
+
+    for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+      rc = expr_has_sensitive(ctx, q, e->u.op.args[i]);
+      if (rc != NO)
+        return rc;
+    }
+    return NO;
+  }
   case QIR_EXPR_AND:
   case QIR_EXPR_OR: {
     int rc = expr_has_sensitive(ctx, q, e->u.bin.l);
@@ -808,17 +800,6 @@ static AdbxTriStatus expr_has_sensitive(ValidatorCtx *ctx, const QirQuery *q,
   }
   case QIR_EXPR_NOT:
     return expr_has_sensitive(ctx, q, e->u.bin.l);
-  case QIR_EXPR_IN: {
-    int rc = expr_has_sensitive(ctx, q, e->u.in_.lhs);
-    if (rc != NO)
-      return rc;
-    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      rc = expr_has_sensitive(ctx, q, e->u.in_.items[i]);
-      if (rc != NO)
-        return rc;
-    }
-    return NO;
-  }
   case QIR_EXPR_CASE: {
     if (e->u.case_.arg) {
       int rc = expr_has_sensitive(ctx, q, e->u.case_.arg);
@@ -888,14 +869,17 @@ static AdbxTriStatus expr_has_param(const QirExpr *e) {
   }
   case QIR_EXPR_CAST:
     return expr_has_param(e->u.cast.expr);
-  case QIR_EXPR_EQ:
-  case QIR_EXPR_NE:
-  case QIR_EXPR_GT:
-  case QIR_EXPR_GE:
-  case QIR_EXPR_LT:
-  case QIR_EXPR_LE:
-  case QIR_EXPR_LIKE:
-  case QIR_EXPR_NOT_LIKE:
+  case QIR_EXPR_OP: {
+    int rc = expr_has_param(e->u.op.lhs);
+    if (rc != NO)
+      return rc;
+    for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+      rc = expr_has_param(e->u.op.args[i]);
+      if (rc != NO)
+        return rc;
+    }
+    return NO;
+  }
   case QIR_EXPR_AND:
   case QIR_EXPR_OR: {
     int rc = expr_has_param(e->u.bin.l);
@@ -905,17 +889,6 @@ static AdbxTriStatus expr_has_param(const QirExpr *e) {
   }
   case QIR_EXPR_NOT:
     return expr_has_param(e->u.bin.l);
-  case QIR_EXPR_IN: {
-    int rc = expr_has_param(e->u.in_.lhs);
-    if (rc != NO)
-      return rc;
-    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      rc = expr_has_param(e->u.in_.items[i]);
-      if (rc != NO)
-        return rc;
-    }
-    return NO;
-  }
   case QIR_EXPR_CASE: {
     if (e->u.case_.arg) {
       int rc = expr_has_param(e->u.case_.arg);
@@ -1023,90 +996,109 @@ static AdbxTriStatus validate_param_expr(ValidatorCtx *ctx, const QirQuery *q,
   }
   case QIR_EXPR_NOT:
     return validate_param_expr(ctx, q, e->u.bin.l, loc);
-  case QIR_EXPR_EQ: {
-    if (!e->u.bin.l || !e->u.bin.r) {
+  case QIR_EXPR_OP: {
+    // EQ and IN must not have the left hand side NULL
+    if (e->u.op.cls != QIR_OP_OTHER && !e->u.op.lhs) {
       set_err(ctx, VERR_ANALYZE_FAIL,
-              "Invalid query structure (NULL WHERE operand).");
+              "Invalid query structure (NULL operator lhs).");
       return ERR;
     }
 
-    if (e->u.bin.l->kind == QIR_EXPR_PARAM) {
-      return validate_param_direct_sensitive_target(ctx, q, e->u.bin.r,
-                                                    e->u.bin.l->u.param_index);
-    }
-    if (e->u.bin.r->kind == QIR_EXPR_PARAM) {
-      return validate_param_direct_sensitive_target(ctx, q, e->u.bin.l,
-                                                    e->u.bin.r->u.param_index);
-    }
-
-    // this code is reached only if parameters are not referenced directly
-    // inside bin.l and bin.r
-    AdbxTriStatus left_has_param = expr_has_param(e->u.bin.l);
-    if (left_has_param == ERR)
-      return ERR;
-    AdbxTriStatus right_has_param = expr_has_param(e->u.bin.r);
-    if (right_has_param == ERR)
-      return ERR;
-
-    if (left_has_param == YES || right_has_param == YES) {
-      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed as direct operands of WHERE '=' or "
-              "IN predicates.");
-      return NO;
-    }
-    return YES;
-  }
-  case QIR_EXPR_IN: {
-    if (!e->u.in_.lhs) {
-      set_err(ctx, VERR_ANALYZE_FAIL, "Invalid query structure (NULL IN lhs).");
-      return ERR;
-    }
-
-    int lhs_has_param = expr_has_param(e->u.in_.lhs);
-    if (lhs_has_param == ERR)
-      return ERR;
-    if (lhs_has_param == YES) {
-      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
-              "Parameters are only allowed as direct operands of WHERE '=' or "
-              "IN predicates.");
-      return NO;
-    }
-
-    int saw_param = 0;
-    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      const QirExpr *it = e->u.in_.items[i];
-      if (!it) {
+    if (e->u.op.cls == QIR_OP_EQ) {
+      if (!e->u.op.args || e->u.op.nargs != 1 || !e->u.op.args[0]) {
         set_err(ctx, VERR_ANALYZE_FAIL,
-                "Invalid query structure (NULL IN item).");
+                "Invalid query structure (malformed '=' predicate).");
         return ERR;
-      }
-      if (it->kind == QIR_EXPR_PARAM) {
-        saw_param = 1;
-        continue;
       }
 
-      int item_has_param = expr_has_param(it);
-      if (item_has_param == ERR)
+      const QirExpr *rhs = e->u.op.args[0];
+      if (e->u.op.lhs->kind == QIR_EXPR_PARAM) {
+        return validate_param_direct_sensitive_target(
+            ctx, q, rhs, e->u.op.lhs->u.param_index);
+      }
+      if (rhs->kind == QIR_EXPR_PARAM) {
+        return validate_param_direct_sensitive_target(ctx, q, e->u.op.lhs,
+                                                      rhs->u.param_index);
+      }
+
+      AdbxTriStatus lhs_has_param = expr_has_param(e->u.op.lhs);
+      if (lhs_has_param == ERR)
         return ERR;
-      if (item_has_param == YES) {
+      AdbxTriStatus rhs_has_param = expr_has_param(rhs);
+      if (rhs_has_param == ERR)
+        return ERR;
+      if (lhs_has_param == YES || rhs_has_param == YES) {
         set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
                 "Parameters are only allowed as direct operands of WHERE '=' "
                 "or IN predicates.");
         return NO;
       }
+      return YES;
     }
 
-    if (!saw_param)
-      return YES;
+    if (e->u.op.cls == QIR_OP_IN) {
+      if (!e->u.op.args || e->u.op.nargs == 0) {
+        set_err(ctx, VERR_ANALYZE_FAIL,
+                "Invalid query structure (malformed IN predicate).");
+        return ERR;
+      }
 
-    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      const QirExpr *it = e->u.in_.items[i];
-      if (!it || it->kind != QIR_EXPR_PARAM)
-        continue;
-      AdbxTriStatus rc = validate_param_direct_sensitive_target(
-          ctx, q, e->u.in_.lhs, it->u.param_index);
-      if (rc != YES)
-        return rc;
+      AdbxTriStatus lhs_has_param = expr_has_param(e->u.op.lhs);
+      if (lhs_has_param == ERR)
+        return ERR;
+      if (lhs_has_param == YES) {
+        set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+                "Parameters are only allowed as direct operands of WHERE '=' "
+                "or IN predicates.");
+        return NO;
+      }
+
+      int saw_param = 0;
+      for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+        const QirExpr *it = e->u.op.args[i];
+        if (!it) {
+          set_err(ctx, VERR_ANALYZE_FAIL,
+                  "Invalid query structure (NULL IN item).");
+          return ERR;
+        }
+        if (it->kind == QIR_EXPR_PARAM) {
+          saw_param = 1;
+          continue;
+        }
+        AdbxTriStatus item_has_param = expr_has_param(it);
+        if (item_has_param == ERR)
+          return ERR;
+        if (item_has_param == YES) {
+          set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+                  "Parameters are only allowed as direct operands of WHERE '=' "
+                  "or IN predicates.");
+          return NO;
+        }
+      }
+
+      if (!saw_param)
+        return YES;
+
+      for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+        const QirExpr *it = e->u.op.args[i];
+        if (!it || it->kind != QIR_EXPR_PARAM)
+          continue;
+        AdbxTriStatus rc = validate_param_direct_sensitive_target(
+            ctx, q, e->u.op.lhs, it->u.param_index);
+        if (rc != YES)
+          return rc;
+      }
+      return YES;
+    }
+
+    AdbxTriStatus has_param = expr_has_param(e);
+    if (has_param == ERR)
+      return ERR;
+    if (has_param == YES) {
+      set_err(ctx, VERR_PARAM_OUTSIDE_WHERE,
+              "Parameters are only allowed as direct operands of WHERE '=' or "
+              "IN predicates.");
+      return NO;
     }
     return YES;
   }
@@ -1118,14 +1110,7 @@ static AdbxTriStatus validate_param_expr(ValidatorCtx *ctx, const QirQuery *q,
   case QIR_EXPR_FUNCALL:
   case QIR_EXPR_CAST:
   case QIR_EXPR_CASE:
-  case QIR_EXPR_WINDOWFUNC:
-  case QIR_EXPR_NE:
-  case QIR_EXPR_GT:
-  case QIR_EXPR_GE:
-  case QIR_EXPR_LT:
-  case QIR_EXPR_LE:
-  case QIR_EXPR_LIKE:
-  case QIR_EXPR_NOT_LIKE: {
+  case QIR_EXPR_WINDOWFUNC: {
     AdbxTriStatus has_param = expr_has_param(e);
     if (has_param == ERR)
       return ERR;
@@ -1402,23 +1387,29 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
         return rc;
       return validate_sensitive_expr(ctx, main_q, e->u.bin.r, loc);
     }
-    case QIR_EXPR_EQ: {
-      if (!expr_is_simple_operand(e->u.bin.l) ||
-          !expr_is_simple_operand(e->u.bin.r)) {
+    case QIR_EXPR_OP: {
+      if (e->u.op.cls != QIR_OP_EQ || !e->u.op.args || e->u.op.nargs != 1 ||
+          !e->u.op.args[0]) {
+        set_err(ctx, VERR_JOIN_ON_INVALID,
+                "JOIN ON must be AND of '=' predicates");
+        return NO;
+      }
+      if (!expr_is_simple_operand(e->u.op.lhs) ||
+          !expr_is_simple_operand(e->u.op.args[0])) {
         set_err(
             ctx, VERR_JOIN_ON_INVALID,
             "JOIN predicates must compare simple operands in sensitive mode.");
         return NO;
       }
-      int sens_l = expr_has_sensitive(ctx, main_q, e->u.bin.l);
+      int sens_l = expr_has_sensitive(ctx, main_q, e->u.op.lhs);
       if (sens_l == ERR)
         return ERR;
-      int sens_r = expr_has_sensitive(ctx, main_q, e->u.bin.r);
+      int sens_r = expr_has_sensitive(ctx, main_q, e->u.op.args[0]);
       if (sens_r == ERR)
         return ERR;
       if (sens_l == YES || sens_r == YES) {
-        const char *desc_l = validator_expr_diag(ctx, e->u.bin.l);
-        const char *desc_r = validator_expr_diag(ctx, e->u.bin.r);
+        const char *desc_l = validator_expr_diag(ctx, e->u.op.lhs);
+        const char *desc_r = validator_expr_diag(ctx, e->u.op.args[0]);
         set_err(ctx, VERR_JOIN_ON_SENSITIVE,
                 "JOIN predicate references sensitive column ('%s' or '%s'), "
                 "which is not allowed.",
@@ -1445,93 +1436,111 @@ static AdbxTriStatus validate_sensitive_expr(ValidatorCtx *ctx,
         return rc;
       return validate_sensitive_expr(ctx, main_q, e->u.bin.r, loc);
     }
-    case QIR_EXPR_EQ: {
-      int sens_l = expr_has_sensitive(ctx, main_q, e->u.bin.l);
-      if (sens_l == ERR)
-        return ERR;
-      int sens_r = expr_has_sensitive(ctx, main_q, e->u.bin.r);
-      if (sens_r == ERR)
-        return ERR;
-
-      if (sens_l == YES) {
-        if (e->u.bin.l->kind != QIR_EXPR_COLREF) {
-          const char *desc = validator_expr_diag(ctx, e->u.bin.l);
-          set_err(ctx, VERR_SENSITIVE_LOC,
-                  "Sensitive column '%s' must be referenced directly in WHERE.",
-                  desc);
-          return NO;
-        }
-        if (e->u.bin.r->kind != QIR_EXPR_PARAM) {
-          const char *desc =
-              qir_colref_to_str(&e->u.bin.l->u.colref, &ctx->scratch);
-          set_err(ctx, VERR_SENSITIVE_CMP,
-                  "Sensitive column '%s' must compare only to parameters.",
-                  desc);
-          return NO;
-        }
-      }
-      if (sens_r == YES) {
-        if (e->u.bin.r->kind != QIR_EXPR_COLREF) {
-          const char *desc = validator_expr_diag(ctx, e->u.bin.r);
-          set_err(ctx, VERR_SENSITIVE_LOC,
-                  "Sensitive column '%s' must be referenced directly in WHERE.",
-                  desc);
-          return NO;
-        }
-        if (e->u.bin.l->kind != QIR_EXPR_PARAM) {
-          const char *desc =
-              qir_colref_to_str(&e->u.bin.r->u.colref, &ctx->scratch);
-          set_err(ctx, VERR_SENSITIVE_CMP,
-                  "Sensitive column '%s' must compare only to parameters.",
-                  desc);
-          return NO;
-        }
-      }
-      return YES;
-    }
-    case QIR_EXPR_IN: {
-      int sens_l = expr_has_sensitive(ctx, main_q, e->u.in_.lhs);
-      if (sens_l == ERR)
-        return ERR;
-      if ((sens_l == YES && e->u.in_.lhs->kind != QIR_EXPR_COLREF)) {
-        const char *desc = validator_expr_diag(ctx, e->u.in_.lhs);
-        set_err(ctx, VERR_SENSITIVE_LOC,
-                "Sensitive column '%s' must be referenced directly in IN().",
-                desc);
-        return NO;
-      }
-
-      // validate each item inside IN()
-      for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-        const QirExpr *it = e->u.in_.items[i];
-        if (!it) {
+    case QIR_EXPR_OP: {
+      if (e->u.op.cls == QIR_OP_EQ) {
+        if (!e->u.op.args || e->u.op.nargs != 1 || !e->u.op.args[0]) {
           set_err(ctx, VERR_ANALYZE_FAIL,
-                  "Invalid query structure (NULL IN item).");
+                  "Invalid query structure (malformed '=' predicate).");
           return ERR;
         }
+
+        const QirExpr *rhs = e->u.op.args[0];
+        int sens_l = expr_has_sensitive(ctx, main_q, e->u.op.lhs);
+        if (sens_l == ERR)
+          return ERR;
+        int sens_r = expr_has_sensitive(ctx, main_q, rhs);
+        if (sens_r == ERR)
+          return ERR;
+
         if (sens_l == YES) {
-          if (it->kind != QIR_EXPR_PARAM) {
+          if (e->u.op.lhs->kind != QIR_EXPR_COLREF) {
+            const char *desc = validator_expr_diag(ctx, e->u.op.lhs);
+            set_err(
+                ctx, VERR_SENSITIVE_LOC,
+                "Sensitive column '%s' must be referenced directly in WHERE.",
+                desc);
+            return NO;
+          }
+          if (rhs->kind != QIR_EXPR_PARAM) {
             const char *desc =
-                qir_colref_to_str(&e->u.in_.lhs->u.colref, &ctx->scratch);
+                qir_colref_to_str(&e->u.op.lhs->u.colref, &ctx->scratch);
             set_err(ctx, VERR_SENSITIVE_CMP,
                     "Sensitive column '%s' must compare only to parameters.",
                     desc);
             return NO;
           }
         }
+        if (sens_r == YES) {
+          if (rhs->kind != QIR_EXPR_COLREF) {
+            const char *desc = validator_expr_diag(ctx, rhs);
+            set_err(
+                ctx, VERR_SENSITIVE_LOC,
+                "Sensitive column '%s' must be referenced directly in WHERE.",
+                desc);
+            return NO;
+          }
+          if (e->u.op.lhs->kind != QIR_EXPR_PARAM) {
+            const char *desc = qir_colref_to_str(&rhs->u.colref, &ctx->scratch);
+            set_err(ctx, VERR_SENSITIVE_CMP,
+                    "Sensitive column '%s' must compare only to parameters.",
+                    desc);
+            return NO;
+          }
+        }
+        return YES;
+      }
 
-        int sens_i = expr_has_sensitive(ctx, main_q, it);
-        if (sens_i == ERR)
+      if (e->u.op.cls == QIR_OP_IN) {
+        if (!e->u.op.args || e->u.op.nargs == 0) {
+          set_err(ctx, VERR_ANALYZE_FAIL,
+                  "Invalid query structure (malformed IN predicate).");
           return ERR;
-        if (sens_i == YES) {
-          const char *desc =
-              qir_colref_to_str(&e->u.in_.lhs->u.colref, &ctx->scratch);
-          set_err(ctx, VERR_SENSITIVE_CMP,
-                  "Sensitive column '%s' cannot appear in IN list.", desc);
+        }
+
+        int sens_l = expr_has_sensitive(ctx, main_q, e->u.op.lhs);
+        if (sens_l == ERR)
+          return ERR;
+        if (sens_l == YES && e->u.op.lhs->kind != QIR_EXPR_COLREF) {
+          const char *desc = validator_expr_diag(ctx, e->u.op.lhs);
+          set_err(ctx, VERR_SENSITIVE_LOC,
+                  "Sensitive column '%s' must be referenced directly in IN().",
+                  desc);
           return NO;
         }
+
+        for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+          const QirExpr *it = e->u.op.args[i];
+          if (!it) {
+            set_err(ctx, VERR_ANALYZE_FAIL,
+                    "Invalid query structure (NULL IN item).");
+            return ERR;
+          }
+          if (sens_l == YES && it->kind != QIR_EXPR_PARAM) {
+            const char *desc =
+                qir_colref_to_str(&e->u.op.lhs->u.colref, &ctx->scratch);
+            set_err(ctx, VERR_SENSITIVE_CMP,
+                    "Sensitive column '%s' must compare only to parameters.",
+                    desc);
+            return NO;
+          }
+
+          int sens_i = expr_has_sensitive(ctx, main_q, it);
+          if (sens_i == ERR)
+            return ERR;
+          if (sens_i == YES) {
+            const char *desc =
+                qir_colref_to_str(&e->u.op.lhs->u.colref, &ctx->scratch);
+            set_err(ctx, VERR_SENSITIVE_CMP,
+                    "Sensitive column '%s' cannot appear in IN list.", desc);
+            return NO;
+          }
+        }
+        return YES;
       }
-      return YES;
+
+      set_err(ctx, VERR_SENSITIVE_CMP,
+              "Unsupported WHERE predicate in sensitive mode.");
+      return NO;
     }
     case QIR_EXPR_OR:
     case QIR_EXPR_NOT:

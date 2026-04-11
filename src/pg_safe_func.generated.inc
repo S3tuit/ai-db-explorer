@@ -1,4 +1,4 @@
-/* Generated from docs/pg_safe_functions.json by py_utils/gen_pg_safe_functions.py.
+/* Generated from docs/pg_safe_functions.json by py_utils/gen_pg_inc_files.py.
  * Do not edit manually.
  */
 static const char *PG_SAFE_FUNCS[] = {

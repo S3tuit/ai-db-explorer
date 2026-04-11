@@ -402,6 +402,10 @@ static void test_validator_from_notes(void) {
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT LOWER(c.balance) AS lb FROM public.cards c LIMIT 10;",
                   1, VERR_NONE);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT u.id FROM users u WHERE EXISTS (SELECT 1 FROM "
+                  "expenses e WHERE e.amount > 0) LIMIT 10;",
+                  1, VERR_NONE);
 
   /* REJECT cases */
   ASSERT_VALIDATE_PARAMS(
@@ -425,6 +429,10 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code > $1 LIMIT 10;", 0,
       VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE $1 IN (SELECT x.id FROM users x) LIMIT 10;",
+      0, VERR_PARAM_OUTSIDE_WHERE);
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE LOWER(u.fiscal_code) = $1 LIMIT 10;", 0,
@@ -488,6 +496,9 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code LIKE $1 LIMIT 200;", 0,
       VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT u.id FROM users u WHERE $1 IS NULL LIMIT 10;", 0,
+                  VERR_PARAM_OUTSIDE_WHERE);
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code BETWEEN $1 AND $2 LIMIT "
@@ -577,6 +588,10 @@ static void test_validator_from_notes(void) {
                   "SELECT u.\"name\" FROM \"users\" u WHERE u.\"fiscaL_code\" "
                   "= 'A' LIMIT 10;",
                   0, VERR_SENSITIVE_CMP);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT u.id FROM users u WHERE u.fiscal_code IS NULL "
+                  "LIMIT 10;",
+                  0, VERR_SENSITIVE_CMP);
   ASSERT_VALIDATE(db, cp, policy, "SELECT u.fiscal_code FROM users u;", 0,
                   VERR_LIMIT_REQUIRED);
   ASSERT_VALIDATE_PARAMS(
@@ -628,6 +643,11 @@ static void test_validator_from_notes(void) {
       "SELECT row_number() OVER (ORDER BY u.fiscal_code) AS rn FROM users u "
       "WHERE u.fiscal_code = $1 LIMIT 10;",
       0, VERR_SENSITIVE_SELECT_EXPR, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "SELECT u.id FROM users u WHERE u.fiscal_code = $1 AND EXISTS (SELECT 1 "
+      "FROM expenses e WHERE e.amount > 0) LIMIT 10;",
+      0, VERR_SENSITIVE_CMP, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id, e.amount FROM users u INNER JOIN expenses e ON "

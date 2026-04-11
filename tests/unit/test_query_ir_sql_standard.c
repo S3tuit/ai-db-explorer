@@ -113,6 +113,18 @@ static void assert_colref_expr(const QirExpr *e, const char *qual,
 #define ASSERT_COLREF(e, qual, col)                                            \
   assert_colref_expr((e), (qual), (col), __FILE__, __LINE__)
 
+/* Asserts that expression is one generalized operator node. */
+static void assert_op_expr(const QirExpr *e, QirOpClass cls,
+                           const char *op_name, const char *file, int line) {
+  ASSERT_TRUE_AT(e != NULL, file, line);
+  ASSERT_TRUE_AT(e->kind == QIR_EXPR_OP, file, line);
+  ASSERT_TRUE_AT(e->u.op.cls == cls, file, line);
+  ASSERT_TRUE_AT(e->u.op.op_name != NULL, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.op.op_name, op_name) == 0, file, line);
+}
+#define ASSERT_OP(e, cls, op_name)                                             \
+  assert_op_expr((e), (cls), (op_name), __FILE__, __LINE__)
+
 /* A1. Multiple predicates AND + comparisons + literals. */
 static void test_sql_standard_predicates_and_limit(void) {
   const char *sql = "SELECT p.id AS pid "
@@ -153,17 +165,17 @@ static void test_sql_standard_predicates_and_limit(void) {
   const QirExpr *rhs = h.q->where->u.bin.r;
   ASSERT_TRUE(lhs && rhs);
 
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_GE);
-  ASSERT_COLREF(lhs->u.bin.l, "p", "age");
-  ASSERT_TRUE(lhs->u.bin.r && lhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_TRUE(lhs->u.bin.r->u.lit.kind == QIR_LIT_INT64);
-  ASSERT_TRUE(lhs->u.bin.r->u.lit.v.i64 == 25);
+  ASSERT_OP(lhs, QIR_OP_OTHER, ">=");
+  ASSERT_COLREF(lhs->u.op.lhs, "p", "age");
+  ASSERT_TRUE(lhs->u.op.args[0] && lhs->u.op.args[0]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.lit.kind == QIR_LIT_INT64);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.lit.v.i64 == 25);
 
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_EQ);
-  ASSERT_COLREF(rhs->u.bin.l, "p", "region");
-  ASSERT_TRUE(rhs->u.bin.r && rhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_TRUE(rhs->u.bin.r->u.lit.kind == QIR_LIT_STRING);
-  ASSERT_TRUE(strcmp(rhs->u.bin.r->u.lit.v.s, "c") == 0);
+  ASSERT_OP(rhs, QIR_OP_EQ, "=");
+  ASSERT_COLREF(rhs->u.op.lhs, "p", "region");
+  ASSERT_TRUE(rhs->u.op.args[0] && rhs->u.op.args[0]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(rhs->u.op.args[0]->u.lit.kind == QIR_LIT_STRING);
+  ASSERT_TRUE(strcmp(rhs->u.op.args[0]->u.lit.v.s, "c") == 0);
 
   QirTouchReport *tr = extract_touches(&h);
   ASSERT_NO_UNKNOWN_TOUCHES(tr);
@@ -204,13 +216,13 @@ static void test_sql_standard_in_list(void) {
   ASSERT_TRUE(h.q->status == QIR_OK);
 
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_COLREF(h.q->where->u.in_.lhs, "p", "region");
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 3);
+  ASSERT_OP(h.q->where, QIR_OP_IN, "=");
+  ASSERT_COLREF(h.q->where->u.op.lhs, "p", "region");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 3);
 
-  const QirExpr *i0 = h.q->where->u.in_.items[0];
-  const QirExpr *i1 = h.q->where->u.in_.items[1];
-  const QirExpr *i2 = h.q->where->u.in_.items[2];
+  const QirExpr *i0 = h.q->where->u.op.args[0];
+  const QirExpr *i1 = h.q->where->u.op.args[1];
+  const QirExpr *i2 = h.q->where->u.op.args[2];
   ASSERT_TRUE(i0 && i1 && i2);
   ASSERT_TRUE(i0->kind == QIR_EXPR_LITERAL);
   ASSERT_TRUE(i1->kind == QIR_EXPR_LITERAL);
@@ -250,8 +262,8 @@ static void test_sql_standard_or(void) {
   const QirExpr *lhs = h.q->where->u.bin.l;
   const QirExpr *rhs = h.q->where->u.bin.r;
   ASSERT_TRUE(lhs && rhs);
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_EQ);
+  ASSERT_OP(lhs, QIR_OP_EQ, "=");
+  ASSERT_OP(rhs, QIR_OP_EQ, "=");
 
   qir_handle_destroy(&h);
 }
@@ -358,9 +370,9 @@ static void test_sql_standard_func_call(void) {
   ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.name, "lower");
 
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(h.q->where->u.bin.l->kind == QIR_EXPR_FUNCALL);
-  ASSERT_TRUE(h.q->where->u.bin.r->kind == QIR_EXPR_FUNCALL);
+  ASSERT_OP(h.q->where, QIR_OP_EQ, "=");
+  ASSERT_TRUE(h.q->where->u.op.lhs->kind == QIR_EXPR_FUNCALL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_FUNCALL);
 
   qir_handle_destroy(&h);
 }
@@ -700,9 +712,15 @@ static void test_sql_standard_subquery_where(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(h.q->where->u.bin.r != NULL);
-  ASSERT_TRUE(h.q->where->u.bin.r->kind == QIR_EXPR_SUBQUERY);
+  ASSERT_OP(h.q->where, QIR_OP_EQ, "=");
+  ASSERT_TRUE(h.q->where->u.op.args[0] != NULL);
+  ASSERT_OP(h.q->where->u.op.args[0], QIR_OP_OTHER, "EXPR_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.lhs == NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args[0]->kind ==
+              QIR_EXPR_SUBQUERY);
 
   qir_handle_destroy(&h);
 }
@@ -723,7 +741,12 @@ static void test_sql_standard_exists(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_SUBQUERY);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "EXISTS_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.op.lhs == NULL);
+  ASSERT_TRUE(h.q->where->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_SUBQUERY);
 
   qir_handle_destroy(&h);
 }
@@ -744,10 +767,12 @@ static void test_sql_standard_in_subquery(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 1);
-  ASSERT_TRUE(h.q->where->u.in_.items[0] != NULL);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->kind == QIR_EXPR_SUBQUERY);
+  ASSERT_OP(h.q->where, QIR_OP_IN, "ANY_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.op.lhs != NULL);
+  ASSERT_TRUE(h.q->where->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_SUBQUERY);
 
   QirTouchReport *tr = extract_touches(&h);
   ASSERT_TRUE(tr->has_unknown_touches == false);
@@ -755,6 +780,33 @@ static void test_sql_standard_in_subquery(void) {
   ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
   ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "o", "user_id");
   qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* B7. NOT IN (SELECT ...) keeps the membership predicate inside NOT. */
+static void test_sql_standard_not_in_subquery(void) {
+  const char *sql = "SELECT p.name AS name "
+                    "FROM private.people AS p "
+                    "WHERE p.id NOT IN ("
+                    "  SELECT o.user_id "
+                    "  FROM orders AS o "
+                    "  WHERE o.total > 10"
+                    ");";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_NOT);
+  ASSERT_OP(h.q->where->u.bin.l, QIR_OP_IN, "ANY_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.lhs != NULL);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.args[0]->kind == QIR_EXPR_SUBQUERY);
 
   qir_handle_destroy(&h);
 }
@@ -953,7 +1005,7 @@ static void test_sql_standard_like(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_LIKE);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "~~");
 
   qir_handle_destroy(&h);
 }
@@ -970,7 +1022,7 @@ static void test_sql_standard_not_like(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_NOT_LIKE);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "!~~");
 
   qir_handle_destroy(&h);
 }
@@ -987,7 +1039,8 @@ static void test_sql_standard_between(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_AND);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "BETWEEN");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 2);
   qir_handle_destroy(&h);
 
   const char *sql_not_between = "SELECT p.name AS name "
@@ -1000,7 +1053,8 @@ static void test_sql_standard_between(void) {
   ASSERT_TRUE(h2.q != NULL);
   ASSERT_TRUE(h2.q->status == QIR_OK);
   ASSERT_TRUE(h2.q->where != NULL);
-  ASSERT_TRUE(h2.q->where->kind == QIR_EXPR_OR);
+  ASSERT_OP(h2.q->where, QIR_OP_OTHER, "NOT BETWEEN");
+  ASSERT_TRUE(h2.q->where->u.op.nargs == 2);
   qir_handle_destroy(&h2);
 }
 
@@ -1068,7 +1122,7 @@ static void test_sql_standard_group_by_having(void) {
   ASSERT_TRUE(h.q->n_group_by == 1);
   ASSERT_COLREF(h.q->group_by[0], "p", "region");
   ASSERT_TRUE(h.q->having != NULL);
-  ASSERT_TRUE(h.q->having->kind == QIR_EXPR_GT);
+  ASSERT_OP(h.q->having, QIR_OP_OTHER, ">");
 
   QirTouchReport *tr = extract_touches(&h);
   ASSERT_TRUE(tr->has_unknown_touches == false);
@@ -1154,20 +1208,20 @@ static void test_sql_standard_null_comparison(void) {
 
   QirExpr *lhs = h.q->where->u.bin.l;
   QirExpr *rhs = h.q->where->u.bin.r;
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_NE);
+  ASSERT_OP(lhs, QIR_OP_OTHER, "IS_NULL");
+  ASSERT_OP(rhs, QIR_OP_OTHER, "IS_NOT_NULL");
 
-  ASSERT_TRUE(lhs->u.bin.l->kind == QIR_EXPR_COLREF);
-  ASSERT_TRUE(lhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_IDENT_EQ(&lhs->u.bin.l->u.colref.qualifier, "v");
-  ASSERT_IDENT_EQ(&lhs->u.bin.l->u.colref.column, "y");
-  ASSERT_TRUE(lhs->u.bin.r->u.lit.kind == QIR_LIT_NULL);
+  ASSERT_TRUE(lhs->u.op.nargs == 0);
+  ASSERT_TRUE(lhs->u.op.args == NULL);
+  ASSERT_TRUE(lhs->u.op.lhs->kind == QIR_EXPR_COLREF);
+  ASSERT_IDENT_EQ(&lhs->u.op.lhs->u.colref.qualifier, "v");
+  ASSERT_IDENT_EQ(&lhs->u.op.lhs->u.colref.column, "y");
 
-  ASSERT_TRUE(rhs->u.bin.l->kind == QIR_EXPR_COLREF);
-  ASSERT_TRUE(rhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_IDENT_EQ(&rhs->u.bin.l->u.colref.qualifier, "v");
-  ASSERT_IDENT_EQ(&rhs->u.bin.l->u.colref.column, "z");
-  ASSERT_TRUE(rhs->u.bin.r->u.lit.kind == QIR_LIT_NULL);
+  ASSERT_TRUE(rhs->u.op.nargs == 0);
+  ASSERT_TRUE(rhs->u.op.args == NULL);
+  ASSERT_TRUE(rhs->u.op.lhs->kind == QIR_EXPR_COLREF);
+  ASSERT_IDENT_EQ(&rhs->u.op.lhs->u.colref.qualifier, "v");
+  ASSERT_IDENT_EQ(&rhs->u.op.lhs->u.colref.column, "z");
 
   qir_handle_destroy(&h);
 }
@@ -1227,6 +1281,7 @@ int main(void) {
   test_sql_standard_subquery_where();
   test_sql_standard_exists();
   test_sql_standard_in_subquery();
+  test_sql_standard_not_in_subquery();
   test_sql_standard_star_in_cte();
   test_sql_standard_multi_stmt_rejected();
   test_sql_standard_comment_multi_stmt_rejected();
