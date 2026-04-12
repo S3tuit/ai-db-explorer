@@ -1257,6 +1257,281 @@ static void test_left_join_base_touches(void) {
   qir_handle_destroy(&h);
 }
 
+/* E14. Binary arithmetic operators (+, -, *, /) in SELECT and WHERE. */
+static void test_sql_standard_binary_arithmetic(void) {
+  const char *sql = "SELECT (t.a + t.b) AS sum_ab, "
+                    "       (t.a * t.b) AS mul_ab "
+                    "FROM tbl t "
+                    "WHERE (t.a - t.b) > 0;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // SELECT list: first item is (t.a + t.b)
+  ASSERT_TRUE(h.q->nselect == 2);
+  QirExpr *s0 = h.q->select_items[0]->value;
+  ASSERT_OP(s0, QIR_OP_OTHER, "+");
+  ASSERT_TRUE(s0->u.op.lhs != NULL);
+  ASSERT_COLREF(s0->u.op.lhs, "t", "a");
+  ASSERT_TRUE(s0->u.op.nargs == 1);
+  ASSERT_COLREF(s0->u.op.args[0], "t", "b");
+
+  // SELECT list: second item is (t.a * t.b)
+  QirExpr *s1 = h.q->select_items[1]->value;
+  ASSERT_OP(s1, QIR_OP_OTHER, "*");
+  ASSERT_TRUE(s1->u.op.lhs != NULL);
+  ASSERT_COLREF(s1->u.op.lhs, "t", "a");
+  ASSERT_TRUE(s1->u.op.nargs == 1);
+  ASSERT_COLREF(s1->u.op.args[0], "t", "b");
+
+  // WHERE: (t.a - t.b) > 0  ->  outer op ">" with lhs = op "-"
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, ">");
+  QirExpr *sub = h.q->where->u.op.lhs;
+  ASSERT_OP(sub, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(sub->u.op.lhs != NULL);
+  ASSERT_COLREF(sub->u.op.lhs, "t", "a");
+  ASSERT_TRUE(sub->u.op.nargs == 1);
+  ASSERT_COLREF(sub->u.op.args[0], "t", "b");
+
+  // Touches: all columns should be base touches on "t".
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "a");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "b");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E15. Unary minus in SELECT, WHERE, and inside a CTE. */
+static void test_sql_standard_unary_minus(void) {
+  const char *sql = "WITH neg AS ("
+                    "  SELECT -v.x AS nx FROM vals v"
+                    ") "
+                    "SELECT -t.a AS neg_a "
+                    "FROM tbl t "
+                    "WHERE -t.b < 0;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // -- Main query SELECT: -t.a --
+  ASSERT_TRUE(h.q->nselect == 1);
+  QirExpr *s0 = h.q->select_items[0]->value;
+  ASSERT_OP(s0, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(s0->u.op.lhs == NULL);
+  ASSERT_TRUE(s0->u.op.nargs == 1);
+  ASSERT_COLREF(s0->u.op.args[0], "t", "a");
+
+  // -- Main query WHERE: -t.b < 0  ->  outer "<" with lhs = unary "-" --
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "<");
+  QirExpr *wlhs = h.q->where->u.op.lhs;
+  ASSERT_OP(wlhs, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(wlhs->u.op.lhs == NULL);
+  ASSERT_TRUE(wlhs->u.op.nargs == 1);
+  ASSERT_COLREF(wlhs->u.op.args[0], "t", "b");
+
+  // -- CTE body: -v.x --
+  ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_TRUE(h.q->ctes != NULL);
+  QirQuery *cte = h.q->ctes[0]->query;
+  ASSERT_TRUE(cte != NULL);
+  ASSERT_TRUE(cte->status == QIR_OK);
+  ASSERT_TRUE(cte->nselect == 1);
+  QirExpr *cs0 = cte->select_items[0]->value;
+  ASSERT_OP(cs0, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(cs0->u.op.lhs == NULL);
+  ASSERT_TRUE(cs0->u.op.nargs == 1);
+  ASSERT_COLREF(cs0->u.op.args[0], "v", "x");
+
+  // -- Touch extraction: columns inside unary expressions must be found --
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  // Main query touches
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "a");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "b");
+  // CTE body touches (nested scope)
+  ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "v", "x");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E16. Two-branch UNION ALL with touch extraction. */
+static void test_sql_standard_union_all_two_branches(void) {
+  const char *sql = "SELECT t.a AS col_a "
+                    "FROM tbl t "
+                    "WHERE t.a > 0 "
+                    "UNION ALL "
+                    "SELECT s.b AS col_b "
+                    "FROM tbl2 s "
+                    "WHERE s.b < 10;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // Father body comes from the first branch (SELECT t.a ...).
+  ASSERT_TRUE(h.q->nselect == 1);
+  ASSERT_COLREF(h.q->select_items[0]->value, "t", "a");
+  ASSERT_TRUE(h.q->from_root != NULL);
+  ASSERT_IDENT_EQ(&h.q->from_root->alias, "t");
+  ASSERT_TRUE(h.q->where != NULL);
+
+  // Second branch linked via union_next.
+  QirQuery *b2 = h.q->union_next;
+  ASSERT_TRUE(b2 != NULL);
+  ASSERT_TRUE(b2->status == QIR_OK);
+  ASSERT_TRUE(b2->nselect == 1);
+  ASSERT_COLREF(b2->select_items[0]->value, "s", "b");
+  ASSERT_TRUE(b2->from_root != NULL);
+  ASSERT_IDENT_EQ(&b2->from_root->alias, "s");
+  ASSERT_TRUE(b2->where != NULL);
+  ASSERT_TRUE(b2->union_next == NULL);
+
+  // Father-only fields: children have defaults.
+  ASSERT_TRUE(b2->nctes == 0);
+  ASSERT_TRUE(b2->limit_value == -1);
+  ASSERT_TRUE(b2->n_order_by == 0);
+
+  // Touch extraction: both branches' columns are found.
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "a");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "s", "b");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E17. Three-branch UNION ALL (verifies left-deep tree flattening). */
+static void test_sql_standard_union_all_three_branches(void) {
+  const char *sql = "SELECT t.x AS c1 FROM t1 t "
+                    "UNION ALL "
+                    "SELECT s.y AS c1 FROM t2 s "
+                    "UNION ALL "
+                    "SELECT r.z AS c1 FROM t3 r;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // Father = first branch.
+  ASSERT_TRUE(h.q->nselect == 1);
+  ASSERT_COLREF(h.q->select_items[0]->value, "t", "x");
+
+  // Second branch.
+  QirQuery *b2 = h.q->union_next;
+  ASSERT_TRUE(b2 != NULL);
+  ASSERT_TRUE(b2->nselect == 1);
+  ASSERT_COLREF(b2->select_items[0]->value, "s", "y");
+
+  // Third branch.
+  QirQuery *b3 = b2->union_next;
+  ASSERT_TRUE(b3 != NULL);
+  ASSERT_TRUE(b3->nselect == 1);
+  ASSERT_COLREF(b3->select_items[0]->value, "r", "z");
+  ASSERT_TRUE(b3->union_next == NULL);
+
+  // Touch extraction: all 3 branches.
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "x");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "s", "y");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "r", "z");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E18. UNION ALL with CTE: CTE refs resolved across union chain. */
+static void test_sql_standard_union_all_with_cte(void) {
+  const char *sql = "WITH vals AS ("
+                    "  SELECT v.x AS vx FROM src v"
+                    ") "
+                    "SELECT a.vx AS col "
+                    "FROM vals a "
+                    "UNION ALL "
+                    "SELECT b.y AS col "
+                    "FROM tbl b;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // Father holds the CTE.
+  ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "vals");
+
+  // First branch: FROM vals a → resolved to CTE_REF.
+  ASSERT_TRUE(h.q->from_root != NULL);
+  ASSERT_TRUE(h.q->from_root->kind == QIR_FROM_CTE_REF);
+  ASSERT_IDENT_EQ(&h.q->from_root->u.cte_name, "vals");
+
+  // Second branch: FROM tbl b → BASE_REL.
+  QirQuery *b2 = h.q->union_next;
+  ASSERT_TRUE(b2 != NULL);
+  ASSERT_TRUE(b2->from_root != NULL);
+  ASSERT_TRUE(b2->from_root->kind == QIR_FROM_BASE_REL);
+  ASSERT_IDENT_EQ(&b2->from_root->alias, "b");
+
+  // Child has default metadata.
+  ASSERT_TRUE(b2->nctes == 0);
+
+  // Touch extraction.
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  // CTE body touches (nested scope).
+  ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "v", "x");
+  // First branch: a.vx is DERIVED (CTE ref).
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "a", "vx");
+  // Second branch: b.y is BASE.
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "b", "y");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E19. UNION ALL with ORDER BY and LIMIT on the outer query. */
+static void test_sql_standard_union_all_order_limit(void) {
+  const char *sql = "SELECT t.a AS col "
+                    "FROM tbl t "
+                    "UNION ALL "
+                    "SELECT s.b AS col "
+                    "FROM tbl2 s "
+                    "ORDER BY col "
+                    "LIMIT 100;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // ORDER BY and LIMIT on father.
+  ASSERT_TRUE(h.q->n_order_by == 1);
+  ASSERT_TRUE(h.q->limit_value == 100);
+
+  // union_next exists.
+  ASSERT_TRUE(h.q->union_next != NULL);
+  // Child has no ORDER BY / LIMIT.
+  ASSERT_TRUE(h.q->union_next->n_order_by == 0);
+  ASSERT_TRUE(h.q->union_next->limit_value == -1);
+
+  qir_handle_destroy(&h);
+}
+
 int main(void) {
   test_sql_standard_predicates_and_limit();
   test_sql_standard_multi_from_unsupported();
@@ -1303,6 +1578,12 @@ int main(void) {
   test_sql_standard_values_from_rejected();
   test_sql_standard_null_comparison();
   test_left_join_base_touches();
+  test_sql_standard_binary_arithmetic();
+  test_sql_standard_unary_minus();
+  test_sql_standard_union_all_two_branches();
+  test_sql_standard_union_all_three_branches();
+  test_sql_standard_union_all_with_cte();
+  test_sql_standard_union_all_order_limit();
   fprintf(stderr, "OK: test_query_ir_sql_standard\n");
   return 0;
 }

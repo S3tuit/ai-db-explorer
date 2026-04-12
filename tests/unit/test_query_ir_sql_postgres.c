@@ -595,7 +595,10 @@ static void test_pg_ilike_operators(void) {
 
 /*------------ CURRENTLY NOT SUPPORTED BUT WE MAY IN THE FUTURE --------------*/
 
-static void test_pg_interval_literal_rejected(void) {
+/* INTERVAL '1 DAY' is parsed as TypeCast(A_Const, pg_catalog.interval), which
+ * the backend now handles. The binary minus between NOW() and the interval
+ * is a normal A_Expr with both lexpr and rexpr present. */
+static void test_pg_interval_literal_accepted(void) {
   const char *sql = "SELECT p.id AS pid "
                     "FROM private.people AS p "
                     "WHERE p.updated_at > NOW() - INTERVAL '1 DAY';";
@@ -604,7 +607,7 @@ static void test_pg_interval_literal_rejected(void) {
   parse_sql_postgres(sql, &h);
 
   ASSERT_TRUE(h.q != NULL);
-  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+  ASSERT_TRUE(h.q->status == QIR_OK);
   qir_handle_destroy(&h);
 }
 
@@ -658,7 +661,7 @@ int main(void) {
   test_pg_json_operator_touch();
   test_pg_cast_chains();
   test_pg_ilike_operators();
-  test_pg_interval_literal_rejected();
+  test_pg_interval_literal_accepted();
   test_pg_array_literal_rejected();
   test_pg_bitwise_op_rejected();
   fprintf(stderr, "OK: test_query_ir_sql_postgres\n");

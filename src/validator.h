@@ -34,7 +34,8 @@ typedef enum ValidatorErrCode {
   VERR_DISTINCT_SENSITIVE,       /* DISTINCT in sensitive mode */
   VERR_OFFSET_SENSITIVE,         /* OFFSET in sensitive mode */
   VERR_LIMIT_REQUIRED,           /* LIMIT missing in sensitive mode */
-  VERR_LIMIT_EXCEEDS             /* LIMIT too high in sensitive mode */
+  VERR_LIMIT_EXCEEDS,            /* LIMIT too high in sensitive mode */
+  VERR_SENSITIVE_IN_UNION         /* sensitive col in a set-op branch */
 } ValidatorErrCode;
 
 typedef struct ValidatorErr {

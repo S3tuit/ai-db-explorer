@@ -406,6 +406,10 @@ static void test_validator_from_notes(void) {
                   "SELECT u.id FROM users u WHERE EXISTS (SELECT 1 FROM "
                   "expenses e WHERE e.amount > 0) LIMIT 10;",
                   1, VERR_NONE);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT (c.t_date + INTERVAL '2 DAYS')::DATE AS new_date "
+                  "FROM public.cards c;",
+                  1, VERR_NONE);
 
   /* REJECT cases */
   ASSERT_VALIDATE_PARAMS(
@@ -429,10 +433,10 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.fiscal_code > $1 LIMIT 10;", 0,
       VERR_PARAM_OUTSIDE_WHERE, NULL, tok_fc1, ARRLEN(tok_fc1));
-  ASSERT_VALIDATE(
-      db, cp, policy,
-      "SELECT u.id FROM users u WHERE $1 IN (SELECT x.id FROM users x) LIMIT 10;",
-      0, VERR_PARAM_OUTSIDE_WHERE);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT u.id FROM users u WHERE $1 IN (SELECT x.id FROM "
+                  "users x) LIMIT 10;",
+                  0, VERR_PARAM_OUTSIDE_WHERE);
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE LOWER(u.fiscal_code) = $1 LIMIT 10;", 0,
@@ -625,9 +629,8 @@ static void test_validator_from_notes(void) {
                   "SELECT u.id FROM users u WHERE $1 = $2 LIMIT 10;", 0,
                   VERR_PARAM_NON_SENSITIVE);
   ASSERT_VALIDATE_PARAMS(
-      db, cp, policy,
-      "SELECT u.id FROM users u WHERE u.status = $1 LIMIT 10;", 0,
-      VERR_PARAM_NON_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
+      db, cp, policy, "SELECT u.id FROM users u WHERE u.status = $1 LIMIT 10;",
+      0, VERR_PARAM_NON_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT u.id FROM users u WHERE u.id = (SELECT x.id FROM users x WHERE "
@@ -1232,6 +1235,77 @@ static void test_validator_safe_funcs_pg(void) {
   catalog_destroy(cat);
 }
 
+/* Sensitive columns in set-op (UNION ALL / EXCEPT / INTERSECT) branches. */
+static void test_validator_sensitive_union(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+  SafetyPolicy *policy = &cp->safe_policy;
+  ASSERT_TRUE(policy != NULL);
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  // REJECT: sensitive column referenced inside a query with union_next chain.
+  // LIMIT on the outer/father satisfies the sensitive-mode requirement,
+  // but the union branch itself must not touch sensitive columns.
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "SELECT 1 AS fc FROM users u "
+      "UNION ALL "
+      "SELECT u2.fiscal_code AS fc FROM users u2 "
+      "LIMIT 10;",
+      0, VERR_SENSITIVE_IN_UNION);
+
+  // ACCEPT: CTE body contains UNION ALL, but the main query (which touches
+  // a sensitive column) is NOT itself a union branch.
+  // The CTE body needs its own LIMIT because pass-C recurses into CTEs.
+  ASSERT_VALIDATE(
+      db, cp, policy,
+      "WITH x AS ("
+      "  SELECT v.id AS xid FROM users v WHERE v.id = 1 "
+      "  UNION ALL "
+      "  SELECT w.id AS xid FROM users w WHERE w.id = 2 "
+      "  LIMIT 200"
+      ") "
+      "SELECT u.fiscal_code AS fc "
+      "FROM users u "
+      "INNER JOIN x x ON x.xid = u.id "
+      "WHERE u.fiscal_code = 'A' LIMIT 10;",
+      0, VERR_SENSITIVE_CMP);
+
+  // ACCEPT (variant): same CTE-with-union pattern but with a valid param
+  // binding — the main query is NOT a union branch so sensitive is allowed.
+  const SensitiveTok tok_fc1[] = {make_param_domain("fiscal_code")};
+  ASSERT_VALIDATE_PARAMS(
+      db, cp, policy,
+      "WITH x AS ("
+      "  SELECT v.id AS xid FROM users v WHERE v.id = 1 "
+      "  UNION ALL "
+      "  SELECT w.id AS xid FROM users w WHERE w.id = 2 "
+      "  LIMIT 200"
+      ") "
+      "SELECT u.fiscal_code AS fc "
+      "FROM users u "
+      "INNER JOIN x x ON x.xid = u.id "
+      "WHERE u.fiscal_code = $1 LIMIT 10;",
+      1, VERR_NONE, NULL, tok_fc1, ARRLEN(tok_fc1));
+
+  // REJECT: unsafe function in the 3rd child of a 3-way UNION chain.
+  ASSERT_VALIDATE_MSG(
+      db, cp, policy,
+      "SELECT u.id AS c FROM users u WHERE u.id = 1 "
+      "UNION ALL "
+      "SELECT u2.id AS c FROM users u2 WHERE u2.id = 2 "
+      "UNION ALL "
+      "SELECT random() AS c FROM users u3 WHERE u3.id = 3;",
+      0, VERR_FUNC_UNSAFE, "random");
+
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
 int main(void) {
   test_validator_accepts();
   test_validator_rejects_rules();
@@ -1241,6 +1315,7 @@ int main(void) {
   test_validator_plan();
   test_validator_explain();
   test_validator_safe_funcs_pg();
+  test_validator_sensitive_union();
   fprintf(stderr, "OK: test_validator\n");
   return 0;
 }

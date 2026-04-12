@@ -309,6 +309,12 @@ struct QirQuery {
   // LIMIT
   // limit_value: -1 means missing.
   int32_t limit_value;
+
+  // Set operations (UNION ALL / INTERSECT / EXCEPT / …).
+  // The "father" query holds CTEs, stmt_flags, kind, limit, ORDER BY, etc.
+  // Each union_next is a "child" with its own body (SELECT, FROM, WHERE, ...)
+  // but default metadata (nctes=0, limit_value=-1, etc.).
+  QirQuery *union_next; // NULL when no set operation follows
 };
 
 // Handle that owns the arena backing a QueryIR.

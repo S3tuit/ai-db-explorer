@@ -236,6 +236,11 @@ static AdbxStatus validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
     return OK;
   }
 
+  // We only inspect the father's SELECT list and ignore union_next branches:
+  // (1) sensitive columns are already forbidden in union chains, so only the
+  //     father can carry TOKEN slots;
+  // (2) the database engine enforces that every branch has matching column
+  //     count, compatible types, and uses the first branch's column names.
   for (uint32_t i = 0; i < q->nselect; i++) {
     assert(q->select_items != NULL);
     const QirSelectItem *si = q->select_items[i];
@@ -535,6 +540,7 @@ static AdbxTriStatus validate_expr_subqueries_pass_a(ValidatorCtx *ctx,
  *
  * Side effects: writes a human-readable reason into err on failure. */
 static AdbxTriStatus validate_sensitive_touches_scope(ValidatorCtx *ctx,
+                                                      const QirQuery *q,
                                                       const QirTouchReport *tr,
                                                       bool *found_sensitive) {
   if (!tr || !ctx)
@@ -575,6 +581,14 @@ static AdbxTriStatus validate_sensitive_touches_scope(ValidatorCtx *ctx,
         const char *desc = qir_colref_to_str(&t->col, &ctx->scratch);
         set_err(ctx, VERR_SENSITIVE_OUTSIDE_MAIN,
                 "Column '%s' is sensitive, so it's only allowed in main query.",
+                desc);
+        return NO;
+      }
+      if (q && q->union_next) {
+        const char *desc = qir_colref_to_str(&t->col, &ctx->scratch);
+        set_err(ctx, VERR_SENSITIVE_IN_UNION,
+                "Column '%s' is sensitive and cannot be referenced inside a "
+                "UNION/INTERSECT/EXCEPT branch.",
                 desc);
         return NO;
       }
@@ -1228,6 +1242,12 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
         return rc;
     }
   }
+  for (const QirQuery *branch = q->union_next; branch;
+       branch = branch->union_next) {
+    rc = validate_query_pass_a(ctx, branch);
+    if (rc != YES)
+      return rc;
+  }
   return YES;
 }
 
@@ -1336,6 +1356,12 @@ static AdbxTriStatus validate_query_pass_b_params(ValidatorCtx *ctx,
       if (rc != YES)
         return rc;
     }
+  }
+  for (const QirQuery *branch = q->union_next; branch;
+       branch = branch->union_next) {
+    AdbxTriStatus rc = validate_query_pass_b_params(ctx, branch);
+    if (rc != YES)
+      return rc;
   }
 
   return YES;
@@ -1715,6 +1741,11 @@ static AdbxTriStatus validate_query_pass_c_sensitive(ValidatorCtx *ctx,
         return rc;
     }
   }
+  // Note: we intentionally do NOT recurse into union_next branches here.
+  // Union branches cannot touch sensitive columns (enforced by
+  // VERR_SENSITIVE_IN_UNION in the touch scope check). The father holds
+  // LIMIT/DISTINCT/OFFSET metadata for the whole chain, so checking children
+  // (which have default limit_value=-1) would produce false negatives.
 
   return YES;
 }
@@ -1827,7 +1858,7 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
   // Touch report to decide if Sensitive Mode is needed and to ensure sensitive
   // touches never appear outside the main query
   bool sensitive_mode = false;
-  int rc = validate_sensitive_touches_scope(&ctx, tr, &sensitive_mode);
+  int rc = validate_sensitive_touches_scope(&ctx, q, tr, &sensitive_mode);
   if (rc != YES) {
     if (rc == ERR && out->err.code == VERR_NONE) {
       set_err(&ctx, VERR_ANALYZE_FAIL,

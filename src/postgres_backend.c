@@ -778,7 +778,8 @@ static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, Arena *a,
 }
 
 // This generated allowlist is a pure parser-policy input. Keep only operator
-// tokens whose semantics we already model safely in docs/pg_safe_operators.json.
+// tokens whose semantics we already model safely in
+// docs/pg_safe_operators.json.
 #include "pg_safe_operator.generated.inc"
 
 /* Compares one operator token key against one sorted allowlist entry.
@@ -958,16 +959,15 @@ static QirExpr *pg_parse_aexpr(const JsonGetter *jg, Arena *a, QirQuery *q) {
     return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
   }
 
+  // lexpr is absent for unary prefix operators (e.g. "-x", "+x").
+  QirExpr *lhs = NULL;
   JsonGetter ljg = {0};
-  if (jsget_object(jg, "lexpr", &ljg) != YES) {
-    free(akind);
-    return NULL;
-  }
-
-  QirExpr *lhs = pg_parse_expr(&ljg, a, q);
-  if (!lhs) {
-    free(akind);
-    return NULL;
+  if (jsget_object(jg, "lexpr", &ljg) == YES) {
+    lhs = pg_parse_expr(&ljg, a, q);
+    if (!lhs) {
+      free(akind);
+      return NULL;
+    }
   }
 
   const char *op_name = NULL;
@@ -1569,13 +1569,6 @@ static AdbxStatus pg_parse_typename(const JsonGetter *jg, Arena *a,
   return OK;
 }
 
-/* Parses a SELECT statement object into QirQuery (forward decl).
- * Ownership: all nodes/arrays are arena-owned.
- * Side effects: may set query flags.
- * Returns OK/ERR on allocation failure. */
-static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
-                                       QirQuery *q);
-
 /* Parses an EXPLAIN wrapper and maps the inner supported statement to QueryIR.
  * It borrows the JSON object and mutates the caller-owned query.
  * Side effects: sets statement wrapper flags and parses the wrapped SELECT.
@@ -1876,18 +1869,21 @@ static void pg_resolve_cte_ref(const QirQuery *q, QirFromItem *fi) {
   }
 }
 
-/* Resolves CTE references for all FROM and JOIN items in a query.
+/* Resolves CTE references for all FROM and JOIN items in a query,
+ * including union_next branches. Uses the father's (q's) CTE list.
  * Ownership: uses pointers already owned by the query arena.
  * Side effects: may mark FROM/JOIN items as CTE_REF. */
 static void pg_resolve_cte_refs_in_query(const QirQuery *q) {
   if (!q)
     return;
-  if (q->from_root)
-    pg_resolve_cte_ref(q, q->from_root);
-  for (uint32_t i = 0; i < q->njoins; i++) {
-    QirJoin *j = q->joins ? q->joins[i] : NULL;
-    if (j && j->rhs)
-      pg_resolve_cte_ref(q, j->rhs);
+  for (const QirQuery *cur = q; cur; cur = cur->union_next) {
+    if (cur->from_root)
+      pg_resolve_cte_ref(q, cur->from_root);
+    for (uint32_t i = 0; i < cur->njoins; i++) {
+      QirJoin *j = cur->joins ? cur->joins[i] : NULL;
+      if (j && j->rhs)
+        pg_resolve_cte_ref(q, j->rhs);
+    }
   }
 }
 
@@ -2111,7 +2107,12 @@ static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a,
   return OK;
 }
 
-static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
+/* Parses the body of a SELECT branch: targetList, FROM, JOIN, GROUP BY,
+ * HAVING, WHERE, and flags (DISTINCT). Does NOT parse CTEs, ORDER BY, or
+ * LIMIT — those belong to the "father" query in a set-operation chain.
+ * For a non-set-op SELECT, the caller invokes both this and the outer-level
+ * parsing on the same JSON object. */
+static AdbxStatus pg_parse_select_body(const JsonGetter *jg, Arena *a,
                                        QirQuery *q) {
   if (!jg || !a || !q)
     return ERR;
@@ -2119,8 +2120,6 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
   // Flags
   if (jsget_exists_nonnull(jg, "distinctClause") == YES)
     q->has_distinct = true;
-  if (jsget_exists_nonnull(jg, "limitOffset") == YES)
-    q->has_offset = true;
 
   // targetList
   PtrVec sels = {0};
@@ -2236,49 +2235,46 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
       qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported HAVING");
   }
 
-  // ORDER BY
-  PtrVec orders = {0};
-  if (jsget_array_objects_begin(jg, "sortClause", &it) == YES) {
-    JsonGetter elem = {0};
-    int rc = 0;
-    while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
-      JsonGetter sjg = {0};
-      if (jsget_object(&elem, "SortBy", &sjg) != YES) {
-        rc = ERR;
-        break;
-      }
-
-      JsonGetter njg = {0};
-      if (jsget_object(&sjg, "node", &njg) != YES) {
-        rc = ERR;
-        break;
-      }
-      QirExpr *expr = pg_parse_expr(&njg, a, q);
-      if (!expr) {
-        rc = ERR;
-        break;
-      }
-      expr = qir_resolve_order_alias(q, a, expr);
-
-      if (ptrvec_push(&orders, expr) != OK) {
-        rc = ERR;
-        break;
-      }
-    }
-    if (rc == ERR)
-      qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported ORDER BY");
-  }
-  q->order_by = (QirExpr **)ptrvec_flatten(&orders, a);
-  q->n_order_by = orders.len;
-  ptrvec_clean(&orders);
-
   // WHERE
   JsonGetter wjg = {0};
   if (jsget_object(jg, "whereClause", &wjg) == YES) {
     q->where = pg_parse_expr(&wjg, a, q);
   }
 
-  // CTEs
+  return OK;
+}
+
+/* Recursively flattens a set-operation binary tree (UNION/INTERSECT/EXCEPT)
+ * into a list of leaf branches in SQL order (left-to-right). Each leaf is
+ * parsed via pg_parse_select_body into a new QirQuery. */
+static AdbxStatus pg_parse_setop_branches(const JsonGetter *jg, Arena *a,
+                                          PtrVec *branches) {
+  JsonGetter ljg = {0}, rjg = {0};
+  if (jsget_object(jg, "larg", &ljg) == YES &&
+      jsget_object(jg, "rarg", &rjg) == YES) {
+    // Internal set-op node: recurse left then right for SQL order.
+    if (pg_parse_setop_branches(&ljg, a, branches) != OK)
+      return ERR;
+    return pg_parse_setop_branches(&rjg, a, branches);
+  }
+
+  // Leaf branch: parse body into a new QirQuery.
+  QirQuery *branch = pg_qir_new_query(a);
+  if (!branch)
+    return ERR;
+  pg_parse_select_body(jg, a, branch);
+  if (ptrvec_push(branches, branch) != OK)
+    return ERR;
+  return OK;
+}
+
+static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
+                                       QirQuery *q) {
+  if (!jg || !a || !q)
+    return ERR;
+
+  // --- 1. CTEs (always on the outer/father node) ---
+  JsonArrIter it = {0};
   JsonGetter wcjg = {0};
   if (jsget_object(jg, "withClause", &wcjg) == YES) {
     PtrVec ctes = {0};
@@ -2326,12 +2322,90 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
     ptrvec_clean(&ctes);
   }
 
-  // Resolve CTE references after the CTE list is populated.
+  // --- 2. Set-op detection and body parsing ---
+  JsonGetter setop_ljg = {0};
+  if (jsget_object(jg, "larg", &setop_ljg) == YES) {
+    // Set-op (UNION/INTERSECT/EXCEPT): flatten binary tree into linked list.
+    PtrVec branches = {0};
+    if (pg_parse_setop_branches(jg, a, &branches) != OK) {
+      ptrvec_clean(&branches);
+      qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported set operation");
+    } else if (branches.len > 0) {
+      // First branch body → father query.
+      QirQuery *first = (QirQuery *)branches.items[0];
+      q->has_star = first->has_star;
+      q->has_distinct = first->has_distinct;
+      q->select_items = first->select_items;
+      q->nselect = first->nselect;
+      q->from_root = first->from_root;
+      q->joins = first->joins;
+      q->njoins = first->njoins;
+      q->where = first->where;
+      q->group_by = first->group_by;
+      q->n_group_by = first->n_group_by;
+      q->having = first->having;
+      if (first->status != QIR_OK)
+        qir_set_status(q, a, first->status, first->status_reason);
+
+      // Link remaining branches via union_next.
+      QirQuery *prev = q;
+      for (uint32_t i = 1; i < branches.len; i++) {
+        prev->union_next = (QirQuery *)branches.items[i];
+        prev = prev->union_next;
+      }
+    }
+    ptrvec_clean(&branches);
+  } else {
+    // Simple SELECT: parse body directly into q.
+    pg_parse_select_body(jg, a, q);
+  }
+
+  // --- 3. Outer-level flags ---
+  if (jsget_exists_nonnull(jg, "limitOffset") == YES)
+    q->has_offset = true;
+
+  // --- 4. ORDER BY (always on the outer/father) ---
+  PtrVec orders = {0};
+  if (jsget_array_objects_begin(jg, "sortClause", &it) == YES) {
+    JsonGetter elem = {0};
+    int rc = 0;
+    while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
+      JsonGetter sjg = {0};
+      if (jsget_object(&elem, "SortBy", &sjg) != YES) {
+        rc = ERR;
+        break;
+      }
+
+      JsonGetter njg = {0};
+      if (jsget_object(&sjg, "node", &njg) != YES) {
+        rc = ERR;
+        break;
+      }
+      QirExpr *expr = pg_parse_expr(&njg, a, q);
+      if (!expr) {
+        rc = ERR;
+        break;
+      }
+      expr = qir_resolve_order_alias(q, a, expr);
+
+      if (ptrvec_push(&orders, expr) != OK) {
+        rc = ERR;
+        break;
+      }
+    }
+    if (rc == ERR)
+      qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported ORDER BY");
+  }
+  q->order_by = (QirExpr **)ptrvec_flatten(&orders, a);
+  q->n_order_by = orders.len;
+  ptrvec_clean(&orders);
+
+  // --- 5. Resolve CTE references (walks union chain) ---
   if (q->nctes > 0) {
     pg_resolve_cte_refs_in_query(q);
   }
 
-  // LIMIT
+  // --- 6. LIMIT ---
   JsonGetter lcjg = {0};
   if (jsget_object(jg, "limitCount", &lcjg) == YES) {
     JsonGetter acjg = {0};
