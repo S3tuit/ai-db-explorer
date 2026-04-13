@@ -779,7 +779,7 @@ static QirExpr *pg_parse_bool_expr(const JsonGetter *jg, Arena *a,
 
 // This generated allowlist is a pure parser-policy input. Keep only operator
 // tokens whose semantics we already model safely in
-// docs/pg_safe_operators.json.
+// meta/pg_safe_operators.json.
 #include "pg_safe_operator.generated.inc"
 
 /* Compares one operator token key against one sorted allowlist entry.
@@ -3486,7 +3486,7 @@ fail_bad_input:
 
 // This generated allowlist is a pure-function policy input. Keep time/random
 // and other server-state-dependent functions out of
-// docs/pg_safe_functions.json.
+// meta/pg_safe_functions.json.
 #include "pg_safe_func.generated.inc"
 
 static const DbSafeFuncList *pg_safe_functions(DbBackend *db) {

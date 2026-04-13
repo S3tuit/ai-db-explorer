@@ -1,4 +1,4 @@
-/* Generated from docs/tools.json by py_utils/gen_tool_artifacts.py.
+/* Generated from meta/tools.json by py_utils/gen_tool_artifacts.py.
  * Do not edit manually.
  */
 static const BrespToolJsonDef bresp_tool_defs[] = {

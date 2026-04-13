@@ -414,7 +414,7 @@ static void test_query_result_json_string_id(void) {
 }
 
 /* Verifies that list_database_connections emits structuredContent compatible
- * with docs/tools.md and preserves the typed connection metadata.
+ * with meta/tools.json and preserves the typed connection metadata.
  */
 static void test_conn_profiles_broker_response_schema_shape(void) {
   ConnProfile profiles[2] = {0};

@@ -113,10 +113,10 @@ vendor-verify:
 vendor-freshness:
 	python3 py_utils/check_vendors.py freshness
 
-src/tool_defs.generated.inc: docs/tools.json docs/tool_manifest.schema.json py_utils/gen_tool_artifacts.py py_utils/validate_tool_json.py
+src/tool_defs.generated.inc: meta/tools.json meta/tool_manifest.schema.json py_utils/gen_tool_artifacts.py py_utils/validate_tool_json.py
 	python3 py_utils/gen_tool_artifacts.py
 
-src/pg_safe_func.generated.inc src/pg_safe_operator.generated.inc: docs/pg_safe_functions.json docs/pg_safe_operators.json py_utils/gen_pg_inc_files.py
+src/pg_safe_func.generated.inc src/pg_safe_operator.generated.inc: meta/pg_safe_functions.json meta/pg_safe_operators.json py_utils/gen_pg_inc_files.py
 	python3 py_utils/gen_pg_inc_files.py
 
 build/broker_response.o build/testobj/broker_response.o build/asan/broker_response.o: src/tool_defs.generated.inc

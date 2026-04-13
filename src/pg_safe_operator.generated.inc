@@ -1,4 +1,4 @@
-/* Generated from docs/pg_safe_operators.json by py_utils/gen_pg_inc_files.py.
+/* Generated from meta/pg_safe_operators.json by py_utils/gen_pg_inc_files.py.
  * Do not edit manually.
  */
 static const char *const PG_SAFE_OPERATOR_TOKENS[] = {

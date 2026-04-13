@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate Postgres safe-allowlist includes from canonical JSON files.
 
-The JSON files under docs/ are the canonical manually-edited sources. In normal
+The JSON files under meta/ are the canonical manually-edited sources. In normal
 mode this script validates that those files are already normalized, then emits
 the generated C includes. With --normalize it sorts, deduplicates, rewrites the
 JSON sources, and then emits the generated includes.
@@ -17,9 +17,9 @@ from typing import Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SAFE_FUNCTIONS_JSON = REPO_ROOT / "docs" / "pg_safe_functions.json"
+DEFAULT_SAFE_FUNCTIONS_JSON = REPO_ROOT / "meta" / "pg_safe_functions.json"
 DEFAULT_SAFE_FUNCTIONS_INC = REPO_ROOT / "src" / "pg_safe_func.generated.inc"
-DEFAULT_SAFE_OPERATORS_JSON = REPO_ROOT / "docs" / "pg_safe_operators.json"
+DEFAULT_SAFE_OPERATORS_JSON = REPO_ROOT / "meta" / "pg_safe_operators.json"
 DEFAULT_SAFE_OPERATORS_INC = REPO_ROOT / "src" / "pg_safe_operator.generated.inc"
 
 SAFE_FUNC_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
@@ -176,7 +176,7 @@ def main() -> int:
 
     functions_inc_path.write_text(
         _render_include(
-            "docs/pg_safe_functions.json",
+            "meta/pg_safe_functions.json",
             "static const char *PG_SAFE_FUNCS[] = {",
             functions,
         ),
@@ -184,7 +184,7 @@ def main() -> int:
     )
     operators_inc_path.write_text(
         _render_include(
-            "docs/pg_safe_operators.json",
+            "meta/pg_safe_operators.json",
             "static const char *const PG_SAFE_OPERATOR_TOKENS[] = {",
             operators,
         ),

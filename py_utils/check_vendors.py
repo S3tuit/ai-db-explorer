@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks vendored dependencies against docs/vendor_manifest.json.
+"""Checks vendored dependencies against meta/vendor_manifest.json.
 
 This script supports:
   - verify: ensure the working tree matches the pinned upstream state
@@ -26,14 +26,14 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MANIFEST = ROOT / "docs" / "vendor_manifest.json"
+DEFAULT_MANIFEST = ROOT / "meta" / "vendor_manifest.json"
 GITHUB_UA = "adbxplorer-vendor-check"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SERIES_TAG_RE = re.compile(r"^(?P<series>\d+)-(?P<version>\d+\.\d+\.\d+)$")
 
 
 class ManifestError(RuntimeError):
-    """Raised when docs/vendor_manifest.json is malformed."""
+    """Raised when meta/vendor_manifest.json is malformed."""
 
 
 class CheckError(RuntimeError):
@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--manifest",
         default=str(DEFAULT_MANIFEST),
-        help="Path to docs/vendor_manifest.json.",
+        help="Path to meta/vendor_manifest.json.",
     )
     parser.add_argument(
         "--vendor",
