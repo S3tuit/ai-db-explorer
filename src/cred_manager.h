@@ -51,7 +51,9 @@ typedef struct {
  * - Returns OK on success.
  * - Returns ERR on invalid input, config resolution/load failures,
  *   secret-store failures, terminal interaction failures, or backend test
- *   failures. On ERR, '*out_err' contains best-effort user-facing context.
+ *   infrastructure failures. For CRED_MAN_TEST, ordinary missing-credential
+ *   and database connectivity/auth failures are reported to stdout and still
+ *   return OK. On ERR, '*out_err' contains best-effort user-facing context.
  */
 AdbxStatus cred_manager_execute(const CredManagerReq *req,
                                 const char *config_input, char **out_err);
