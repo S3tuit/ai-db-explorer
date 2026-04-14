@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Generate human-readable and C-consumable tool artifacts from docs/tools.json.
+"""Generate C-consumable tool artifacts from meta/tools.json.
 
-This script treats docs/tools.json as the canonical MCP tool manifest. It
+This script treats meta/tools.json as the canonical MCP tool manifest. It
 validates the manifest and all embedded schemas via validate_tool_json.py, then
-emits:
-  - docs/tools.md for human-readable review
-  - src/tool_defs.generated.inc for broker_response.c consumption
+emits src/tool_defs.generated.inc for broker_response.c consumption.
 """
 
 from __future__ import annotations
@@ -17,8 +15,6 @@ from typing import Any
 
 from validate_tool_json import DEFAULT_MANIFEST_SCHEMA, DEFAULT_TOOLS_JSON, load_tool_definitions
 
-
-DEFAULT_TOOLS_MD = Path(__file__).resolve().parent.parent / "docs" / "tools.md"
 DEFAULT_TOOL_INC = (
     Path(__file__).resolve().parent.parent / "src" / "tool_defs.generated.inc"
 )
@@ -32,34 +28,6 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
-def _render_tools_md(manifest: dict[str, Any]) -> str:
-    version = manifest["mcpSpecVersion"]
-    tools = manifest["tools"]
-
-    parts = [
-        "<!-- Generated from docs/tools.json by py_utils/gen_tool_artifacts.py. Do not edit manually. -->",
-        "",
-        "# Tool Definitions",
-        "",
-        f"Generated from `docs/tools.json` and aligned with MCP `{version}`.",
-        "",
-    ]
-
-    for tool in tools:
-        parts.extend(
-            [
-                f"## {tool['name']}",
-                "",
-                "```json",
-                json.dumps(tool, indent=2, ensure_ascii=False),
-                "```",
-                "",
-            ]
-        )
-
-    return "\n".join(parts)
-
-
 def _c_string_literal_chunks(text: str, width: int = 76) -> str:
     chunks = [text[i : i + width] for i in range(0, len(text), width)] or [""]
     return "\n".join(f"        {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks)
@@ -68,7 +36,7 @@ def _c_string_literal_chunks(text: str, width: int = 76) -> str:
 def _render_tool_defs_inc(manifest: dict[str, Any]) -> str:
     tools = manifest["tools"]
     parts = [
-        "/* Generated from docs/tools.json by py_utils/gen_tool_artifacts.py.",
+        "/* Generated from meta/tools.json by py_utils/gen_tool_artifacts.py.",
         " * Do not edit manually.",
         " */",
         "static const BrespToolJsonDef bresp_tool_defs[] = {",
@@ -93,7 +61,7 @@ def _render_tool_defs_inc(manifest: dict[str, Any]) -> str:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate docs/tools.md and src/tool_defs.generated.inc from docs/tools.json."
+        description="Generate src/tool_defs.generated.inc from meta/tools.json."
     )
     parser.add_argument(
         "--tools-json",
@@ -104,11 +72,6 @@ def _parse_args() -> argparse.Namespace:
         "--manifest-schema",
         default=str(DEFAULT_MANIFEST_SCHEMA),
         help="Path to the tool manifest schema. Defaults to %(default)s",
-    )
-    parser.add_argument(
-        "--tools-md-out",
-        default=str(DEFAULT_TOOLS_MD),
-        help="Path to the generated Markdown output. Defaults to %(default)s",
     )
     parser.add_argument(
         "--tool-inc-out",
@@ -122,13 +85,11 @@ def main() -> int:
     args = _parse_args()
     tools_json = Path(args.tools_json)
     manifest_schema = Path(args.manifest_schema)
-    tools_md_out = Path(args.tools_md_out)
     tool_inc_out = Path(args.tool_inc_out)
 
     load_tool_definitions(tools_json, manifest_schema)
     manifest = _load_manifest(tools_json)
 
-    tools_md_out.write_text(_render_tools_md(manifest), encoding="utf-8")
     tool_inc_out.write_text(_render_tool_defs_inc(manifest), encoding="utf-8")
     return 0
 

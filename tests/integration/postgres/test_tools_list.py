@@ -8,7 +8,7 @@ from test_broker_mcp_handshake import do_full_handshake
 from test_user_mcp_handshake import read_frame, stop_proc, write_frame
 
 ROOT = Path(__file__).resolve().parents[3]
-TOOLS_JSON = ROOT / "docs" / "tools.json"
+TOOLS_JSON = ROOT / "meta" / "tools.json"
 
 
 def send_tools_list_request(server, req_id, params=None):

@@ -32,6 +32,7 @@ AdbxStatus qir_handle_init(QirQueryHandle *h) {
   q->status = QIR_OK;
   q->status_reason = NULL;
   q->kind = QIR_STMT_SELECT;
+  q->stmt_flags = QIR_STMTF_NONE;
   q->limit_value = -1;
   h->q = q;
   return OK;
@@ -293,31 +294,26 @@ static void qir_extract_from_expr_rec(const QirQuery *owner_query,
                               touches);
     break;
 
-  case QIR_EXPR_EQ:
-  case QIR_EXPR_NE:
-  case QIR_EXPR_GT:
-  case QIR_EXPR_GE:
-  case QIR_EXPR_LT:
-  case QIR_EXPR_LE:
-  case QIR_EXPR_LIKE:
-  case QIR_EXPR_NOT_LIKE:
+  case QIR_EXPR_OP:
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.op.lhs, scope, tr,
+                              touches);
+    for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.op.args[i], scope,
+                                tr, touches);
+    }
+    break;
+
   case QIR_EXPR_AND:
   case QIR_EXPR_OR:
-  case QIR_EXPR_NOT:
     qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.l, scope, tr,
                               touches);
     qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.r, scope, tr,
                               touches);
     break;
 
-  case QIR_EXPR_IN:
-    // IN(lhs, items...): touches can appear in lhs and in each item.
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.in_.lhs, scope, tr,
+  case QIR_EXPR_NOT:
+    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.l, scope, tr,
                               touches);
-    for (uint32_t i = 0; i < e->u.in_.nitems; i++) {
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.in_.items[i],
-                                scope, tr, touches);
-    }
     break;
 
   case QIR_EXPR_CASE:
@@ -463,6 +459,14 @@ static void qir_extract_from_query_rec(const QirQuery *q, QirScope scope,
       continue;
     }
     qir_extract_from_expr_rec(q, scope_cte, e, scope, tr, touches);
+  }
+
+  // Walk union_next chain. Each branch is a sibling query that shares the
+  // father's CTE scope. We keep the same scope (MAIN / NESTED) since the
+  // union branches are at the same level as the father.
+  for (const QirQuery *branch = q->union_next; branch;
+       branch = branch->union_next) {
+    qir_extract_from_query_rec(branch, scope, tr, touches, scope_cte);
   }
 }
 

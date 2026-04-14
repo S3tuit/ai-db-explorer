@@ -113,6 +113,18 @@ static void assert_colref_expr(const QirExpr *e, const char *qual,
 #define ASSERT_COLREF(e, qual, col)                                            \
   assert_colref_expr((e), (qual), (col), __FILE__, __LINE__)
 
+/* Asserts that expression is one generalized operator node. */
+static void assert_op_expr(const QirExpr *e, QirOpClass cls,
+                           const char *op_name, const char *file, int line) {
+  ASSERT_TRUE_AT(e != NULL, file, line);
+  ASSERT_TRUE_AT(e->kind == QIR_EXPR_OP, file, line);
+  ASSERT_TRUE_AT(e->u.op.cls == cls, file, line);
+  ASSERT_TRUE_AT(e->u.op.op_name != NULL, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.op.op_name, op_name) == 0, file, line);
+}
+#define ASSERT_OP(e, cls, op_name)                                             \
+  assert_op_expr((e), (cls), (op_name), __FILE__, __LINE__)
+
 /* A1. Multiple predicates AND + comparisons + literals. */
 static void test_sql_standard_predicates_and_limit(void) {
   const char *sql = "SELECT p.id AS pid "
@@ -153,17 +165,17 @@ static void test_sql_standard_predicates_and_limit(void) {
   const QirExpr *rhs = h.q->where->u.bin.r;
   ASSERT_TRUE(lhs && rhs);
 
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_GE);
-  ASSERT_COLREF(lhs->u.bin.l, "p", "age");
-  ASSERT_TRUE(lhs->u.bin.r && lhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_TRUE(lhs->u.bin.r->u.lit.kind == QIR_LIT_INT64);
-  ASSERT_TRUE(lhs->u.bin.r->u.lit.v.i64 == 25);
+  ASSERT_OP(lhs, QIR_OP_OTHER, ">=");
+  ASSERT_COLREF(lhs->u.op.lhs, "p", "age");
+  ASSERT_TRUE(lhs->u.op.args[0] && lhs->u.op.args[0]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.lit.kind == QIR_LIT_INT64);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.lit.v.i64 == 25);
 
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_EQ);
-  ASSERT_COLREF(rhs->u.bin.l, "p", "region");
-  ASSERT_TRUE(rhs->u.bin.r && rhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_TRUE(rhs->u.bin.r->u.lit.kind == QIR_LIT_STRING);
-  ASSERT_TRUE(strcmp(rhs->u.bin.r->u.lit.v.s, "c") == 0);
+  ASSERT_OP(rhs, QIR_OP_EQ, "=");
+  ASSERT_COLREF(rhs->u.op.lhs, "p", "region");
+  ASSERT_TRUE(rhs->u.op.args[0] && rhs->u.op.args[0]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(rhs->u.op.args[0]->u.lit.kind == QIR_LIT_STRING);
+  ASSERT_TRUE(strcmp(rhs->u.op.args[0]->u.lit.v.s, "c") == 0);
 
   QirTouchReport *tr = extract_touches(&h);
   ASSERT_NO_UNKNOWN_TOUCHES(tr);
@@ -204,13 +216,13 @@ static void test_sql_standard_in_list(void) {
   ASSERT_TRUE(h.q->status == QIR_OK);
 
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_COLREF(h.q->where->u.in_.lhs, "p", "region");
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 3);
+  ASSERT_OP(h.q->where, QIR_OP_IN, "=");
+  ASSERT_COLREF(h.q->where->u.op.lhs, "p", "region");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 3);
 
-  const QirExpr *i0 = h.q->where->u.in_.items[0];
-  const QirExpr *i1 = h.q->where->u.in_.items[1];
-  const QirExpr *i2 = h.q->where->u.in_.items[2];
+  const QirExpr *i0 = h.q->where->u.op.args[0];
+  const QirExpr *i1 = h.q->where->u.op.args[1];
+  const QirExpr *i2 = h.q->where->u.op.args[2];
   ASSERT_TRUE(i0 && i1 && i2);
   ASSERT_TRUE(i0->kind == QIR_EXPR_LITERAL);
   ASSERT_TRUE(i1->kind == QIR_EXPR_LITERAL);
@@ -250,8 +262,8 @@ static void test_sql_standard_or(void) {
   const QirExpr *lhs = h.q->where->u.bin.l;
   const QirExpr *rhs = h.q->where->u.bin.r;
   ASSERT_TRUE(lhs && rhs);
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_EQ);
+  ASSERT_OP(lhs, QIR_OP_EQ, "=");
+  ASSERT_OP(rhs, QIR_OP_EQ, "=");
 
   qir_handle_destroy(&h);
 }
@@ -358,9 +370,64 @@ static void test_sql_standard_func_call(void) {
   ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.funcall.name, "lower");
 
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(h.q->where->u.bin.l->kind == QIR_EXPR_FUNCALL);
-  ASSERT_TRUE(h.q->where->u.bin.r->kind == QIR_EXPR_FUNCALL);
+  ASSERT_OP(h.q->where, QIR_OP_EQ, "=");
+  ASSERT_TRUE(h.q->where->u.op.lhs->kind == QIR_EXPR_FUNCALL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_FUNCALL);
+
+  qir_handle_destroy(&h);
+}
+
+/* A8b. COALESCE/GREATEST/LEAST normalize to regular function calls. */
+static void test_sql_standard_minmax_and_coalesce(void) {
+  const char *sql =
+      "SELECT GREATEST(COALESCE(p.score, 0), LEAST(p.cap, 100)) AS amount "
+      "FROM private.people AS p;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nselect == 1);
+  ASSERT_TRUE(h.q->select_items[0]->value != NULL);
+  ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
+
+  const QirFuncCall *greatest = &h.q->select_items[0]->value->u.funcall;
+  ASSERT_IDENT_EQ(&greatest->schema, "");
+  ASSERT_IDENT_EQ(&greatest->name, "greatest");
+  ASSERT_TRUE(greatest->nargs == 2);
+  ASSERT_TRUE(greatest->args != NULL);
+
+  ASSERT_TRUE(greatest->args[0] != NULL);
+  ASSERT_TRUE(greatest->args[0]->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *coalesce = &greatest->args[0]->u.funcall;
+  ASSERT_IDENT_EQ(&coalesce->schema, "");
+  ASSERT_IDENT_EQ(&coalesce->name, "coalesce");
+  ASSERT_TRUE(coalesce->nargs == 2);
+  ASSERT_COLREF(coalesce->args[0], "p", "score");
+  ASSERT_TRUE(coalesce->args[1] != NULL);
+  ASSERT_TRUE(coalesce->args[1]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(coalesce->args[1]->u.lit.kind == QIR_LIT_INT64);
+  ASSERT_TRUE(coalesce->args[1]->u.lit.v.i64 == 0);
+
+  ASSERT_TRUE(greatest->args[1] != NULL);
+  ASSERT_TRUE(greatest->args[1]->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *least = &greatest->args[1]->u.funcall;
+  ASSERT_IDENT_EQ(&least->schema, "");
+  ASSERT_IDENT_EQ(&least->name, "least");
+  ASSERT_TRUE(least->nargs == 2);
+  ASSERT_COLREF(least->args[0], "p", "cap");
+  ASSERT_TRUE(least->args[1] != NULL);
+  ASSERT_TRUE(least->args[1]->kind == QIR_EXPR_LITERAL);
+  ASSERT_TRUE(least->args[1]->u.lit.kind == QIR_LIT_INT64);
+  ASSERT_TRUE(least->args[1]->u.lit.v.i64 == 100);
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_NO_UNKNOWN_TOUCHES(tr);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "score");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "cap");
+  qir_touch_report_destroy(tr);
 
   qir_handle_destroy(&h);
 }
@@ -645,9 +712,15 @@ static void test_sql_standard_subquery_where(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(h.q->where->u.bin.r != NULL);
-  ASSERT_TRUE(h.q->where->u.bin.r->kind == QIR_EXPR_SUBQUERY);
+  ASSERT_OP(h.q->where, QIR_OP_EQ, "=");
+  ASSERT_TRUE(h.q->where->u.op.args[0] != NULL);
+  ASSERT_OP(h.q->where->u.op.args[0], QIR_OP_OTHER, "EXPR_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.lhs == NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args[0]->kind ==
+              QIR_EXPR_SUBQUERY);
 
   qir_handle_destroy(&h);
 }
@@ -668,7 +741,12 @@ static void test_sql_standard_exists(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_SUBQUERY);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "EXISTS_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.op.lhs == NULL);
+  ASSERT_TRUE(h.q->where->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_SUBQUERY);
 
   qir_handle_destroy(&h);
 }
@@ -689,10 +767,12 @@ static void test_sql_standard_in_subquery(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 1);
-  ASSERT_TRUE(h.q->where->u.in_.items[0] != NULL);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->kind == QIR_EXPR_SUBQUERY);
+  ASSERT_OP(h.q->where, QIR_OP_IN, "ANY_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.op.lhs != NULL);
+  ASSERT_TRUE(h.q->where->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_SUBQUERY);
 
   QirTouchReport *tr = extract_touches(&h);
   ASSERT_TRUE(tr->has_unknown_touches == false);
@@ -700,6 +780,33 @@ static void test_sql_standard_in_subquery(void) {
   ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
   ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "o", "user_id");
   qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* B7. NOT IN (SELECT ...) keeps the membership predicate inside NOT. */
+static void test_sql_standard_not_in_subquery(void) {
+  const char *sql = "SELECT p.name AS name "
+                    "FROM private.people AS p "
+                    "WHERE p.id NOT IN ("
+                    "  SELECT o.user_id "
+                    "  FROM orders AS o "
+                    "  WHERE o.total > 10"
+                    ");";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_NOT);
+  ASSERT_OP(h.q->where->u.bin.l, QIR_OP_IN, "ANY_SUBLINK");
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.lhs != NULL);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.args != NULL);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.bin.l->u.op.args[0]->kind == QIR_EXPR_SUBQUERY);
 
   qir_handle_destroy(&h);
 }
@@ -898,7 +1005,7 @@ static void test_sql_standard_like(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_LIKE);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "~~");
 
   qir_handle_destroy(&h);
 }
@@ -915,7 +1022,7 @@ static void test_sql_standard_not_like(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_NOT_LIKE);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "!~~");
 
   qir_handle_destroy(&h);
 }
@@ -932,7 +1039,8 @@ static void test_sql_standard_between(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_AND);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "BETWEEN");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 2);
   qir_handle_destroy(&h);
 
   const char *sql_not_between = "SELECT p.name AS name "
@@ -945,7 +1053,8 @@ static void test_sql_standard_between(void) {
   ASSERT_TRUE(h2.q != NULL);
   ASSERT_TRUE(h2.q->status == QIR_OK);
   ASSERT_TRUE(h2.q->where != NULL);
-  ASSERT_TRUE(h2.q->where->kind == QIR_EXPR_OR);
+  ASSERT_OP(h2.q->where, QIR_OP_OTHER, "NOT BETWEEN");
+  ASSERT_TRUE(h2.q->where->u.op.nargs == 2);
   qir_handle_destroy(&h2);
 }
 
@@ -1013,7 +1122,7 @@ static void test_sql_standard_group_by_having(void) {
   ASSERT_TRUE(h.q->n_group_by == 1);
   ASSERT_COLREF(h.q->group_by[0], "p", "region");
   ASSERT_TRUE(h.q->having != NULL);
-  ASSERT_TRUE(h.q->having->kind == QIR_EXPR_GT);
+  ASSERT_OP(h.q->having, QIR_OP_OTHER, ">");
 
   QirTouchReport *tr = extract_touches(&h);
   ASSERT_TRUE(tr->has_unknown_touches == false);
@@ -1099,20 +1208,20 @@ static void test_sql_standard_null_comparison(void) {
 
   QirExpr *lhs = h.q->where->u.bin.l;
   QirExpr *rhs = h.q->where->u.bin.r;
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_NE);
+  ASSERT_OP(lhs, QIR_OP_OTHER, "IS_NULL");
+  ASSERT_OP(rhs, QIR_OP_OTHER, "IS_NOT_NULL");
 
-  ASSERT_TRUE(lhs->u.bin.l->kind == QIR_EXPR_COLREF);
-  ASSERT_TRUE(lhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_IDENT_EQ(&lhs->u.bin.l->u.colref.qualifier, "v");
-  ASSERT_IDENT_EQ(&lhs->u.bin.l->u.colref.column, "y");
-  ASSERT_TRUE(lhs->u.bin.r->u.lit.kind == QIR_LIT_NULL);
+  ASSERT_TRUE(lhs->u.op.nargs == 0);
+  ASSERT_TRUE(lhs->u.op.args == NULL);
+  ASSERT_TRUE(lhs->u.op.lhs->kind == QIR_EXPR_COLREF);
+  ASSERT_IDENT_EQ(&lhs->u.op.lhs->u.colref.qualifier, "v");
+  ASSERT_IDENT_EQ(&lhs->u.op.lhs->u.colref.column, "y");
 
-  ASSERT_TRUE(rhs->u.bin.l->kind == QIR_EXPR_COLREF);
-  ASSERT_TRUE(rhs->u.bin.r->kind == QIR_EXPR_LITERAL);
-  ASSERT_IDENT_EQ(&rhs->u.bin.l->u.colref.qualifier, "v");
-  ASSERT_IDENT_EQ(&rhs->u.bin.l->u.colref.column, "z");
-  ASSERT_TRUE(rhs->u.bin.r->u.lit.kind == QIR_LIT_NULL);
+  ASSERT_TRUE(rhs->u.op.nargs == 0);
+  ASSERT_TRUE(rhs->u.op.args == NULL);
+  ASSERT_TRUE(rhs->u.op.lhs->kind == QIR_EXPR_COLREF);
+  ASSERT_IDENT_EQ(&rhs->u.op.lhs->u.colref.qualifier, "v");
+  ASSERT_IDENT_EQ(&rhs->u.op.lhs->u.colref.column, "z");
 
   qir_handle_destroy(&h);
 }
@@ -1148,6 +1257,281 @@ static void test_left_join_base_touches(void) {
   qir_handle_destroy(&h);
 }
 
+/* E14. Binary arithmetic operators (+, -, *, /) in SELECT and WHERE. */
+static void test_sql_standard_binary_arithmetic(void) {
+  const char *sql = "SELECT (t.a + t.b) AS sum_ab, "
+                    "       (t.a * t.b) AS mul_ab "
+                    "FROM tbl t "
+                    "WHERE (t.a - t.b) > 0;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // SELECT list: first item is (t.a + t.b)
+  ASSERT_TRUE(h.q->nselect == 2);
+  QirExpr *s0 = h.q->select_items[0]->value;
+  ASSERT_OP(s0, QIR_OP_OTHER, "+");
+  ASSERT_TRUE(s0->u.op.lhs != NULL);
+  ASSERT_COLREF(s0->u.op.lhs, "t", "a");
+  ASSERT_TRUE(s0->u.op.nargs == 1);
+  ASSERT_COLREF(s0->u.op.args[0], "t", "b");
+
+  // SELECT list: second item is (t.a * t.b)
+  QirExpr *s1 = h.q->select_items[1]->value;
+  ASSERT_OP(s1, QIR_OP_OTHER, "*");
+  ASSERT_TRUE(s1->u.op.lhs != NULL);
+  ASSERT_COLREF(s1->u.op.lhs, "t", "a");
+  ASSERT_TRUE(s1->u.op.nargs == 1);
+  ASSERT_COLREF(s1->u.op.args[0], "t", "b");
+
+  // WHERE: (t.a - t.b) > 0  ->  outer op ">" with lhs = op "-"
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, ">");
+  QirExpr *sub = h.q->where->u.op.lhs;
+  ASSERT_OP(sub, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(sub->u.op.lhs != NULL);
+  ASSERT_COLREF(sub->u.op.lhs, "t", "a");
+  ASSERT_TRUE(sub->u.op.nargs == 1);
+  ASSERT_COLREF(sub->u.op.args[0], "t", "b");
+
+  // Touches: all columns should be base touches on "t".
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "a");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "b");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E15. Unary minus in SELECT, WHERE, and inside a CTE. */
+static void test_sql_standard_unary_minus(void) {
+  const char *sql = "WITH neg AS ("
+                    "  SELECT -v.x AS nx FROM vals v"
+                    ") "
+                    "SELECT -t.a AS neg_a "
+                    "FROM tbl t "
+                    "WHERE -t.b < 0;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // -- Main query SELECT: -t.a --
+  ASSERT_TRUE(h.q->nselect == 1);
+  QirExpr *s0 = h.q->select_items[0]->value;
+  ASSERT_OP(s0, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(s0->u.op.lhs == NULL);
+  ASSERT_TRUE(s0->u.op.nargs == 1);
+  ASSERT_COLREF(s0->u.op.args[0], "t", "a");
+
+  // -- Main query WHERE: -t.b < 0  ->  outer "<" with lhs = unary "-" --
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "<");
+  QirExpr *wlhs = h.q->where->u.op.lhs;
+  ASSERT_OP(wlhs, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(wlhs->u.op.lhs == NULL);
+  ASSERT_TRUE(wlhs->u.op.nargs == 1);
+  ASSERT_COLREF(wlhs->u.op.args[0], "t", "b");
+
+  // -- CTE body: -v.x --
+  ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_TRUE(h.q->ctes != NULL);
+  QirQuery *cte = h.q->ctes[0]->query;
+  ASSERT_TRUE(cte != NULL);
+  ASSERT_TRUE(cte->status == QIR_OK);
+  ASSERT_TRUE(cte->nselect == 1);
+  QirExpr *cs0 = cte->select_items[0]->value;
+  ASSERT_OP(cs0, QIR_OP_OTHER, "-");
+  ASSERT_TRUE(cs0->u.op.lhs == NULL);
+  ASSERT_TRUE(cs0->u.op.nargs == 1);
+  ASSERT_COLREF(cs0->u.op.args[0], "v", "x");
+
+  // -- Touch extraction: columns inside unary expressions must be found --
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  // Main query touches
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "a");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "b");
+  // CTE body touches (nested scope)
+  ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "v", "x");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E16. Two-branch UNION ALL with touch extraction. */
+static void test_sql_standard_union_all_two_branches(void) {
+  const char *sql = "SELECT t.a AS col_a "
+                    "FROM tbl t "
+                    "WHERE t.a > 0 "
+                    "UNION ALL "
+                    "SELECT s.b AS col_b "
+                    "FROM tbl2 s "
+                    "WHERE s.b < 10;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // Father body comes from the first branch (SELECT t.a ...).
+  ASSERT_TRUE(h.q->nselect == 1);
+  ASSERT_COLREF(h.q->select_items[0]->value, "t", "a");
+  ASSERT_TRUE(h.q->from_root != NULL);
+  ASSERT_IDENT_EQ(&h.q->from_root->alias, "t");
+  ASSERT_TRUE(h.q->where != NULL);
+
+  // Second branch linked via union_next.
+  QirQuery *b2 = h.q->union_next;
+  ASSERT_TRUE(b2 != NULL);
+  ASSERT_TRUE(b2->status == QIR_OK);
+  ASSERT_TRUE(b2->nselect == 1);
+  ASSERT_COLREF(b2->select_items[0]->value, "s", "b");
+  ASSERT_TRUE(b2->from_root != NULL);
+  ASSERT_IDENT_EQ(&b2->from_root->alias, "s");
+  ASSERT_TRUE(b2->where != NULL);
+  ASSERT_TRUE(b2->union_next == NULL);
+
+  // Father-only fields: children have defaults.
+  ASSERT_TRUE(b2->nctes == 0);
+  ASSERT_TRUE(b2->limit_value == -1);
+  ASSERT_TRUE(b2->n_order_by == 0);
+
+  // Touch extraction: both branches' columns are found.
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "a");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "s", "b");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E17. Three-branch UNION ALL (verifies left-deep tree flattening). */
+static void test_sql_standard_union_all_three_branches(void) {
+  const char *sql = "SELECT t.x AS c1 FROM t1 t "
+                    "UNION ALL "
+                    "SELECT s.y AS c1 FROM t2 s "
+                    "UNION ALL "
+                    "SELECT r.z AS c1 FROM t3 r;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // Father = first branch.
+  ASSERT_TRUE(h.q->nselect == 1);
+  ASSERT_COLREF(h.q->select_items[0]->value, "t", "x");
+
+  // Second branch.
+  QirQuery *b2 = h.q->union_next;
+  ASSERT_TRUE(b2 != NULL);
+  ASSERT_TRUE(b2->nselect == 1);
+  ASSERT_COLREF(b2->select_items[0]->value, "s", "y");
+
+  // Third branch.
+  QirQuery *b3 = b2->union_next;
+  ASSERT_TRUE(b3 != NULL);
+  ASSERT_TRUE(b3->nselect == 1);
+  ASSERT_COLREF(b3->select_items[0]->value, "r", "z");
+  ASSERT_TRUE(b3->union_next == NULL);
+
+  // Touch extraction: all 3 branches.
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "t", "x");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "s", "y");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "r", "z");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E18. UNION ALL with CTE: CTE refs resolved across union chain. */
+static void test_sql_standard_union_all_with_cte(void) {
+  const char *sql = "WITH vals AS ("
+                    "  SELECT v.x AS vx FROM src v"
+                    ") "
+                    "SELECT a.vx AS col "
+                    "FROM vals a "
+                    "UNION ALL "
+                    "SELECT b.y AS col "
+                    "FROM tbl b;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // Father holds the CTE.
+  ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "vals");
+
+  // First branch: FROM vals a → resolved to CTE_REF.
+  ASSERT_TRUE(h.q->from_root != NULL);
+  ASSERT_TRUE(h.q->from_root->kind == QIR_FROM_CTE_REF);
+  ASSERT_IDENT_EQ(&h.q->from_root->u.cte_name, "vals");
+
+  // Second branch: FROM tbl b → BASE_REL.
+  QirQuery *b2 = h.q->union_next;
+  ASSERT_TRUE(b2 != NULL);
+  ASSERT_TRUE(b2->from_root != NULL);
+  ASSERT_TRUE(b2->from_root->kind == QIR_FROM_BASE_REL);
+  ASSERT_IDENT_EQ(&b2->from_root->alias, "b");
+
+  // Child has default metadata.
+  ASSERT_TRUE(b2->nctes == 0);
+
+  // Touch extraction.
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  // CTE body touches (nested scope).
+  ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "v", "x");
+  // First branch: a.vx is DERIVED (CTE ref).
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "a", "vx");
+  // Second branch: b.y is BASE.
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "b", "y");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* E19. UNION ALL with ORDER BY and LIMIT on the outer query. */
+static void test_sql_standard_union_all_order_limit(void) {
+  const char *sql = "SELECT t.a AS col "
+                    "FROM tbl t "
+                    "UNION ALL "
+                    "SELECT s.b AS col "
+                    "FROM tbl2 s "
+                    "ORDER BY col "
+                    "LIMIT 100;";
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  // ORDER BY and LIMIT on father.
+  ASSERT_TRUE(h.q->n_order_by == 1);
+  ASSERT_TRUE(h.q->limit_value == 100);
+
+  // union_next exists.
+  ASSERT_TRUE(h.q->union_next != NULL);
+  // Child has no ORDER BY / LIMIT.
+  ASSERT_TRUE(h.q->union_next->n_order_by == 0);
+  ASSERT_TRUE(h.q->union_next->limit_value == -1);
+
+  qir_handle_destroy(&h);
+}
+
 int main(void) {
   test_sql_standard_predicates_and_limit();
   test_sql_standard_multi_from_unsupported();
@@ -1158,6 +1542,7 @@ int main(void) {
   test_sql_standard_order_by_alias();
   test_sql_standard_distinct();
   test_sql_standard_func_call();
+  test_sql_standard_minmax_and_coalesce();
   test_sql_standard_join_inner();
   test_sql_standard_join_cross();
   test_sql_standard_offset();
@@ -1171,6 +1556,7 @@ int main(void) {
   test_sql_standard_subquery_where();
   test_sql_standard_exists();
   test_sql_standard_in_subquery();
+  test_sql_standard_not_in_subquery();
   test_sql_standard_star_in_cte();
   test_sql_standard_multi_stmt_rejected();
   test_sql_standard_comment_multi_stmt_rejected();
@@ -1192,6 +1578,12 @@ int main(void) {
   test_sql_standard_values_from_rejected();
   test_sql_standard_null_comparison();
   test_left_join_base_touches();
+  test_sql_standard_binary_arithmetic();
+  test_sql_standard_unary_minus();
+  test_sql_standard_union_all_two_branches();
+  test_sql_standard_union_all_three_branches();
+  test_sql_standard_union_all_with_cte();
+  test_sql_standard_union_all_order_limit();
   fprintf(stderr, "OK: test_query_ir_sql_standard\n");
   return 0;
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Validate tool payload JSON against the canonical docs/tools.json manifest.
+"""Validate tool payload JSON against the canonical meta/tools.json manifest.
 
-This script treats docs/tools.json as the canonical tool manifest. The manifest
-itself is first validated against docs/tool_manifest.schema.json, then every
+This script treats meta/tools.json as the canonical tool manifest. The manifest
+itself is first validated against meta/tool_manifest.schema.json, then every
 embedded inputSchema and outputSchema is validated against JSON Schema
 2020-12, and only then the selected payload instance is checked.
 
@@ -29,9 +29,9 @@ except ImportError as exc:  # pragma: no cover - environment issue
     raise SystemExit(2)
 
 
-DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
-DEFAULT_TOOLS_JSON = DOCS_DIR / "tools.json"
-DEFAULT_MANIFEST_SCHEMA = DOCS_DIR / "tool_manifest.schema.json"
+META_DIR = Path(__file__).resolve().parent.parent / "meta"
+DEFAULT_TOOLS_JSON = META_DIR / "tools.json"
+DEFAULT_MANIFEST_SCHEMA = META_DIR / "tool_manifest.schema.json"
 
 
 class ToolSchemaError(RuntimeError):
@@ -71,7 +71,7 @@ def load_tool_definitions(
     tools_json_path: Path = DEFAULT_TOOLS_JSON,
     manifest_schema_path: Path = DEFAULT_MANIFEST_SCHEMA,
 ) -> dict[str, dict[str, Any]]:
-    """Load and validate all tool definitions from docs/tools.json.
+    """Load and validate all tool definitions from meta/tools.json.
 
     It validates the manifest structure against tool_manifest.schema.json, then
     validates each embedded inputSchema and outputSchema against JSON Schema
@@ -178,9 +178,9 @@ def validate_instance(
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Validate a JSON payload against one tool schema in docs/tools.json."
+        description="Validate a JSON payload against one tool schema in meta/tools.json."
     )
-    parser.add_argument("tool_name", help="Tool name from docs/tools.json")
+    parser.add_argument("tool_name", help="Tool name from meta/tools.json")
     parser.add_argument(
         "schema_kind",
         choices=("input", "output"),

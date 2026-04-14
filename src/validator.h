@@ -26,14 +26,16 @@ typedef enum ValidatorErrCode {
   VERR_WHERE_NOT_CONJ,  /* WHERE not AND-only */
   VERR_JOIN_NOT_INNER,  /* non-INNER join */
   VERR_JOIN_ON_INVALID, /* JOIN ON not AND/= or invalid operands */
-  VERR_JOIN_ON_SENSITIVE,    /* JOIN ON references sensitive columns */
-  VERR_PARAM_IDX_RANGE,      /* $n index outside provided parameter list */
-  VERR_PARAM_DOMAIN_MISMATCH, /* token parameter domain mismatch */
-  VERR_PARAM_UNUSED,         /* provided token parameter not referenced */
-  VERR_DISTINCT_SENSITIVE,   /* DISTINCT in sensitive mode */
-  VERR_OFFSET_SENSITIVE,     /* OFFSET in sensitive mode */
-  VERR_LIMIT_REQUIRED,       /* LIMIT missing in sensitive mode */
-  VERR_LIMIT_EXCEEDS         /* LIMIT too high in sensitive mode */
+  VERR_JOIN_ON_SENSITIVE,        /* JOIN ON references sensitive columns */
+  VERR_PARAM_IDX_RANGE,          /* $n index outside provided parameter list */
+  VERR_PARAM_DOMAIN_MISMATCH,    /* token parameter domain mismatch */
+  VERR_PARAM_UNUSED,             /* provided token parameter not referenced */
+  VERR_EXPLAIN_PARAMS_FORBIDDEN, /* EXPLAIN* cannot use bound input params */
+  VERR_DISTINCT_SENSITIVE,       /* DISTINCT in sensitive mode */
+  VERR_OFFSET_SENSITIVE,         /* OFFSET in sensitive mode */
+  VERR_LIMIT_REQUIRED,           /* LIMIT missing in sensitive mode */
+  VERR_LIMIT_EXCEEDS,            /* LIMIT too high in sensitive mode */
+  VERR_SENSITIVE_IN_UNION         /* sensitive col in a set-op branch */
 } ValidatorErrCode;
 
 typedef struct ValidatorErr {
@@ -52,8 +54,17 @@ typedef struct ValidatorColPlan {
   uint32_t domain_len;
 } ValidatorColPlan;
 
+// When the plan mode is VPLAN_MODE_PASSTHROUGH_PLAINTEXT, the validator
+// doesn't know how many columns will result, but it knows they can safely be
+// plaintext data.
+typedef enum ValidatorPlanMode {
+  VPLAN_MODE_SELECT = 0,
+  VPLAN_MODE_PASSTHROUGH_PLAINTEXT = 1
+} ValidatorPlanMode;
+
 typedef struct ValidatorPlan {
-  PackedArray *cols; // entries are ValidatorColPlan, index-aligned with SELECT
+  ValidatorPlanMode mode;
+  PackedArray *cols; // entries are ValidatorColPlan when mode is SELECT
 } ValidatorPlan;
 
 /* Output contract for validate_query().
@@ -87,8 +98,9 @@ AdbxStatus vq_out_init(ValidateQueryOut *out);
 void vq_out_clean(ValidateQueryOut *out);
 
 /* Validates a SQL query against the global and sensitive-mode policies.
- * On success, returns OK and fills out->plan (one entry per SELECT output
- * column) and sets out->err.code=VERR_NONE.
+ * On success, returns OK and fills out->plan. SELECT-mode plans are aligned
+ * with SELECT output columns; passthrough mode marks backend result columns as
+ * plaintext regardless of shape. Also sets out->err.code=VERR_NONE.
  * On failure, returns ERR and fills out->err with a human-readable message.
  */
 AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out);

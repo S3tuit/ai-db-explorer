@@ -32,6 +32,44 @@ static void assert_ident_eq(const QirIdent *id, const char *expected,
 #define ASSERT_IDENT_EQ(id, expected)                                          \
   assert_ident_eq((id), (expected), __FILE__, __LINE__)
 
+/* Asserts that expression is a qualified column reference. */
+static void assert_colref_expr(const QirExpr *e, const char *qual,
+                               const char *col, const char *file, int line) {
+  ASSERT_TRUE_AT(e != NULL, file, line);
+  ASSERT_TRUE_AT(e->kind == QIR_EXPR_COLREF, file, line);
+  ASSERT_TRUE_AT(e->u.colref.qualifier.name != NULL, file, line);
+  ASSERT_TRUE_AT(e->u.colref.column.name != NULL, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.colref.qualifier.name, qual) == 0, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.colref.column.name, col) == 0, file, line);
+}
+#define ASSERT_COLREF(e, qual, col)                                            \
+  assert_colref_expr((e), (qual), (col), __FILE__, __LINE__)
+
+/* Asserts that expression is one generalized operator node. */
+static void assert_op_expr(const QirExpr *e, QirOpClass cls,
+                           const char *op_name, const char *file, int line) {
+  ASSERT_TRUE_AT(e != NULL, file, line);
+  ASSERT_TRUE_AT(e->kind == QIR_EXPR_OP, file, line);
+  ASSERT_TRUE_AT(e->u.op.cls == cls, file, line);
+  ASSERT_TRUE_AT(e->u.op.op_name != NULL, file, line);
+  ASSERT_TRUE_AT(strcmp(e->u.op.op_name, op_name) == 0, file, line);
+}
+#define ASSERT_OP(e, cls, op_name)                                             \
+  assert_op_expr((e), (cls), (op_name), __FILE__, __LINE__)
+
+/* Asserts that the parsed statement flags match one EXPLAIN expectation. */
+static void assert_stmt_flags(const QirQuery *q, bool explain, bool analyze,
+                              const char *file, int line) {
+  ASSERT_TRUE_AT(q != NULL, file, line);
+  ASSERT_TRUE_AT(qir_query_is_explain(q) == explain, file, line);
+  ASSERT_TRUE_AT(qir_query_is_explain_analyze(q) == analyze, file, line);
+  if (analyze) {
+    ASSERT_TRUE_AT(qir_query_is_explain(q), file, line);
+  }
+}
+#define ASSERT_STMT_FLAGS(q, explain, analyze)                                 \
+  assert_stmt_flags((q), (explain), (analyze), __FILE__, __LINE__)
+
 /* Extracts a touch report for a parsed query.
  * Ownership: caller must destroy the report with qir_touch_report_destroy().
  * Side effects: allocates memory for the report.
@@ -91,12 +129,14 @@ static void test_pg_params_predicates(void) {
   const QirExpr *lhs = h.q->where->u.bin.l;
   const QirExpr *rhs = h.q->where->u.bin.r;
   ASSERT_TRUE(lhs && rhs);
-  ASSERT_TRUE(lhs->kind == QIR_EXPR_GE);
-  ASSERT_TRUE(lhs->u.bin.r->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(lhs->u.bin.r->u.param_index == 1);
-  ASSERT_TRUE(rhs->kind == QIR_EXPR_EQ);
-  ASSERT_TRUE(rhs->u.bin.r->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(rhs->u.bin.r->u.param_index == 2);
+  ASSERT_OP(lhs, QIR_OP_OTHER, ">=");
+  ASSERT_TRUE(lhs->u.op.nargs == 1);
+  ASSERT_TRUE(lhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.param_index == 1);
+  ASSERT_OP(rhs, QIR_OP_EQ, "=");
+  ASSERT_TRUE(rhs->u.op.nargs == 1);
+  ASSERT_TRUE(rhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(rhs->u.op.args[0]->u.param_index == 2);
 
   qir_handle_destroy(&h);
 }
@@ -114,12 +154,12 @@ static void test_pg_in_list_params(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 3);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->u.param_index == 1);
-  ASSERT_TRUE(h.q->where->u.in_.items[1]->u.param_index == 2);
-  ASSERT_TRUE(h.q->where->u.in_.items[2]->u.param_index == 3);
+  ASSERT_OP(h.q->where, QIR_OP_IN, "=");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 3);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.param_index == 1);
+  ASSERT_TRUE(h.q->where->u.op.args[1]->u.param_index == 2);
+  ASSERT_TRUE(h.q->where->u.op.args[2]->u.param_index == 3);
 
   qir_handle_destroy(&h);
 }
@@ -213,19 +253,31 @@ static void test_pg_set_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 8. Recursive CTE should be rejected. */
-static void test_pg_recursive_cte_rejected(void) {
-  const char *sql = "WITH RECURSIVE t(n) AS ("
-                    "  SELECT 1 "
-                    "  UNION ALL "
-                    "  SELECT n+1 FROM t WHERE n < 5"
+/* 8. WITH RECURSIVE should parse like a regular CTE. */
+static void test_pg_recursive_cte(void) {
+  const char *sql = "WITH RECURSIVE t AS ("
+                    "  SELECT p.id AS id "
+                    "  FROM private.people AS p"
                     ") "
-                    "SELECT t.n AS n FROM t LIMIT 10;";
+                    "SELECT t.id AS id "
+                    "FROM t AS t "
+                    "LIMIT 10;";
 
   QirQueryHandle h = {0};
   parse_sql_postgres(sql, &h);
+
   ASSERT_TRUE(h.q != NULL);
-  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "t");
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "id");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "t", "id");
+  qir_touch_report_destroy(tr);
+
   qir_handle_destroy(&h);
 }
 
@@ -249,7 +301,7 @@ static void test_pg_quoted_identifiers(void) {
   qir_handle_destroy(&h);
 }
 
-/* 10. ANY/ALL array comparisons should map to IN. */
+/* 10. ANY/ALL array comparisons should stay opaque operators in IR. */
 static void test_pg_any_all_as_in(void) {
   const char *sql = "SELECT p.name AS name "
                     "FROM private.people AS p "
@@ -262,15 +314,176 @@ static void test_pg_any_all_as_in(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->where != NULL);
-  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_IN);
-  ASSERT_TRUE(h.q->where->u.in_.nitems == 1);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->kind == QIR_EXPR_PARAM);
-  ASSERT_TRUE(h.q->where->u.in_.items[0]->u.param_index == 1);
+  ASSERT_OP(h.q->where, QIR_OP_OTHER, "=");
+  ASSERT_TRUE(h.q->where->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.param_index == 1);
 
   qir_handle_destroy(&h);
 }
 
-/* 11. Row comparison should be rejected. */
+/* 11. EXPLAIN SELECT should preserve the wrapped SELECT in IR. */
+static void test_pg_filter_normalized_to_case(void) {
+  const char *sql =
+      "SELECT SUM(p.amount) FILTER (WHERE p.kind = 'invoice') AS total, "
+      "COUNT(*) FILTER (WHERE p.kind = 'invoice') AS cnt "
+      "FROM payments AS p;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nselect == 2);
+
+  ASSERT_TRUE(h.q->select_items[0]->value != NULL);
+  ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *sum = &h.q->select_items[0]->value->u.funcall;
+  ASSERT_IDENT_EQ(&sum->schema, "");
+  ASSERT_IDENT_EQ(&sum->name, "sum");
+  ASSERT_TRUE(sum->is_star == false);
+  ASSERT_TRUE(sum->nargs == 1);
+  ASSERT_TRUE(sum->args != NULL);
+  ASSERT_TRUE(sum->args[0] != NULL);
+  ASSERT_TRUE(sum->args[0]->kind == QIR_EXPR_CASE);
+  ASSERT_TRUE(sum->args[0]->u.case_.arg == NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.nwhens == 1);
+  ASSERT_TRUE(sum->args[0]->u.case_.else_expr == NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0] != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr != NULL);
+  ASSERT_OP(sum->args[0]->u.case_.whens[0]->when_expr, QIR_OP_EQ, "=");
+  ASSERT_COLREF(sum->args[0]->u.case_.whens[0]->when_expr->u.op.lhs, "p",
+                "kind");
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0] != NULL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0]->kind ==
+              QIR_EXPR_LITERAL);
+  ASSERT_TRUE(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0]
+                  ->u.lit.kind == QIR_LIT_STRING);
+  ASSERT_TRUE(strcmp(sum->args[0]->u.case_.whens[0]->when_expr->u.op.args[0]
+                         ->u.lit.v.s,
+                     "invoice") == 0);
+  ASSERT_COLREF(sum->args[0]->u.case_.whens[0]->then_expr, "p", "amount");
+
+  ASSERT_TRUE(h.q->select_items[1]->value != NULL);
+  ASSERT_TRUE(h.q->select_items[1]->value->kind == QIR_EXPR_FUNCALL);
+  const QirFuncCall *count = &h.q->select_items[1]->value->u.funcall;
+  ASSERT_IDENT_EQ(&count->schema, "");
+  ASSERT_IDENT_EQ(&count->name, "count");
+  ASSERT_TRUE(count->is_star == false);
+  ASSERT_TRUE(count->nargs == 1);
+  ASSERT_TRUE(count->args != NULL);
+  ASSERT_TRUE(count->args[0] != NULL);
+  ASSERT_TRUE(count->args[0]->kind == QIR_EXPR_CASE);
+  ASSERT_TRUE(count->args[0]->u.case_.arg == NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.nwhens == 1);
+  ASSERT_TRUE(count->args[0]->u.case_.else_expr == NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens != NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0] != NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr != NULL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr->kind ==
+              QIR_EXPR_LITERAL);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr->u.lit.kind ==
+              QIR_LIT_INT64);
+  ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr->u.lit.v.i64 == 1);
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TRUE(tr->has_unknown_touches == false);
+  ASSERT_TRUE(tr->has_unsupported == false);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "amount");
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "kind");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* 11. EXPLAIN SELECT should preserve the wrapped SELECT in IR. */
+static void test_pg_explain_select(void) {
+  const char *sql = "EXPLAIN SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, false);
+  ASSERT_TRUE(h.q->limit_value == 10);
+
+  QirTouchReport *tr = extract_touches(&h);
+  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
+  qir_touch_report_destroy(tr);
+
+  qir_handle_destroy(&h);
+}
+
+/* 12. EXPLAIN ANALYZE should set both EXPLAIN and ANALYZE flags. */
+static void test_pg_explain_analyze_select(void) {
+  const char *sql = "EXPLAIN ANALYZE SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, true);
+
+  qir_handle_destroy(&h);
+}
+
+/* 13. EXPLAIN ANALYSE should map to the same ANALYZE flag. */
+static void test_pg_explain_analyse_select(void) {
+  const char *sql = "EXPLAIN ANALYSE SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, true);
+
+  qir_handle_destroy(&h);
+}
+
+/* 14. EXPLAIN options we do not model should still keep EXPLAIN semantics. */
+static void test_pg_explain_generic_plan_select(void) {
+  const char *sql = "EXPLAIN (GENERIC_PLAN) SELECT p.id AS id "
+                    "FROM private.people AS p "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
+  ASSERT_STMT_FLAGS(h.q, true, false);
+
+  qir_handle_destroy(&h);
+}
+
+/* 15. EXPLAIN only supports wrapped SELECT statements. */
+static void test_pg_explain_delete_rejected(void) {
+  const char *sql = "EXPLAIN DELETE FROM private.people WHERE id = 1;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+
+  qir_handle_destroy(&h);
+}
+
+/* 16. Row comparison should be rejected. */
 static void test_pg_row_comparison_rejected(void) {
   const char *sql = "SELECT p.name AS name "
                     "FROM private.people AS p "
@@ -284,7 +497,7 @@ static void test_pg_row_comparison_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 12. LATERAL should be rejected. */
+/* 17. LATERAL should be rejected. */
 static void test_pg_lateral_rejected(void) {
   const char *sql = "SELECT p.id AS pid, x.v AS v "
                     "FROM private.people AS p "
@@ -298,7 +511,7 @@ static void test_pg_lateral_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 13. Set-returning function in FROM should be rejected. */
+/* 18. Set-returning function in FROM should be rejected. */
 static void test_pg_set_returning_rejected(void) {
   const char *sql = "SELECT x.val AS val "
                     "FROM unnest(ARRAY[1,2,3]) AS x(val) "
@@ -311,7 +524,7 @@ static void test_pg_set_returning_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* 14. JSON operators should preserve base column touch. */
+/* 19. JSON operators should preserve base column touch. */
 static void test_pg_json_operator_touch(void) {
   const char *sql = "SELECT p.profile->>'ssn' AS ssn "
                     "FROM private.people AS p "
@@ -330,7 +543,7 @@ static void test_pg_json_operator_touch(void) {
   qir_handle_destroy(&h);
 }
 
-/* 15. Cast chains. */
+/* 20. Cast chains. */
 static void test_pg_cast_chains(void) {
   const char *sql = "SELECT (p.age::text)::varchar AS age_txt "
                     "FROM private.people AS p "
@@ -347,9 +560,45 @@ static void test_pg_cast_chains(void) {
   qir_handle_destroy(&h);
 }
 
+/* 21. ILIKE should remain one opaque operator in IR. */
+static void test_pg_ilike_operators(void) {
+  const char *sql = "SELECT p.name AS name "
+                    "FROM private.people AS p "
+                    "WHERE p.name ILIKE $1 OR p.region NOT ILIKE $2 "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_TRUE(h.q->where->kind == QIR_EXPR_OR);
+
+  const QirExpr *lhs = h.q->where->u.bin.l;
+  const QirExpr *rhs = h.q->where->u.bin.r;
+  ASSERT_TRUE(lhs != NULL);
+  ASSERT_TRUE(rhs != NULL);
+  ASSERT_OP(lhs, QIR_OP_OTHER, "~~*");
+  ASSERT_TRUE(lhs->u.op.nargs == 1);
+  ASSERT_TRUE(lhs->u.op.args[0] != NULL);
+  ASSERT_TRUE(lhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(lhs->u.op.args[0]->u.param_index == 1);
+  ASSERT_OP(rhs, QIR_OP_OTHER, "!~~*");
+  ASSERT_TRUE(rhs->u.op.nargs == 1);
+  ASSERT_TRUE(rhs->u.op.args[0] != NULL);
+  ASSERT_TRUE(rhs->u.op.args[0]->kind == QIR_EXPR_PARAM);
+  ASSERT_TRUE(rhs->u.op.args[0]->u.param_index == 2);
+
+  qir_handle_destroy(&h);
+}
+
 /*------------ CURRENTLY NOT SUPPORTED BUT WE MAY IN THE FUTURE --------------*/
 
-static void test_pg_interval_literal_rejected(void) {
+/* INTERVAL '1 DAY' is parsed as TypeCast(A_Const, pg_catalog.interval), which
+ * the backend now handles. The binary minus between NOW() and the interval
+ * is a normal A_Expr with both lexpr and rexpr present. */
+static void test_pg_interval_literal_accepted(void) {
   const char *sql = "SELECT p.id AS pid "
                     "FROM private.people AS p "
                     "WHERE p.updated_at > NOW() - INTERVAL '1 DAY';";
@@ -358,7 +607,7 @@ static void test_pg_interval_literal_rejected(void) {
   parse_sql_postgres(sql, &h);
 
   ASSERT_TRUE(h.q != NULL);
-  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+  ASSERT_TRUE(h.q->status == QIR_OK);
   qir_handle_destroy(&h);
 }
 
@@ -397,15 +646,22 @@ int main(void) {
   test_pg_copy_rejected();
   test_pg_do_rejected();
   test_pg_set_rejected();
-  test_pg_recursive_cte_rejected();
+  test_pg_recursive_cte();
   test_pg_quoted_identifiers();
   test_pg_any_all_as_in();
+  test_pg_filter_normalized_to_case();
+  test_pg_explain_select();
+  test_pg_explain_analyze_select();
+  test_pg_explain_analyse_select();
+  test_pg_explain_generic_plan_select();
+  test_pg_explain_delete_rejected();
   test_pg_row_comparison_rejected();
   test_pg_lateral_rejected();
   test_pg_set_returning_rejected();
   test_pg_json_operator_touch();
   test_pg_cast_chains();
-  test_pg_interval_literal_rejected();
+  test_pg_ilike_operators();
+  test_pg_interval_literal_accepted();
   test_pg_array_literal_rejected();
   test_pg_bitwise_op_rejected();
   fprintf(stderr, "OK: test_query_ir_sql_postgres\n");

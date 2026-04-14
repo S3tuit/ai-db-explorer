@@ -456,18 +456,6 @@ static char *run_sync_err(const char *config_path) {
   return err;
 }
 
-static void run_sync_one_ok(const char *config_path,
-                            const char *connection_name) {
-  CredManagerReq req = {
-      .cmd = CRED_MAN_SYNC,
-      .connection_name = connection_name,
-  };
-  char *err = NULL;
-  ASSERT_TRUE(cred_manager_execute(&req, config_path, &err) == OK);
-  ASSERT_TRUE(err == NULL);
-  free(err);
-}
-
 static char *run_sync_one_err(const char *config_path,
                               const char *connection_name) {
   CredManagerReq req = {
@@ -778,8 +766,9 @@ static void test_sync_concurrent_process_rejected(void) {
  * sync-one tests
  * -------------------------------------------------------------------------*/
 
-/* Verifies targeted sync leaves unrelated changed entries untouched when the
- * selected connection is already synchronized.
+/* Verifies targeted sync now still requires a prompt for the selected
+ * connection even when it is already synchronized, and leaves unrelated
+ * changed entries untouched when no tty is available.
  */
 static void test_sync_one_target_unchanged_unrelated_changed(void) {
   SyncTestCtx ctx;
@@ -788,7 +777,9 @@ static void test_sync_one_target_unchanged_unrelated_changed(void) {
   seed_secret(NS_A, "KeepPg", "keep-secret");
   seed_secret(NS_A, "OtherPg", "other-secret");
 
-  run_sync_one_ok(ctx.config_path, "KeepPg");
+  char *err = run_sync_one_err(ctx.config_path, "KeepPg");
+  ASSERT_TRUE(strstr(err, "interactive terminal") != NULL);
+  free(err);
 
   assert_secret_value(NS_A, "KeepPg", "keep-secret");
   assert_secret_value(NS_A, "OtherPg", "other-secret");
@@ -816,8 +807,8 @@ static void test_sync_one_target_missing_from_config(void) {
   sync_test_ctx_clean(&ctx);
 }
 
-/* Verifies targeted sync is a no-op when the selected connection already has
- * matching state and a stored secret.
+/* Verifies targeted sync still requires an interactive prompt when the
+ * selected connection already has matching state and a stored secret.
  */
 static void test_sync_one_target_unchanged_secret_present(void) {
   SyncTestCtx ctx;
@@ -825,7 +816,9 @@ static void test_sync_one_target_unchanged_secret_present(void) {
 
   seed_secret(NS_A, "KeepPg", "keep-secret");
 
-  run_sync_one_ok(ctx.config_path, "KeepPg");
+  char *err = run_sync_one_err(ctx.config_path, "KeepPg");
+  ASSERT_TRUE(strstr(err, "interactive terminal") != NULL);
+  free(err);
 
   assert_secret_value(NS_A, "KeepPg", "keep-secret");
   assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
@@ -872,23 +865,24 @@ static void test_sync_one_target_changed_same_name_requires_prompt(void) {
   sync_test_ctx_clean(&ctx);
 }
 
-/* Verifies targeted sync reuses one unique tuple match and patches only the
- * renamed entry inside saved state.
+/* Verifies targeted sync no longer reuses a stored password for a unique
+ * rename, and instead requires an interactive prompt.
  */
-static void test_sync_one_target_unique_rename_reuses_secret(void) {
+static void test_sync_one_target_unique_rename_requires_prompt(void) {
   SyncTestCtx ctx;
   sync_test_ctx_init(&ctx, NS_A, JSON_RENAME_CONF, JSON_TWO_DB);
 
   seed_secret(NS_A, "KeepPg", "keep-secret");
   seed_secret(NS_A, "OtherPg", "rename-secret");
 
-  run_sync_one_ok(ctx.config_path, "RenamedPg");
+  char *err = run_sync_one_err(ctx.config_path, "RenamedPg");
+  ASSERT_TRUE(strstr(err, "interactive terminal") != NULL);
+  free(err);
 
   assert_secret_value(NS_A, "KeepPg", "keep-secret");
-  assert_secret_value(NS_A, "RenamedPg", "rename-secret");
-  assert_secret_missing(NS_A, "OtherPg");
-  const char *names[] = {"KeepPg", "RenamedPg"};
-  assert_state_names(ctx.state_path, NS_A, names, ARRLEN(names));
+  assert_secret_value(NS_A, "OtherPg", "rename-secret");
+  assert_secret_missing(NS_A, "RenamedPg");
+  assert_state_json_eq(ctx.state_path, JSON_TWO_DB);
 
   sync_test_ctx_clean(&ctx);
 }
@@ -974,8 +968,8 @@ static void test_sync_one_target_namespace_mismatch_fails_closed(void) {
   sync_test_ctx_clean(&ctx);
 }
 
-/* Verifies targeted sync does not prune unrelated stale entries while syncing
- * one unchanged connection.
+/* Verifies targeted sync does not prune unrelated stale entries while still
+ * requiring a prompt for one unchanged connection.
  */
 static void
 test_sync_one_target_leaves_unrelated_stale_entries_untouched(void) {
@@ -985,7 +979,9 @@ test_sync_one_target_leaves_unrelated_stale_entries_untouched(void) {
   seed_secret(NS_A, "KeepPg", "keep-secret");
   seed_secret(NS_A, "OtherPg", "other-secret");
 
-  run_sync_one_ok(ctx.config_path, "KeepPg");
+  char *err = run_sync_one_err(ctx.config_path, "KeepPg");
+  ASSERT_TRUE(strstr(err, "interactive terminal") != NULL);
+  free(err);
 
   assert_secret_value(NS_A, "KeepPg", "keep-secret");
   assert_secret_value(NS_A, "OtherPg", "other-secret");
@@ -1019,7 +1015,8 @@ static void test_test_one_target_missing_from_config(void) {
 }
 
 /* Verifies '--test <connection>' reports a missing stored credential through
- * stdout without creating or modifying credential state files.
+ * stdout without creating or modifying credential state files, while the
+ * command itself still succeeds.
  */
 static void test_test_one_missing_secret_reports_fail(void) {
   SyncTestCtx ctx;
@@ -1028,7 +1025,7 @@ static void test_test_one_missing_secret_reports_fail(void) {
   CredTestResult res;
   run_test_capture(&res, ctx.config_path, "KeepPg", NULL);
 
-  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.rc == OK);
   ASSERT_TRUE(res.err == NULL);
   ASSERT_TRUE(strstr(res.stdout_text,
                      "FAIL KeepPg: missing stored credential\n") != NULL);
@@ -1039,7 +1036,7 @@ static void test_test_one_missing_secret_reports_fail(void) {
 }
 
 /* Verifies '--test' keeps going across all profiles and reports both success
- * and missing-credential results.
+ * and missing-credential results while still returning OK.
  */
 static void test_test_all_with_one_missing_secret(void) {
   SyncTestCtx ctx;
@@ -1050,7 +1047,7 @@ static void test_test_all_with_one_missing_secret(void) {
   CredTestResult res;
   run_test_capture(&res, ctx.config_path, NULL, fake_backend_create);
 
-  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.rc == OK);
   ASSERT_TRUE(res.err == NULL);
   ASSERT_TRUE(strstr(res.stdout_text, " OK  KeepPg\n") != NULL);
   ASSERT_TRUE(strstr(res.stdout_text,
@@ -1085,7 +1082,8 @@ static void test_test_one_success(void) {
 }
 
 /* Verifies '--test <connection>' reports backend auth failure when the stored
- * password does not match the fake backend auth rule.
+ * password does not match the fake backend auth rule, while the command still
+ * returns OK.
  */
 static void test_test_one_backend_failure(void) {
   SyncTestCtx ctx;
@@ -1096,7 +1094,7 @@ static void test_test_one_backend_failure(void) {
   CredTestResult res;
   run_test_capture(&res, ctx.config_path, "KeepPg", fake_backend_create);
 
-  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.rc == OK);
   ASSERT_TRUE(res.err == NULL);
   ASSERT_TRUE(strstr(res.stdout_text, "FAIL KeepPg: fake auth failed\n") !=
               NULL);
@@ -1107,7 +1105,8 @@ static void test_test_one_backend_failure(void) {
 }
 
 /* Verifies '--test' keeps testing every configured profile and reports mixed
- * success, backend failure, and missing-secret results in config order.
+ * success, backend failure, and missing-secret results in config order while
+ * still returning OK.
  */
 static void test_test_all_mixed_results(void) {
   SyncTestCtx ctx;
@@ -1119,7 +1118,7 @@ static void test_test_all_mixed_results(void) {
   CredTestResult res;
   run_test_capture(&res, ctx.config_path, NULL, fake_backend_create);
 
-  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.rc == OK);
   ASSERT_TRUE(res.err == NULL);
 
   char *keep = strstr(res.stdout_text, " OK  KeepPg\n");
@@ -1157,6 +1156,37 @@ static void test_test_all_success(void) {
   ASSERT_TRUE(strstr(res.stdout_text, "FAIL") == NULL);
   ASSERT_TRUE(access(ctx.state_path, F_OK) != 0);
 
+  cred_test_result_clean(&res);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies '--test' treats secret-store read failures as command-level
+ * infrastructure errors instead of downgrading them to per-connection FAIL
+ * lines.
+ */
+static void test_test_one_secret_store_failure_is_command_err(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  ConfDir app = {.fd = -1, .path = NULL};
+  char *app_err = NULL;
+  ASSERT_TRUE(confdir_default_open(&app, NULL, &app_err) == OK);
+  free(app_err);
+  char *cred_path = path_join(app.path, "credentials.json");
+  ASSERT_TRUE(cred_path != NULL);
+  confdir_clean(&app);
+
+  write_json_file(cred_path, "{\"version\":");
+
+  CredTestResult res;
+  run_test_capture(&res, ctx.config_path, "KeepPg", NULL);
+
+  ASSERT_TRUE(res.rc == ERR);
+  ASSERT_TRUE(res.err != NULL);
+  ASSERT_TRUE(strstr(res.err, "failed to read the stored credential") != NULL);
+  ASSERT_STREQ(res.stdout_text, "");
+
+  free(cred_path);
   cred_test_result_clean(&res);
   sync_test_ctx_clean(&ctx);
 }
@@ -1399,6 +1429,90 @@ static const char *g_sync_one_tty_config_input;
 static const char *g_sync_one_tty_connection_name;
 static DbBackendFactory g_sync_one_tty_factory;
 static int g_sync_one_tty_min_connect_calls = -1;
+
+typedef struct {
+  int connected;
+} LongFailDbImpl;
+
+static int long_fail_connect(DbBackend *db, const ConnProfile *profile,
+                             const SafetyPolicy *policy, const char *pwd,
+                             DbErr *out_err) {
+  (void)policy;
+  if (!db || !db->impl || !profile || !profile->connection_name || !pwd) {
+    ADBX_ERR_SETF(out_err, DBERR_INPUT,
+                  "long-fail backend connect failed: invalid input.");
+    return ERR;
+  }
+
+  LongFailDbImpl *impl = (LongFailDbImpl *)db->impl;
+  if (strcmp(pwd, profile->connection_name) == 0) {
+    impl->connected = 1;
+    return OK;
+  }
+
+  impl->connected = 0;
+  static const char prefix[] = "long connectivity failure marker ";
+  char detail[ADBX_ERRMSG_MAX];
+  memset(detail, 'x', sizeof(detail));
+  detail[sizeof(detail) - 1] = '\0';
+  memcpy(detail, prefix, sizeof(prefix) - 1);
+  ADBX_ERR_SETF(out_err, DBERR_GENERIC, "%s", detail);
+  return ERR;
+}
+
+static int long_fail_is_connected(DbBackend *db) {
+  if (!db || !db->impl)
+    return ERR;
+  return ((LongFailDbImpl *)db->impl)->connected ? YES : NO;
+}
+
+static void long_fail_disconnect(DbBackend *db) {
+  if (!db || !db->impl)
+    return;
+  ((LongFailDbImpl *)db->impl)->connected = 0;
+}
+
+static void long_fail_destroy(DbBackend *db) {
+  if (!db)
+    return;
+  free(db->impl);
+  free(db);
+}
+
+static int long_fail_exec(DbBackend *db, const char *sql,
+                          const QueryResultBuildPolicy *qb_policy,
+                          DbExecResult *out_res) {
+  (void)db;
+  (void)sql;
+  (void)qb_policy;
+  (void)out_res;
+  return ERR;
+}
+
+static const DbSafeFuncList *long_fail_safe_functions(DbBackend *db) {
+  (void)db;
+  static const DbSafeFuncList list = {0};
+  return &list;
+}
+
+static const DbBackendVTable LONG_FAIL_VT = {
+    .connect = long_fail_connect,
+    .is_connected = long_fail_is_connected,
+    .disconnect = long_fail_disconnect,
+    .destroy = long_fail_destroy,
+    .exec = long_fail_exec,
+    .safe_functions = long_fail_safe_functions,
+};
+
+static DbBackend *long_fail_backend_create(DbKind kind) {
+  (void)kind;
+  DbBackend *db = (DbBackend *)xmalloc(sizeof(*db));
+  LongFailDbImpl *impl = (LongFailDbImpl *)xmalloc(sizeof(*impl));
+  impl->connected = 0;
+  db->vt = &LONG_FAIL_VT;
+  db->impl = impl;
+  return db;
+}
 
 /* Runs 'child_fn' inside a fresh controlling terminal backed by a PTY and lets
  * 'parent_fn' drive the PTY master from the parent process. It borrows both
@@ -2000,6 +2114,38 @@ static void tty_parent_sync_one_missing_secret_prompt(int master_fd) {
   ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
 }
 
+static void tty_parent_sync_one_unchanged_secret_refresh(int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "fresh-secret");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_empty_password_reprompts(int master_fd) {
+  tty_expect_password_prompt(master_fd, "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+  ASSERT_TRUE(
+      tty_read_until(master_fd, "Password cannot be empty. Please try again.") ==
+      OK);
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_long_connectivity_error_then_retry(
+    int master_fd) {
+  tty_enter_password(master_fd, "KeepPg", "wrong");
+  ASSERT_TRUE(tty_write_str(master_fd, "t\n") == OK);
+  ASSERT_TRUE(
+      tty_read_until(master_fd, "long connectivity failure marker") == OK);
+  tty_expect_action_prompt(master_fd);
+  ASSERT_TRUE(tty_write_str(master_fd, "r\n") == OK);
+  tty_enter_password(master_fd, "KeepPg", "KeepPg");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
+static void tty_parent_sync_one_rename_prompt(int master_fd) {
+  tty_enter_password(master_fd, "RenamedPg", "renamed-secret");
+  ASSERT_TRUE(tty_write_str(master_fd, "\n") == OK);
+}
+
 /* Verifies targeted sync can bootstrap one missing-state connection without
  * touching unrelated config entries.
  */
@@ -2119,6 +2265,77 @@ static void test_sync_one_tty_unchanged_but_secret_missing_prompts(void) {
   sync_test_ctx_clean(&ctx);
 }
 
+/* Verifies explicit targeted sync still prompts even when the selected
+ * connection already has a stored secret, and persists the freshly entered
+ * password.
+ */
+static void test_sync_one_tty_unchanged_secret_present_still_prompts(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, JSON_ONE_DB);
+
+  seed_secret(NS_A, "KeepPg", "old-secret");
+  run_sync_one_tty(ctx.config_path, "KeepPg", NULL, -1,
+                   tty_parent_sync_one_unchanged_secret_refresh);
+
+  assert_secret_value(NS_A, "KeepPg", "fresh-secret");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies explicit targeted sync prompts for a renamed connection, stores the
+ * newly entered password under the new name, deletes the old secret, and
+ * patches only the renamed state entry.
+ */
+static void test_sync_one_tty_unique_rename_prompts_and_replaces(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_RENAME_CONF, JSON_TWO_DB);
+
+  seed_secret(NS_A, "KeepPg", "keep-secret");
+  seed_secret(NS_A, "OtherPg", "old-rename-secret");
+  run_sync_one_tty(ctx.config_path, "RenamedPg", NULL, -1,
+                   tty_parent_sync_one_rename_prompt);
+
+  assert_secret_value(NS_A, "KeepPg", "keep-secret");
+  assert_secret_value(NS_A, "RenamedPg", "renamed-secret");
+  assert_secret_missing(NS_A, "OtherPg");
+  const char *names[] = {"KeepPg", "RenamedPg"};
+  assert_state_names(ctx.state_path, NS_A, names, ARRLEN(names));
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies empty prompt input is rejected before any secret-store write and
+ * the user is re-prompted for a real password.
+ */
+static void test_sync_one_tty_empty_password_reprompts(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_one_tty(ctx.config_path, "KeepPg", NULL, -1,
+                   tty_parent_sync_one_empty_password_reprompts);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
+/* Verifies long advisory connectivity errors are reported directly instead of
+ * degrading into an internal formatting failure.
+ */
+static void test_sync_one_tty_long_connectivity_error_reports_cleanly(void) {
+  SyncTestCtx ctx;
+  sync_test_ctx_init(&ctx, NS_A, JSON_ONE_DB, NULL);
+
+  run_sync_one_tty(ctx.config_path, "KeepPg", long_fail_backend_create, -1,
+                   tty_parent_sync_one_long_connectivity_error_then_retry);
+
+  assert_secret_value(NS_A, "KeepPg", "KeepPg");
+  ASSERT_TRUE(access(ctx.state_path, F_OK) == 0);
+  assert_state_json_eq(ctx.state_path, JSON_ONE_DB);
+  sync_test_ctx_clean(&ctx);
+}
+
 int main(void) {
   test_sync_missing_state_all_secrets_present();
   test_sync_unchanged_state_and_config();
@@ -2133,7 +2350,7 @@ int main(void) {
   test_sync_one_target_unchanged_secret_present();
   test_sync_one_target_unchanged_secret_missing_requires_prompt();
   test_sync_one_target_changed_same_name_requires_prompt();
-  test_sync_one_target_unique_rename_reuses_secret();
+  test_sync_one_target_unique_rename_requires_prompt();
   test_sync_one_target_unique_rename_missing_secret_requires_prompt();
   test_sync_one_target_ambiguous_tuple_requires_prompt();
   test_sync_one_target_missing_state_requires_prompt();
@@ -2146,6 +2363,7 @@ int main(void) {
   test_test_one_backend_failure();
   test_test_all_mixed_results();
   test_test_all_success();
+  test_test_one_secret_store_failure_is_command_err();
 
   test_reset_namespace_deletes_only_selected_namespace();
   test_reset_namespace_missing_state_succeeds();
@@ -2174,6 +2392,10 @@ int main(void) {
   test_sync_one_tty_connectivity_fail_then_save_anyway();
   test_sync_one_tty_only_target_profile_prompts();
   test_sync_one_tty_unchanged_but_secret_missing_prompts();
+  test_sync_one_tty_unchanged_secret_present_still_prompts();
+  test_sync_one_tty_unique_rename_prompts_and_replaces();
+  test_sync_one_tty_empty_password_reprompts();
+  test_sync_one_tty_long_connectivity_error_reports_cleanly();
   fprintf(stderr, "test_cred_manager: OK\n");
   return 0;
 }

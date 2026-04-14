@@ -204,8 +204,8 @@ Right now, the tool surface is intentionally small:
 - run a read-only SQL query
 - run a read-only SQL query with token parameters
 
-The generated tool reference lives at
-[`docs/tools.md`](docs/tools.md).
+The canonical tool manifest lives at
+[`meta/tools.json`](meta/tools.json).
 
 ## Config reference
 
@@ -263,7 +263,7 @@ queries use.
 Keep this list small. Add only functions you trust in your environment.
 Note that basic, safe functions like `LOWER` or `ARRAY_AGG` are already deemed
 safe. You can see all the default safe functions at
-`docs/pg_safe_functions.json`.
+`meta/pg_safe_functions.json`.
 
 ### `sensitiveDomains`
 
@@ -359,7 +359,7 @@ Follow the process at SECURITY.md.
 - System overview:
   [`docs/sys_overview.md`](docs/sys_overview.md)
 - Tool definitions:
-  [`docs/tools.md`](docs/tools.md)
+  [`meta/tools.json`](meta/tools.json)
 - Sensitive data handling:
   [`docs/sensitive_data.md`](docs/sensitive_data.md)
 - Vulnerability reporting:

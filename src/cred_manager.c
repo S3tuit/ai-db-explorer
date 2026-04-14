@@ -310,6 +310,16 @@ static AdbxStatus credm_tty_write_all(int tty_fd, const char *buf, size_t len) {
   return OK;
 }
 
+/* Writes one NUL-terminated string to one tty fd.
+ * It borrows 's' and treats NULL as the empty string.
+ * Error semantics: returns OK on success, ERR on invalid input or tty I/O
+ * failure.
+ */
+static AdbxStatus credm_tty_write_cstr(int tty_fd, const char *s) {
+  const char *text = s ? s : "";
+  return credm_tty_write_all(tty_fd, text, strlen(text));
+}
+
 /* Records one caught termination signal so the interactive loop can unwind
  * safely after restoring termios state. It borrows no pointers.
  */
@@ -468,11 +478,40 @@ static AdbxStatus credm_tty_read_action_line(CredmPromptSession *sess,
   }
 }
 
-/* Runs one advisory connectivity test for 'profile' using 'secret' as password.
- * Reports the result back to the controlling 'sess->tty_fd'. It borrows all
- * inputs and does not persist any secret state. Returns ERR only on invalid
- * input, backend infrastructure failures, or tty write failures... modifies
- * 'out_err'
+/* Writes one advisory connectivity result line to the controlling tty.
+ * It borrows all inputs and does not persist any secret state.
+ * Error semantics: returns OK on success, ERR on invalid input or tty write
+ * failure.
+ */
+static AdbxStatus credm_tty_write_connectivity_result(
+    const CredmPromptSession *sess, int use_color, const char *connection_name,
+    int ok, const char *detail, char **out_err) {
+  if (!sess || sess->tty_fd < 0 || !connection_name)
+    return ERR;
+
+  const char *status =
+      ok ? (use_color ? "\033[32m OK \033[0m " : " OK  ")
+         : (use_color ? "\033[31mFAIL\033[0m " : "FAIL ");
+  const char *msg = detail ? detail : (ok ? "" : "connection failed");
+
+  if (credm_tty_write_cstr(sess->tty_fd, status) != OK ||
+      credm_tty_write_cstr(sess->tty_fd, connection_name) != OK ||
+      (!ok &&
+       (credm_tty_write_cstr(sess->tty_fd, ": ") != OK ||
+        credm_tty_write_cstr(sess->tty_fd, msg) != OK)) ||
+      credm_tty_write_cstr(sess->tty_fd, "\n") != OK) {
+    credm_set_err(out_err, "failed to write the connectivity test result.");
+    return ERR;
+  }
+
+  return OK;
+}
+
+/* Runs one advisory connectivity test for 'profile' using 'secret' as
+ * password. Reports the result back to the controlling 'sess->tty_fd'. It
+ * borrows all inputs and does not persist any secret state.
+ * Error semantics: returns OK after reporting success/failure, ERR on invalid
+ * input or tty write failure.
  */
 static AdbxStatus credm_tty_test_connectivity(CredmPromptSession *sess,
                                               const ConnProfile *profile,
@@ -483,61 +522,28 @@ static AdbxStatus credm_tty_test_connectivity(CredmPromptSession *sess,
 
   DbBackend *db_backend = db_backend_create(profile->kind);
   int use_color = isatty(sess->tty_fd);
-  char res[256];
 
   if (!db_backend) {
-    int n = snprintf(
-        res, sizeof(res),
-        use_color ? "\033[31mFAIL\033[0m %s: unsupported database backend\n"
-                  : "FAIL %s: unsupported database backend\n",
-        profile->connection_name);
-    if (n < 0 || (size_t)n >= sizeof(res)) {
-      credm_set_err(out_err, "failed to format the connectivity test result.");
-      return ERR;
-    }
-    if (credm_tty_write_all(sess->tty_fd, res, (size_t)n) != OK) {
-      credm_set_err(out_err, "failed to write the connectivity test result.");
-      return ERR;
-    }
-    return OK;
+    return credm_tty_write_connectivity_result(
+        sess, use_color, profile->connection_name, 0,
+        "unsupported database backend", out_err);
   }
 
   DbErr db_err;
   AdbxStatus crc =
       db_connect(db_backend, profile, &profile->safe_policy, secret, &db_err);
   if (crc == OK) {
-    int n = snprintf(res, sizeof(res),
-                     use_color ? "\033[32m OK \033[0m %s\n" : " OK  %s\n",
-                     profile->connection_name);
-    if (n < 0 || (size_t)n >= sizeof(res)) {
-      db_destroy(db_backend);
-      credm_set_err(out_err, "failed to format the connectivity test result.");
-      return ERR;
-    }
     if (db_is_connected(db_backend) == YES)
       db_disconnect(db_backend);
     db_destroy(db_backend);
-    if (credm_tty_write_all(sess->tty_fd, res, (size_t)n) != OK) {
-      credm_set_err(out_err, "failed to write the connectivity test result.");
-      return ERR;
-    }
-    return OK;
+    return credm_tty_write_connectivity_result(
+        sess, use_color, profile->connection_name, 1, NULL, out_err);
   }
 
-  int n = snprintf(res, sizeof(res),
-                   use_color ? "\033[31mFAIL\033[0m %s: %s\n" : "FAIL %s: %s\n",
-                   profile->connection_name,
-                   db_err.msg[0] != '\0' ? db_err.msg : "connection failed");
   db_destroy(db_backend);
-  if (n < 0 || (size_t)n >= sizeof(res)) {
-    credm_set_err(out_err, "failed to format the connectivity test result.");
-    return ERR;
-  }
-  if (credm_tty_write_all(sess->tty_fd, res, (size_t)n) != OK) {
-    credm_set_err(out_err, "failed to write the connectivity test result.");
-    return ERR;
-  }
-  return OK;
+  return credm_tty_write_connectivity_result(
+      sess, use_color, profile->connection_name, 0,
+      db_err.msg[0] != '\0' ? db_err.msg : "connection failed", out_err);
 }
 
 /* Reads one password from /dev/tty with echo disabled and writes the plaintext
@@ -624,6 +630,18 @@ static AdbxStatus credm_prompt_password(CredmPromptSession *sess,
       goto restore_n_ret;
     }
 
+    if (out_secret->len == 0) {
+      sb_zero_clean(out_secret);
+      sb_init(out_secret);
+      if (credm_tty_write_cstr(sess->tty_fd,
+                               "Password cannot be empty. Please try again.\n") !=
+          OK) {
+        credm_set_err(out_err, "failed to write the empty-password warning.");
+        goto restore_n_ret;
+      }
+      continue;
+    }
+
     // read the prompt response
     for (;;) {
       if (credm_tty_write_all(sess->tty_fd, action_prompt,
@@ -645,12 +663,13 @@ static AdbxStatus credm_prompt_password(CredmPromptSession *sess,
       }
       // test for connectivity
       if (action == 't' || action == 'T') {
-        if (!sb_to_cstr(out_secret)) {
+        const char *typed_secret = sb_to_cstr(out_secret);
+        if (typed_secret[0] == '\0') {
           credm_set_err(out_err, "failed to terminate the typed password.");
           goto restore_n_ret;
         }
-        if (credm_tty_test_connectivity(sess, profile, out_secret->data,
-                                        out_err) != OK) {
+        if (credm_tty_test_connectivity(sess, profile, typed_secret, out_err) !=
+            OK) {
           goto restore_n_ret;
         }
       }
@@ -664,7 +683,7 @@ pwd_confirmed:
     goto restore_n_ret;
   }
 
-  if (!sb_to_cstr(out_secret)) {
+  if (sb_to_cstr(out_secret)[0] == '\0') {
     credm_set_err(out_err, "failed to terminate the typed password.");
     goto restore_n_ret;
   }
@@ -874,6 +893,10 @@ credm_sync_one_needs_state_write(const ConnCatalog *conf_cat, size_t conf_idx,
       return YES;
     if (act->state_idx >= state_cat->n_profiles)
       return ERR;
+    if (strcmp(conf_cat->profiles[conf_idx].connection_name,
+               state_cat->profiles[act->state_idx].connection_name) != 0) {
+      return YES;
+    }
     {
       AdbxTriStatus same = credm_profile_same_sync_fields(
           &conf_cat->profiles[conf_idx], &state_cat->profiles[act->state_idx]);
@@ -893,10 +916,13 @@ credm_sync_one_needs_state_write(const ConnCatalog *conf_cat, size_t conf_idx,
  *
  * Business logic — three-phase decision for one connection:
  *
+ * Explicit targeted sync always asks the user to re-enter the password for the
+ * selected connection. Reconciliation is still needed so the implementation
+ * knows whether it must patch the saved state and/or remove an old renamed
+ * secret after storing the new password.
+ *
  * 1. Name match: look up connection_name in the saved state.
- *    - Found, fields identical, secret present → KEEP  (nothing to do)
- *    - Found, fields identical, secret missing → PROMPT (re-ask password)
- *    - Found, fields differ                   → PROMPT (config changed)
+ *    - Found                                 → PROMPT
  *
  * 2. Rename detection (no name match): scan ALL state entries by tuple
  *    (host/port/user/db). Also count how many config entries share the same
@@ -904,24 +930,21 @@ credm_sync_one_needs_state_write(const ConnCatalog *conf_cat, size_t conf_idx,
  *    state_seen[], targeted sync has no ordering context, so it checks both
  *    sides to avoid ambiguity:
  *    - Exactly 1 state match AND exactly 1 config match → unique rename
- *      detected. If the old secret exists → RENAME, else → PROMPT.
+ *      detected → PROMPT with old state linkage preserved.
  *    - Multiple matches on either side → ambiguous, fall through to PROMPT.
  *
  * 3. Fallback: no name match and no unique rename → PROMPT.
  *
- * Side effects: may read the secret store to decide whether prompting is
- * needed.
- * Error semantics: returns OK on success, ERR on invalid input, missing target
- * connection, or secret-store lookup failure.
+ * Side effects: none beyond catalog inspection.
+ * Error semantics: returns OK on success, ERR on invalid input or missing
+ * target connection.
  */
 static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
                                       const ConnCatalog *state_cat,
                                       const char *connection_name,
-                                      SecretStore *store,
                                       CredmSyncAction *out_act,
                                       size_t *out_conf_idx, char **out_err) {
-  if (!conf_cat || !state_cat || !connection_name || !store || !out_act ||
-      !out_conf_idx)
+  if (!conf_cat || !state_cat || !connection_name || !out_act || !out_conf_idx)
     return ERR;
 
   memset(out_act, 0, sizeof(*out_act));
@@ -960,33 +983,7 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
 
   if (src == YES) {
     out_act->state_idx = state_idx;
-
-    // name matched — check whether the connection fields changed
-    AdbxTriStatus same =
-        credm_profile_same_sync_fields(conf_p, &state_cat->profiles[state_idx]);
-    if (same == ERR) {
-      credm_set_err(out_err,
-                    "credential sync hit an internal bug while comparing the "
-                    "current config against saved state.");
-      return ERR;
-    }
-    if (same == NO) {
-      // fields changed: the old password is no longer valid
-      out_act->kind = CREDM_SYNC_ACT_PROMPT;
-      return OK;
-    }
-
-    // fields unchanged — only KEEP if the secret actually exists in the store
-    StrBuf secret;
-    sb_init(&secret);
-    SecretStoreErr ss_err;
-    AdbxTriStatus grc =
-        secret_store_get(store, &conf_p->secret_ref, &secret, &ss_err);
-    sb_zero_clean(&secret);
-    if (grc == ERR)
-      return credm_set_store_err(out_err, &ss_err, "lookup");
-
-    out_act->kind = (grc == YES) ? CREDM_SYNC_ACT_KEEP : CREDM_SYNC_ACT_PROMPT;
+    out_act->kind = CREDM_SYNC_ACT_PROMPT;
     return OK;
   }
 
@@ -1027,22 +1024,12 @@ static AdbxStatus credm_plan_sync_one(const ConnCatalog *conf_cat,
   }
 
   // Unique 1:1 rename: exactly one state entry and one config entry share the
-  // tuple. Reuse the old secret if it still exists, otherwise prompt.
+  // tuple. Targeted sync still prompts, but it keeps the old state linkage so
+  // apply/save can replace the old name cleanly after the new password is
+  // entered.
   if (tuple_match_count == 1 && conf_tuple_match_count == 1) {
     out_act->state_idx = tuple_match_idx;
-
-    StrBuf secret;
-    sb_init(&secret);
-    SecretStoreErr ss_err;
-    AdbxTriStatus grc = secret_store_get(
-        store, &state_cat->profiles[tuple_match_idx].secret_ref, &secret,
-        &ss_err);
-    sb_zero_clean(&secret);
-    if (grc == ERR)
-      return credm_set_store_err(out_err, &ss_err, "lookup");
-
-    out_act->kind =
-        (grc == YES) ? CREDM_SYNC_ACT_RENAME : CREDM_SYNC_ACT_PROMPT;
+    out_act->kind = CREDM_SYNC_ACT_PROMPT;
     return OK;
   }
 
@@ -1125,6 +1112,15 @@ static AdbxStatus credm_apply_action(const ConnProfile *conf_p,
         rc = credm_set_store_err(
             out_err, &ss_err,
             "secret store write failure during sync. Please, retry.");
+      } else if (act->state_idx != SIZE_MAX &&
+                 act->state_idx < state_cat->n_profiles) {
+        const ConnProfile *old_p = &state_cat->profiles[act->state_idx];
+        if (strcmp(old_p->connection_name, conf_p->connection_name) != 0 &&
+            secret_store_delete(store, &old_p->secret_ref, &ss_err) != OK) {
+          rc = credm_set_store_err(
+              out_err, &ss_err,
+              "secret delete failure during sync. Please, retry.");
+        }
       }
     }
     sb_zero_clean(&secret);
@@ -1640,8 +1636,8 @@ static AdbxStatus credm_execute_sync_one(const char *config_input,
     goto cleanup;
   }
 
-  if (credm_plan_sync_one(conf_cat, state_cat, connection_name, store, &act,
-                          &conf_idx, out_err) != OK) {
+  if (credm_plan_sync_one(conf_cat, state_cat, connection_name, &act, &conf_idx,
+                          out_err) != OK) {
     goto cleanup;
   }
 
@@ -1669,8 +1665,10 @@ cleanup:
 /* Executes the test path by attempting a real database connection for each
  * selected profile. It borrows 'config_input' and 'connection_name' and
  * returns user-facing errors through '*out_err'.
- * Error semantics: returns OK when every tested connection succeeds, ERR when
- * any connection fails or on invalid input / infrastructure errors.
+ * Error semantics: returns OK after reporting ordinary missing-credential and
+ * connectivity/auth failures to stdout; returns ERR only on invalid input or
+ * test infrastructure failures such as config/load, secret-store, or backend
+ * initialization errors.
  */
 static AdbxStatus credm_execute_test(const char *config_input,
                                      const char *connection_name,
@@ -1725,7 +1723,6 @@ static AdbxStatus credm_execute_test(const char *config_input,
   }
 
   int use_color = isatty(STDOUT_FILENO);
-  int any_failed = 0;
 
   // test each selected connection.
   for (size_t i = start_idx; i < end_idx; i++) {
@@ -1745,34 +1742,22 @@ static AdbxStatus credm_execute_test(const char *config_input,
         fprintf(stdout, "FAIL %s: missing stored credential\n",
                 profile->connection_name);
       sb_zero_clean(&pw);
-      any_failed = 1;
       continue;
     }
     if (grc == ERR) {
-      if (use_color)
-        fprintf(stdout, "\033[31mFAIL\033[0m %s: %s\n",
-                profile->connection_name,
-                ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
-      else
-        fprintf(stdout, "FAIL %s: %s\n", profile->connection_name,
-                ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
       sb_zero_clean(&pw);
-      any_failed = 1;
-      continue;
+      credm_set_err(out_err, "failed to read the stored credential for '%s': %s",
+                    profile->connection_name,
+                    ss_err.msg[0] != '\0' ? ss_err.msg : "unknown error");
+      goto cleanup;
     }
 
     DbBackend *backend = db_backend_create(profile->kind);
     if (!backend) {
-      if (use_color)
-        fprintf(stdout,
-                "\033[31mFAIL\033[0m %s: unsupported database backend\n",
-                profile->connection_name);
-      else
-        fprintf(stdout, "FAIL %s: unsupported database backend\n",
-                profile->connection_name);
       sb_zero_clean(&pw);
-      any_failed = 1;
-      continue;
+      credm_set_err(out_err, "failed to initialize the database backend for '%s'.",
+                    profile->connection_name);
+      goto cleanup;
     }
 
     DbErr db_err;
@@ -1784,6 +1769,16 @@ static AdbxStatus credm_execute_test(const char *config_input,
       else
         fprintf(stdout, " OK  %s\n", profile->connection_name);
     } else {
+      if (db_err.code == DBERR_INPUT) {
+        db_destroy(backend);
+        sb_zero_clean(&pw);
+        credm_set_err(out_err,
+                      "credential connectivity test hit an internal backend "
+                      "error for '%s': %s",
+                      profile->connection_name,
+                      db_err.msg[0] != '\0' ? db_err.msg : "unknown error");
+        goto cleanup;
+      }
       if (use_color)
         fprintf(stdout, "\033[31mFAIL\033[0m %s: %s\n",
                 profile->connection_name,
@@ -1791,15 +1786,13 @@ static AdbxStatus credm_execute_test(const char *config_input,
       else
         fprintf(stdout, "FAIL %s: %s\n", profile->connection_name,
                 db_err.msg[0] != '\0' ? db_err.msg : "connection failed");
-      any_failed = 1;
     }
 
     db_destroy(backend);
     sb_zero_clean(&pw);
   }
 
-  // return OK only if every connection succeeded.
-  rc = any_failed ? ERR : OK;
+  rc = OK;
 
 cleanup:
   secret_store_destroy(store);
