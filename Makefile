@@ -193,7 +193,7 @@ pg-dump-ast: $(PG_DUMP_AST_BIN)
 # Build one benchmark binary with shared benchmark sources.
 build/benchmarks/%: benchmarks/%.c $(BENCH_COMMON_SRC)
 	@mkdir -p $(dir $@)
-	$(CC) $(BENCH_CFLAGS) $< $(BENCH_COMMON_SRC) -o $@
+	$(CC) $(BENCH_CFLAGS) $< $(BENCH_COMMON_SRC) -o $@ -lm
 
 # Build and run all benchmarks in benchmarks/.
 bench: $(BENCH_BINS)
