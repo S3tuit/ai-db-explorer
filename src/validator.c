@@ -12,9 +12,10 @@
 #define MAX_ROWS_SENS_ON 200
 
 /*---------------------------- QUERY VALIDATION -----------------------------*/
-/* To validate a query we combine the QirTouchReport and a three-pass approach:
- *  - QirTouchReport used for:
- *      + All column references resolve to an alias (via QirTouchReport).
+/* To validate a query we combine one binder-backed touch walk and a three-pass
+ * approach:
+ *  - qir_walk_touches() used for:
+ *      + All bound column references are scanned once.
  *      + Sensitive columns can be referenced only inside the main query.
  *      + If at least one sensitive column is referenced, switches sensitive
  *        mode on. Vault should be opened, else, it fails.
@@ -67,9 +68,11 @@ typedef struct ValidatorCtx {
   DbBackend *db;
   const ConnProfile *cp;
   ValidatorErr *err;
+  const QirQuery *root_query;
   const SensitiveTok *params;
   uint32_t nparams;
   uint8_t *param_used;
+  bool sensitive_mode;
   // Scratch buffer for building short diagnostic strings. The contents are
   // valid until the next scratch use.
   StrBuf scratch;
@@ -81,8 +84,6 @@ static AdbxTriStatus validate_query_pass_b_params(ValidatorCtx *ctx,
                                                   const QirQuery *q);
 static AdbxTriStatus validate_query_pass_c_sensitive(ValidatorCtx *ctx,
                                                      const QirQuery *q);
-static inline const QirFromItem *find_from_alias(const QirQuery *q,
-                                                 const char *alias);
 
 #define MAX_ERR_MSG_LEN 512
 /* Resets 'ctx->err->msg' and writes a string into it using 'fmt' like printf().
@@ -151,11 +152,10 @@ static AdbxStatus vq_out_reset(ValidateQueryOut *out) {
  * data.
  */
 static AdbxTriStatus
-validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
-                                   const QirColRef *cr, const char **out_domain,
+validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirColRef *cr,
+                                   const char **out_domain,
                                    uint32_t *out_domain_len) {
   assert(ctx != NULL);
-  assert(q != NULL);
   assert(cr != NULL);
 
   if (out_domain)
@@ -163,16 +163,18 @@ validator_resolve_sensitive_domain(ValidatorCtx *ctx, const QirQuery *q,
   if (out_domain_len)
     *out_domain_len = 0;
 
-  const QirFromItem *fi = find_from_alias(q, cr->qualifier.name);
+  const QirFromItem *fi = cr->binding_from;
   if (!fi) {
     const char *desc = qir_colref_to_str(cr, &ctx->scratch);
     set_err(ctx, VERR_ANALYZE_FAIL,
-            "Unable to resolve sensitive column source alias for '%s'.", desc);
+            "Unable to resolve bound column source for '%s'.", desc);
     return ERR;
   }
 
-  // We don't trace back the original relationship
-  if (fi->kind != QIR_FROM_BASE_REL)
+  // We only resolve direct base-relation columns. Derived tables and bound CTE
+  // names are handled as non-sensitive here because we do not trace them back
+  // to an original relation.
+  if (fi->kind != QIR_FROM_BASE_REL || fi->binding_cte)
     return NO;
 
   const char *schema = fi->u.rel.schema.name;
@@ -263,7 +265,7 @@ static AdbxStatus validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
 
     const char *domain = NULL;
     uint32_t domain_len = 0;
-    int sens = validator_resolve_sensitive_domain(ctx, q, &si->value->u.colref,
+    int sens = validator_resolve_sensitive_domain(ctx, &si->value->u.colref,
                                                   &domain, &domain_len);
     if (sens == ERR)
       return ERR;
@@ -279,28 +281,6 @@ static AdbxStatus validator_build_plan(ValidatorCtx *ctx, const QirQuery *q,
 }
 
 // PASS A START
-/* Finds and return a QirFromItem using 'alias' in the given query. Returns
- * NULL on no match. This doesn't trace back the original table, use only if
- * you're sure the alias of the column references to a base table in 'q''s
- * scope*/
-static inline const QirFromItem *find_from_alias(const QirQuery *q,
-                                                 const char *alias) {
-  if (!q || !alias || alias[0] == '\0')
-    return NULL;
-
-  if (q->from_root && q->from_root->alias.name &&
-      strcmp(q->from_root->alias.name, alias) == 0)
-    return q->from_root;
-  for (uint32_t i = 0; i < q->njoins; i++) {
-    const QirJoin *j = q->joins[i];
-    if (!j || !j->rhs)
-      continue;
-    if (j->rhs->alias.name && strcmp(j->rhs->alias.name, alias) == 0)
-      return j->rhs;
-  }
-  return NULL;
-}
-
 /* Returns a short stable description for one expression kind in diagnostics.
  * It borrows all inputs and does not allocate memory.
  * Error semantics: always returns a non-NULL borrowed string.
@@ -326,12 +306,9 @@ static const char *validator_expr_diag(ValidatorCtx *ctx, const QirExpr *e) {
  * Returns YES on success, NO on policy mismatch, ERR on bad input or internal
  * inconsistency.
  */
-static AdbxTriStatus
-validator_validate_param_domain_for_col(ValidatorCtx *ctx, const QirQuery *q,
-                                        const QirColRef *sensitive_cr,
-                                        int param_idx) {
+static AdbxTriStatus validator_validate_param_domain_for_col(
+    ValidatorCtx *ctx, const QirColRef *sensitive_cr, int param_idx) {
   assert(ctx);
-  assert(q);
   assert(sensitive_cr);
 
   if (param_idx < 1) {
@@ -364,7 +341,7 @@ validator_validate_param_domain_for_col(ValidatorCtx *ctx, const QirQuery *q,
 
   const char *domain = NULL;
   uint32_t domain_len = 0;
-  int mrc = validator_resolve_sensitive_domain(ctx, q, sensitive_cr, &domain,
+  int mrc = validator_resolve_sensitive_domain(ctx, sensitive_cr, &domain,
                                                &domain_len);
   if (mrc == ERR)
     return ERR;
@@ -534,67 +511,56 @@ static AdbxTriStatus validate_expr_subqueries_pass_a(ValidatorCtx *ctx,
  * 'found_sensitive' to true if it saw at least one sensitive column.
  *
  * This function is the single source of truth for enabling sensitive mode:
- * it scans all touches, rejects unknown aliases, and flips *found_sensitive
- * when a sensitive base column is referenced. Touches carry their source
- * query so alias resolution is scoped correctly.
+ * it scans all touches, rejects unknown aliases, and flips
+ * vctx->found_sensitive when a sensitive base column is referenced.
  *
  * Side effects: writes a human-readable reason into err on failure. */
-static AdbxTriStatus validate_sensitive_touches_scope(ValidatorCtx *ctx,
-                                                      const QirQuery *q,
-                                                      const QirTouchReport *tr,
-                                                      bool *found_sensitive) {
-  if (!tr || !ctx)
+static AdbxStatus validator_visit_touch(QirScope scope,
+                                        const QirQuery *owner_query,
+                                        const QirColRef *colref,
+                                        QirTouchKind kind, void *vctx) {
+  ValidatorCtx *ctx = (ValidatorCtx *)vctx;
+  (void)owner_query;
+
+  if (!ctx || !colref)
     return ERR;
 
-  for (uint32_t i = 0; i < tr->ntouches; i++) {
-    const QirTouch *t = tr->touches[i];
-    if (!t)
-      continue;
-
-    if (t->kind == QIR_TOUCH_UNKNOWN) {
-      // Unknown touches mean alias resolution failed, so we cannot safely
-      // reason about sensitive columns. Reject with a clear message.
-      const char *desc = qir_colref_to_str(&t->col, &ctx->scratch);
-      set_err(ctx, VERR_NO_COLUMN_ALIAS,
-              "Unknown column reference '%s'. Every table must have an alias, "
-              "and every column must be qualified as alias.column.",
-              desc);
-      return NO;
-    }
-
-    // We skip touches of kind different from _BASE because its simpler to
-    // resolte to the real, original table. It's safe because all the columns
-    // inside the whole query have at least 1 _BASE touch. So, even if a
-    // sensitive column is referenced in a subquery, it'll have one _BASE touch
-    // with t->scope != QIR_SCOPE_MAIN and we'll reject it.
-    if (t->kind != QIR_TOUCH_BASE)
-      continue;
-
-    int rc = validator_resolve_sensitive_domain(ctx, t->source_query, &t->col,
-                                                NULL, NULL);
-    if (rc == ERR)
-      return ERR;
-    if (rc == YES) {
-      if (*found_sensitive != true)
-        *found_sensitive = true;
-      if (t->scope != QIR_SCOPE_MAIN) {
-        const char *desc = qir_colref_to_str(&t->col, &ctx->scratch);
-        set_err(ctx, VERR_SENSITIVE_OUTSIDE_MAIN,
-                "Column '%s' is sensitive, so it's only allowed in main query.",
-                desc);
-        return NO;
-      }
-      if (q && q->union_next) {
-        const char *desc = qir_colref_to_str(&t->col, &ctx->scratch);
-        set_err(ctx, VERR_SENSITIVE_IN_UNION,
-                "Column '%s' is sensitive and cannot be referenced inside a "
-                "UNION/INTERSECT/EXCEPT branch.",
-                desc);
-        return NO;
-      }
-    }
+  if (kind == QIR_TOUCH_UNKNOWN) {
+    const char *desc = qir_colref_to_str(colref, &ctx->scratch);
+    set_err(ctx, VERR_NO_COLUMN_ALIAS,
+            "Unknown column reference '%s'. Every table must have an alias, "
+            "and every column must be qualified as alias.column.",
+            desc);
+    return ERR;
   }
-  return YES;
+
+  // We validate just the TOUCH_BASE since each TOUCH_DERIVED has one
+  // TOUCH_BASE with the same column referenced. So, we need to validate only
+  // the TOUCH_BASE and make sure they have SCOPE_MAIN.
+  if (kind != QIR_TOUCH_BASE)
+    return OK;
+
+  int rc = validator_resolve_sensitive_domain(ctx, colref, NULL, NULL);
+  if (rc != YES)
+    return rc == NO ? OK : ERR;
+
+  ctx->sensitive_mode = true;
+  if (scope != QIR_SCOPE_MAIN) {
+    const char *desc = qir_colref_to_str(colref, &ctx->scratch);
+    set_err(ctx, VERR_SENSITIVE_OUTSIDE_MAIN,
+            "Column '%s' is sensitive, so it's only allowed in main query.",
+            desc);
+    return ERR;
+  }
+  if (ctx->root_query && ctx->root_query->union_next) {
+    const char *desc = qir_colref_to_str(colref, &ctx->scratch);
+    set_err(ctx, VERR_SENSITIVE_IN_UNION,
+            "Column '%s' is sensitive and cannot be referenced inside a "
+            "UNION/INTERSECT/EXCEPT branch.",
+            desc);
+    return ERR;
+  }
+  return OK;
 }
 
 static int name_cpm(const void *s1, const void *s2) {
@@ -765,14 +731,15 @@ static AdbxTriStatus validate_expr_functions(ValidatorCtx *ctx,
  */
 static AdbxTriStatus expr_has_sensitive(ValidatorCtx *ctx, const QirQuery *q,
                                         const QirExpr *e) {
-  if (!ctx || !q)
+  (void)q;
+  if (!ctx)
     return ERR;
   if (!e)
     return NO;
 
   switch (e->kind) {
   case QIR_EXPR_COLREF:
-    return validator_resolve_sensitive_domain(ctx, q, &e->u.colref, NULL, NULL);
+    return validator_resolve_sensitive_domain(ctx, &e->u.colref, NULL, NULL);
   case QIR_EXPR_PARAM:
   case QIR_EXPR_LITERAL:
     return NO;
@@ -967,7 +934,7 @@ validate_param_direct_sensitive_target(ValidatorCtx *ctx, const QirQuery *q,
     return NO;
   }
 
-  return validator_validate_param_domain_for_col(ctx, q, &other->u.colref,
+  return validator_validate_param_domain_for_col(ctx, &other->u.colref,
                                                  param_idx);
 }
 
@@ -1793,9 +1760,11 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
       .db = req->db,
       .cp = req->profile,
       .err = &out->err,
+      .root_query = NULL,
       .params = req->params,
       .nparams = req->nparams,
       .param_used = param_used,
+      .sensitive_mode = false,
   };
   sb_init(&ctx.scratch);
 
@@ -1838,34 +1807,40 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     return ERR;
   }
 
-  QirTouchReport *tr = qir_extract_touches(q);
-  if (!tr) {
-    set_err(&ctx, VERR_ANALYZE_FAIL, "Unable to analyze query.");
-    qir_handle_destroy(&h);
-    free(param_used);
-    sb_clean(&ctx.scratch);
-    return ERR;
-  }
-  if (tr->has_unsupported) {
-    set_err(&ctx, VERR_UNSUPPORTED_QUERY, "Unsupported query structure.");
-    qir_touch_report_destroy(tr);
-    qir_handle_destroy(&h);
-    free(param_used);
-    sb_clean(&ctx.scratch);
-    return ERR;
+  // Binding pass
+  {
+    QirBindErr bind_err = {0};
+    AdbxTriStatus brc = bind_query_ir(q, &bind_err);
+    if (brc != YES) {
+      if (bind_err.code == QIR_BINDERR_UNRESOLVED_COLREF ||
+          bind_err.code == QIR_BINDERR_AMBIGUOUS_COLREF) {
+        set_err(&ctx, VERR_NO_COLUMN_ALIAS, "%s",
+                bind_err.msg[0] != '\0'
+                    ? bind_err.msg
+                    : "Every table must have an alias, and every column must "
+                      "be qualified as alias.column.");
+      } else if (bind_err.code == QIR_BINDERR_UNSUPPORTED) {
+        set_err(&ctx, VERR_UNSUPPORTED_QUERY, "%s",
+                bind_err.msg[0] != '\0' ? bind_err.msg
+                                        : "Unsupported query structure.");
+      } else {
+        set_err(&ctx, VERR_ANALYZE_FAIL, "%s",
+                bind_err.msg[0] != '\0' ? bind_err.msg
+                                        : "Unable to bind query references.");
+      }
+      qir_handle_destroy(&h);
+      free(param_used);
+      sb_clean(&ctx.scratch);
+      return ERR;
+    }
   }
 
-  // Touch report to decide if Sensitive Mode is needed and to ensure sensitive
-  // touches never appear outside the main query
-  bool sensitive_mode = false;
-  int rc = validate_sensitive_touches_scope(&ctx, q, tr, &sensitive_mode);
-  if (rc != YES) {
-    if (rc == ERR && out->err.code == VERR_NONE) {
+  ctx.root_query = q;
+  if (qir_walk_touches(q, validator_visit_touch, &ctx) != OK) {
+    if (out->err.code == VERR_NONE) {
       set_err(&ctx, VERR_ANALYZE_FAIL,
-              "Unable to analyze columns. Every table must have an alias, and "
-              "every column must be qualified as alias.column.");
+              "Unable to analyze bound column references.");
     }
-    qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     free(param_used);
     sb_clean(&ctx.scratch);
@@ -1873,12 +1848,11 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
   }
 
   // Pass A / Pass B / Pass C design. Read the start of validator.c for doc.
-  rc = validate_query_pass_a(&ctx, q);
+  int rc = validate_query_pass_a(&ctx, q);
   if (rc != YES) {
     if (rc == ERR && out->err.code == VERR_NONE) {
       set_err(&ctx, VERR_ANALYZE_FAIL, "Unable to start query analysis.");
     }
-    qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     free(param_used);
     sb_clean(&ctx.scratch);
@@ -1891,20 +1865,18 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
       set_err(&ctx, VERR_ANALYZE_FAIL,
               "Unable to analyze query parameter usage.");
     }
-    qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
 
-  if (sensitive_mode == YES) {
+  if (ctx.sensitive_mode) {
     rc = validate_query_pass_c_sensitive(&ctx, q);
     if (rc != YES) {
       if (rc == ERR && out->err.code == VERR_NONE) {
         set_err(&ctx, VERR_ANALYZE_FAIL, "Unable to analyze sensitive query.");
       }
-      qir_touch_report_destroy(tr);
       qir_handle_destroy(&h);
       free(param_used);
       sb_clean(&ctx.scratch);
@@ -1917,7 +1889,6 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
       if (ctx.param_used[i] == 0) {
         set_err(&ctx, VERR_PARAM_UNUSED,
                 "Token parameter $%u is not referenced by query.", i + 1u);
-        qir_touch_report_destroy(tr);
         qir_handle_destroy(&h);
         free(param_used);
         sb_clean(&ctx.scratch);
@@ -1932,14 +1903,12 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
       set_err(&ctx, VERR_ANALYZE_FAIL,
               "Unable to build output plan for validated query.");
     }
-    qir_touch_report_destroy(tr);
     qir_handle_destroy(&h);
     free(param_used);
     sb_clean(&ctx.scratch);
     return ERR;
   }
 
-  qir_touch_report_destroy(tr);
   qir_handle_destroy(&h);
   free(param_used);
   sb_clean(&ctx.scratch);

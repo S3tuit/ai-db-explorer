@@ -1843,50 +1843,6 @@ static AdbxStatus pg_parse_alias_colnames(const JsonGetter *alias_obj, Arena *a,
   return OK;
 }
 
-/* Resolves a RangeVar against the query's CTE list.
- * If the relname matches a CTE and no schema is specified, mark it as CTE_REF.
- * Ownership: uses pointers already owned by the query arena.
- * Side effects: mutates fi->kind and fi->u.cte_name on match. */
-static void pg_resolve_cte_ref(const QirQuery *q, QirFromItem *fi) {
-  if (!q || !fi)
-    return;
-  if (fi->kind != QIR_FROM_BASE_REL)
-    return;
-  if (!fi->u.rel.schema.name || fi->u.rel.schema.name[0] != '\0')
-    return;
-  if (!fi->u.rel.name.name || fi->u.rel.name.name[0] == '\0')
-    return;
-
-  for (uint32_t i = 0; i < q->nctes; i++) {
-    const QirCte *cte = q->ctes ? q->ctes[i] : NULL;
-    if (!cte || !cte->name.name)
-      continue;
-    if (strcmp(cte->name.name, fi->u.rel.name.name) == 0) {
-      fi->kind = QIR_FROM_CTE_REF;
-      fi->u.cte_name = cte->name;
-      return;
-    }
-  }
-}
-
-/* Resolves CTE references for all FROM and JOIN items in a query,
- * including union_next branches. Uses the father's (q's) CTE list.
- * Ownership: uses pointers already owned by the query arena.
- * Side effects: may mark FROM/JOIN items as CTE_REF. */
-static void pg_resolve_cte_refs_in_query(const QirQuery *q) {
-  if (!q)
-    return;
-  for (const QirQuery *cur = q; cur; cur = cur->union_next) {
-    if (cur->from_root)
-      pg_resolve_cte_ref(q, cur->from_root);
-    for (uint32_t i = 0; i < cur->njoins; i++) {
-      QirJoin *j = cur->joins ? cur->joins[i] : NULL;
-      if (j && j->rhs)
-        pg_resolve_cte_ref(q, j->rhs);
-    }
-  }
-}
-
 /* Parses a range item or join and populates froms/joins (left-deep).
  * Ownership: from/joins vectors own their temporary buffers.
  * Side effects: may mark QIR_UNSUPPORTED.
@@ -1968,8 +1924,6 @@ static AdbxStatus pg_parse_join_expr(const JsonGetter *jg, Arena *a,
 
   if (jsget_object(&rjg, "RangeVar", &rjg) == YES) {
     j->rhs = pg_parse_rangevar(&rjg, a);
-    if (j->rhs)
-      pg_resolve_cte_ref(q, j->rhs);
   } else if (jsget_object(&rjg, "RangeSubselect", &rjg) == YES) {
     JsonGetter ssjg = rjg;
     int lat = 0;
@@ -2045,7 +1999,6 @@ static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a,
     QirFromItem *fi = pg_parse_rangevar(&rvjg, a);
     if (!fi)
       return ERR;
-    pg_resolve_cte_ref(q, fi);
     return ptrvec_push(froms, fi);
   }
 
@@ -2109,7 +2062,7 @@ static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a,
 
 /* Parses the body of a SELECT branch: targetList, FROM, JOIN, GROUP BY,
  * HAVING, WHERE, and flags (DISTINCT). Does NOT parse CTEs, ORDER BY, or
- * LIMIT — those belong to the "father" query in a set-operation chain.
+ * LIMIT — those belong to the lead query in a set-operation chain.
  * For a non-set-op SELECT, the caller invokes both this and the outer-level
  * parsing on the same JSON object. */
 static AdbxStatus pg_parse_select_body(const JsonGetter *jg, Arena *a,
@@ -2273,7 +2226,7 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
   if (!jg || !a || !q)
     return ERR;
 
-  // --- 1. CTEs (always on the outer/father node) ---
+  // --- 1. CTEs (always on the outer/lead node) ---
   JsonArrIter it = {0};
   JsonGetter wcjg = {0};
   if (jsget_object(jg, "withClause", &wcjg) == YES) {
@@ -2331,7 +2284,7 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
       ptrvec_clean(&branches);
       qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported set operation");
     } else if (branches.len > 0) {
-      // First branch body → father query.
+      // First branch body -> lead query.
       QirQuery *first = (QirQuery *)branches.items[0];
       q->has_star = first->has_star;
       q->has_distinct = first->has_distinct;
@@ -2364,7 +2317,7 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
   if (jsget_exists_nonnull(jg, "limitOffset") == YES)
     q->has_offset = true;
 
-  // --- 4. ORDER BY (always on the outer/father) ---
+  // --- 4. ORDER BY (always on the outer/lead query) ---
   PtrVec orders = {0};
   if (jsget_array_objects_begin(jg, "sortClause", &it) == YES) {
     JsonGetter elem = {0};
@@ -2400,12 +2353,7 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
   q->n_order_by = orders.len;
   ptrvec_clean(&orders);
 
-  // --- 5. Resolve CTE references (walks union chain) ---
-  if (q->nctes > 0) {
-    pg_resolve_cte_refs_in_query(q);
-  }
-
-  // --- 6. LIMIT ---
+  // --- 5. LIMIT ---
   JsonGetter lcjg = {0};
   if (jsget_object(jg, "limitCount", &lcjg) == YES) {
     JsonGetter acjg = {0};

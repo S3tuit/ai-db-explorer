@@ -471,7 +471,7 @@ static void test_validator_from_notes(void) {
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.name, e.amount FROM users u INNER JOIN expenses ON "
                   "expenses.user_id = u.id WHERE u.id = 1;",
-                  0, VERR_ANALYZE_FAIL);
+                  0, VERR_NO_COLUMN_ALIAS);
   ASSERT_VALIDATE_MSG(db, cp, policy,
                       "SELECT LOWER2(u.fiscal_code) FROM users u LIMIT 199;", 0,
                       VERR_FUNC_UNSAFE, "lower2");
@@ -1250,57 +1250,104 @@ static void test_validator_sensitive_union(void) {
   // REJECT: sensitive column referenced inside a query with union_next chain.
   // LIMIT on the outer/father satisfies the sensitive-mode requirement,
   // but the union branch itself must not touch sensitive columns.
-  ASSERT_VALIDATE(
-      db, cp, policy,
-      "SELECT 1 AS fc FROM users u "
-      "UNION ALL "
-      "SELECT u2.fiscal_code AS fc FROM users u2 "
-      "LIMIT 10;",
-      0, VERR_SENSITIVE_IN_UNION);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT 1 AS fc FROM users u "
+                  "UNION ALL "
+                  "SELECT u2.fiscal_code AS fc FROM users u2 "
+                  "LIMIT 10;",
+                  0, VERR_SENSITIVE_IN_UNION);
 
   // ACCEPT: CTE body contains UNION ALL, but the main query (which touches
   // a sensitive column) is NOT itself a union branch.
   // The CTE body needs its own LIMIT because pass-C recurses into CTEs.
-  ASSERT_VALIDATE(
-      db, cp, policy,
-      "WITH x AS ("
-      "  SELECT v.id AS xid FROM users v WHERE v.id = 1 "
-      "  UNION ALL "
-      "  SELECT w.id AS xid FROM users w WHERE w.id = 2 "
-      "  LIMIT 200"
-      ") "
-      "SELECT u.fiscal_code AS fc "
-      "FROM users u "
-      "INNER JOIN x x ON x.xid = u.id "
-      "WHERE u.fiscal_code = 'A' LIMIT 10;",
-      0, VERR_SENSITIVE_CMP);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "WITH x AS ("
+                  "  SELECT v.id AS xid FROM users v WHERE v.id = 1 "
+                  "  UNION ALL "
+                  "  SELECT w.id AS xid FROM users w WHERE w.id = 2 "
+                  "  LIMIT 200"
+                  ") "
+                  "SELECT u.fiscal_code AS fc "
+                  "FROM users u "
+                  "INNER JOIN x x ON x.xid = u.id "
+                  "WHERE u.fiscal_code = 'A' LIMIT 10;",
+                  0, VERR_SENSITIVE_CMP);
 
   // ACCEPT (variant): same CTE-with-union pattern but with a valid param
   // binding — the main query is NOT a union branch so sensitive is allowed.
   const SensitiveTok tok_fc1[] = {make_param_domain("fiscal_code")};
-  ASSERT_VALIDATE_PARAMS(
-      db, cp, policy,
-      "WITH x AS ("
-      "  SELECT v.id AS xid FROM users v WHERE v.id = 1 "
-      "  UNION ALL "
-      "  SELECT w.id AS xid FROM users w WHERE w.id = 2 "
-      "  LIMIT 200"
-      ") "
-      "SELECT u.fiscal_code AS fc "
-      "FROM users u "
-      "INNER JOIN x x ON x.xid = u.id "
-      "WHERE u.fiscal_code = $1 LIMIT 10;",
-      1, VERR_NONE, NULL, tok_fc1, ARRLEN(tok_fc1));
+  ASSERT_VALIDATE_PARAMS(db, cp, policy,
+                         "WITH x AS ("
+                         "  SELECT v.id AS xid FROM users v WHERE v.id = 1 "
+                         "  UNION ALL "
+                         "  SELECT w.id AS xid FROM users w WHERE w.id = 2 "
+                         "  LIMIT 200"
+                         ") "
+                         "SELECT u.fiscal_code AS fc "
+                         "FROM users u "
+                         "INNER JOIN x x ON x.xid = u.id "
+                         "WHERE u.fiscal_code = $1 LIMIT 10;",
+                         1, VERR_NONE, NULL, tok_fc1, ARRLEN(tok_fc1));
 
   // REJECT: unsafe function in the 3rd child of a 3-way UNION chain.
+  ASSERT_VALIDATE_MSG(db, cp, policy,
+                      "SELECT u.id AS c FROM users u WHERE u.id = 1 "
+                      "UNION ALL "
+                      "SELECT u2.id AS c FROM users u2 WHERE u2.id = 2 "
+                      "UNION ALL "
+                      "SELECT random() AS c FROM users u3 WHERE u3.id = 3;",
+                      0, VERR_FUNC_UNSAFE, "random");
+
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
+/* CTE shadowing must not confuse binder-backed sensitive resolution.
+ * Threat model: if validation falls back to raw relation names instead of the
+ * bound CTE/base target, a malicious query could hide or misclassify sensitive
+ * sources behind a same-name CTE.
+ */
+static void test_validator_cte_shadowing(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+  SafetyPolicy *policy = &cp->safe_policy;
+  ASSERT_TRUE(policy != NULL);
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  // ACCEPT: the visible "users" range item is a CTE, so u.fiscal_code is
+  // derived data and must not inherit the base-table sensitive domain.
+  ASSERT_VALIDATE(db, cp, policy,
+                  "WITH users AS ("
+                  "  SELECT v.name AS fiscal_code "
+                  "  FROM users v "
+                  "  LIMIT 10"
+                  ") "
+                  "SELECT u.fiscal_code "
+                  "FROM users u "
+                  "LIMIT 10;",
+                  1, VERR_NONE);
+
+  // REJECT: the first CTE still reads the real users.fiscal_code base column;
+  // the later same-name CTE must not hide that nested sensitive touch.
   ASSERT_VALIDATE_MSG(
       db, cp, policy,
-      "SELECT u.id AS c FROM users u WHERE u.id = 1 "
-      "UNION ALL "
-      "SELECT u2.id AS c FROM users u2 WHERE u2.id = 2 "
-      "UNION ALL "
-      "SELECT random() AS c FROM users u3 WHERE u3.id = 3;",
-      0, VERR_FUNC_UNSAFE, "random");
+      "WITH sneaky AS ("
+      "  SELECT u.fiscal_code AS trick "
+      "  FROM users u "
+      "  LIMIT 10"
+      "), users AS ("
+      "  SELECT v.name AS fiscal_code "
+      "  FROM users v "
+      "  LIMIT 10"
+      ") "
+      "SELECT s.trick "
+      "FROM sneaky s "
+      "LIMIT 10;",
+      0, VERR_SENSITIVE_OUTSIDE_MAIN, "fiscal_code");
 
   db_destroy(db);
   catalog_destroy(cat);
@@ -1316,6 +1363,7 @@ int main(void) {
   test_validator_explain();
   test_validator_safe_funcs_pg();
   test_validator_sensitive_union();
+  test_validator_cte_shadowing();
   fprintf(stderr, "OK: test_validator\n");
   return 0;
 }

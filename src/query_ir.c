@@ -1,6 +1,5 @@
 #include "query_ir.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 #include "utils.h"
@@ -49,21 +48,6 @@ void qir_handle_destroy(QirQueryHandle *h) {
   h->q = NULL;
 }
 
-// ----------------------------
-// Touch report freeing
-// ----------------------------
-
-/* Frees a touch report and its arena allocations.
- * Ownership: caller must not use 'tr' afterwards.
- * Side effects: frees memory.
- * Returns void. */
-void qir_touch_report_destroy(QirTouchReport *tr) {
-  if (!tr)
-    return;
-  arena_clean(&tr->arena);
-  free(tr);
-}
-
 /* Sets query status and (optional) reason once; first status wins.
  * Ownership: copies reason into arena when provided.
  * Side effects: mutates q->status and q->status_reason.
@@ -78,8 +62,8 @@ void qir_set_status(QirQuery *q, Arena *arena, QirStatus status,
     return;
   if (!q->status_reason && reason) {
     if (arena) {
-      q->status_reason = (const char *)arena_add_nul(
-          arena, (void *)reason, (uint32_t)strlen(reason));
+      q->status_reason = (const char *)arena_add_nul(arena, (void *)reason,
+                                                     (uint32_t)strlen(reason));
     } else {
       q->status_reason = reason;
     }
@@ -87,16 +71,16 @@ void qir_set_status(QirQuery *q, Arena *arena, QirStatus status,
 }
 
 // ----------------------------
-// Touch extraction
+// Touch walking
 // ----------------------------
 
 /* Compares two identifiers for exact equality. */
-static bool qir_ident_eq(const QirIdent *a, const QirIdent *b) {
+static AdbxTriStatus qir_ident_eq(const QirIdent *a, const QirIdent *b) {
   if (!a || !b)
-    return false;
+    return NO;
   if (!a->name || !b->name)
-    return false;
-  return strcmp(a->name, b->name) == 0;
+    return NO;
+  return strcmp(a->name, b->name) == 0 ? YES : NO;
 }
 
 /* Resolves ORDER BY alias references to SELECT item expressions.
@@ -131,386 +115,697 @@ QirExpr *qir_resolve_order_alias(QirQuery *q, Arena *arena, QirExpr *expr) {
   return resolved ? resolved : expr;
 }
 
-/* Checks if a name matches any CTE in scope. */
-static bool qir_is_cte_name(const QirQuery *cte_scope, const QirIdent *name) {
-  if (!cte_scope)
-    return false;
-  for (uint32_t i = 0; i < cte_scope->nctes; i++) {
-    const QirCte *cte = cte_scope->ctes ? cte_scope->ctes[i] : NULL;
-    // qir_ident_eq handles NULL inputs
-    if (qir_ident_eq(&cte->name, name))
-      return true;
-  }
-  return false;
+/* Stack of visible range aliases. The local frame exposes 'from_root' plus only
+ * the join RHS items in [0, njoins_visible). We need the prefix because each
+ * JOIN ... ON may reference only the left chain plus the current RHS; later
+ * joins are not visible there. */
+typedef struct QirRangeFrame {
+  const QirQuery *query;
+  bool has_from_root;
+  uint32_t njoins_visible;
+  const struct QirRangeFrame *outer;
+} QirRangeFrame;
+
+/* Simple stack that tacks the visible CTEs. The binder consider only up to
+ * 'nvisible' CTEs from 'query'. */
+typedef struct QirCteFrame {
+  const QirQuery *query;
+  uint32_t nvisible;
+  const struct QirCteFrame *outer; // pointer to outer scope
+} QirCteFrame;
+
+static AdbxStatus qir_bind_query_rec(QirQuery *q,
+                                     const QirRangeFrame *outer_ranges,
+                                     const QirCteFrame *outer_ctes,
+                                     QirBindErr *out_err);
+
+/* Returns a non NULL, NUL-term string even if 'id' is malformed/NULL. */
+static const char *qir_ident_cstr(const QirIdent *id) {
+  return (id && id->name && id->name[0] != '\0') ? id->name : "<unknown>";
 }
 
-/* Given a column qualifier (the "alias" in alias.column), decide whether it
- * refers to:
- * - a BASE relation (table/view) alias, or
- * - a DERIVED relation alias (subquery or CTE reference), or
- * - UNKNOWN (cannot be resolved safely). */
-static QirTouchKind qir_resolve_qualifier_kind(const QirQuery *q,
-                                               const QirQuery *cte_scope,
-                                               const QirIdent *qualifier) {
-  if (!q || !qualifier || !qualifier->name || qualifier->name[0] == '\0') {
-    return QIR_TOUCH_UNKNOWN;
+/* Returns YES/NO if 'name' references the table at 'fi'. */
+static AdbxTriStatus qir_from_item_matches_visible_name(const QirFromItem *fi,
+                                                        const QirIdent *name) {
+  if (!fi || !name || !name->name || name->name[0] == '\0')
+    return NO;
+
+  // If a table has an alias, SQL requires the use of the alias to reference
+  // the table, not the table name itself.
+  if (fi->alias.name && fi->alias.name[0] != '\0')
+    return qir_ident_eq(&fi->alias, name);
+
+  if (fi->kind == QIR_FROM_BASE_REL && fi->u.rel.name.name &&
+      fi->u.rel.name.name[0] != '\0') {
+    return qir_ident_eq(&fi->u.rel.name, name);
   }
+  return NO;
+}
 
-  // Search FROM root
-  const QirFromItem *fi = q->from_root;
-  if (fi) {
-    bool alias_match = fi->alias.name && fi->alias.name[0] != '\0' &&
-                       qir_ident_eq(&fi->alias, qualifier);
-    bool rel_match = fi->kind == QIR_FROM_BASE_REL && fi->u.rel.name.name &&
-                     fi->u.rel.name.name[0] != '\0' &&
-                     qir_ident_eq(&fi->u.rel.name, qualifier);
+/* Finds a match for the table referenced by 'name' inside one local range
+ * frame. This does not walk outer scopes. The frame carries a join prefix so
+ * JOIN ... ON binding cannot see aliases introduced by successive joins. */
+static AdbxTriStatus qir_find_from_in_frame(const QirRangeFrame *fr,
+                                            const QirIdent *name,
+                                            const QirFromItem **out_fi,
+                                            QirBindErr *out_err) {
+  const QirFromItem *match = NULL;
+  const QirQuery *q;
+  uint32_t njoins_visible;
 
-    bool rel_is_cte = (fi->kind == QIR_FROM_BASE_REL) &&
-                      qir_is_cte_name(cte_scope, &fi->u.rel.name);
+  if (out_fi)
+    *out_fi = NULL;
+  if (!fr || !fr->query || !name)
+    return ERR;
+  q = fr->query;
+  njoins_visible = fr->njoins_visible;
+  if (njoins_visible > q->njoins)
+    njoins_visible = q->njoins;
 
-    if (alias_match || rel_match) {
-      if (fi->kind == QIR_FROM_BASE_REL) {
-        if (rel_is_cte)
-          return QIR_TOUCH_DERIVED;
-        return QIR_TOUCH_BASE;
-      }
-      if (fi->kind == QIR_FROM_SUBQUERY || fi->kind == QIR_FROM_CTE_REF ||
-          fi->kind == QIR_FROM_VALUES)
-        return QIR_TOUCH_DERIVED;
-      return QIR_TOUCH_UNKNOWN;
-    }
-  }
+  // Range-item visibility is local to one query block. Correlated lookup is
+  // handled separately by qir_bind_colref() walking the outer frame chain.
+  if (fr->has_from_root &&
+      qir_from_item_matches_visible_name(q->from_root, name) == YES)
+    match = q->from_root;
 
-  // Search join RHS aliases too
-  for (uint32_t i = 0; i < q->njoins; i++) {
+  for (uint32_t i = 0; i < njoins_visible; i++) {
     const QirJoin *j = q->joins ? q->joins[i] : NULL;
-    if (!j || !j->rhs)
+    const QirFromItem *fi = j ? j->rhs : NULL;
+    if (qir_from_item_matches_visible_name(fi, name) != YES)
       continue;
-    const QirFromItem *fi = j->rhs;
+    if (match) {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_AMBIGUOUS_COLREF,
+                    "Ambiguous column qualifier '%s'.", qir_ident_cstr(name));
+      return NO;
+    }
+    match = fi;
+  }
 
-    bool alias_match = fi->alias.name && fi->alias.name[0] != '\0' &&
-                       qir_ident_eq(&fi->alias, qualifier);
-    bool rel_match = fi->kind == QIR_FROM_BASE_REL && fi->u.rel.name.name &&
-                     fi->u.rel.name.name[0] != '\0' &&
-                     qir_ident_eq(&fi->u.rel.name, qualifier);
+  if (!match)
+    return NO;
+  if (out_fi)
+    *out_fi = match;
+  return YES;
+}
 
-    bool rel_is_cte = (fi->kind == QIR_FROM_BASE_REL) &&
-                      qir_is_cte_name(cte_scope, &fi->u.rel.name);
+/* Searches a matching CTE referenced by 'name' inside the linked cte_env
+ * chain. Each frame exposes only the prefix [0, nvisible) of its query's CTE
+ * list. This is why we use a dedicated QirCteFrame rather than reusing the
+ * range frame: inside one WITH clause, earlier CTEs are visible to later ones,
+ * but a CTE must not see itself or later siblings. */
+static AdbxTriStatus qir_find_cte_in_frame(const QirCteFrame *cte_env,
+                                           const QirIdent *name,
+                                           const QirCte **out_cte,
+                                           QirBindErr *out_err) {
+  if (out_cte)
+    *out_cte = NULL;
+  if (!name || !name->name || name->name[0] == '\0')
+    return NO;
 
-    if (alias_match || rel_match) {
-      if (fi->kind == QIR_FROM_BASE_REL) {
-        if (rel_is_cte)
-          return QIR_TOUCH_DERIVED;
-        return QIR_TOUCH_BASE;
+  // CTE lookup is a separate namespace from range aliases. We search outward
+  // until the first frame that defines the requested CTE name.
+  for (const QirCteFrame *fr = cte_env; fr; fr = fr->outer) {
+    const QirCte *match = NULL;
+    const QirQuery *q = fr->query;
+    uint32_t nvisible = fr->nvisible;
+    if (!q)
+      continue;
+    if (nvisible > q->nctes)
+      nvisible = q->nctes;
+    for (uint32_t i = 0; i < nvisible; i++) {
+      const QirCte *cte = q->ctes ? q->ctes[i] : NULL;
+      if (!cte || qir_ident_eq(&cte->name, name) != YES)
+        continue;
+      if (match) {
+        ADBX_ERR_SETF(out_err, QIR_BINDERR_AMBIGUOUS_CTE,
+                      "Ambiguous CTE reference '%s'.", qir_ident_cstr(name));
+        return NO;
       }
-      if (fi->kind == QIR_FROM_SUBQUERY || fi->kind == QIR_FROM_CTE_REF ||
-          fi->kind == QIR_FROM_VALUES)
-        return QIR_TOUCH_DERIVED;
-      return QIR_TOUCH_UNKNOWN;
+      match = cte;
+    }
+    if (match) {
+      if (out_cte)
+        *out_cte = match;
+      return YES;
     }
   }
 
-  return QIR_TOUCH_UNKNOWN;
+  return NO;
 }
 
-/* Appends a new touch record to the report. */
-static AdbxStatus qir_touch_report_add(QirTouchReport *tr, QirScope scope,
-                                       QirTouchKind kind, const QirColRef *col,
-                                       const QirQuery *source_query,
-                                       PtrVec *touches) {
-  if (!tr || !col)
+/* Modifies the binding values of 'cr' by searching for matches inside
+ * 'range_env'. Returns YES if it finds a match, else NO and modifies 'out_err'.
+ * Returns ERR if bad input. */
+static AdbxTriStatus qir_bind_colref(const QirRangeFrame *range_env,
+                                     QirColRef *cr, QirBindErr *out_err) {
+  if (!range_env || !cr)
     return ERR;
 
-  QirTouch *t = (QirTouch *)arena_calloc(&tr->arena, (uint32_t)sizeof(*t));
-  if (!t)
-    return ERR;
+  cr->binding_from = NULL;
+  cr->correlation_depth = 0;
 
-  t->scope = scope;
-  t->kind = kind;
-  t->col = *col; // shallow copy; identifiers are owned by QueryIR
-  t->source_query = source_query;
-  // Keep a temporary pointer vector and flatten it once at the end.
-  if (ptrvec_push(touches, t) != OK)
-    return ERR;
-  tr->ntouches++;
+  if (!cr->qualifier.name || cr->qualifier.name[0] == '\0') {
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_UNRESOLVED_COLREF,
+                  "Unqualified column reference '%s' cannot be bound.",
+                  qir_ident_cstr(&cr->column));
+    return NO;
+  }
 
-  if (kind == QIR_TOUCH_UNKNOWN)
-    tr->has_unknown_touches = true;
+  // Nearest visible range scope wins. When we bind against an outer frame, the
+  // recorded depth marks the reference as correlated.
+  uint32_t depth = 0;
+  for (const QirRangeFrame *fr = range_env; fr; fr = fr->outer, depth++) {
+    const QirFromItem *fi = NULL;
+    AdbxTriStatus rc =
+        qir_find_from_in_frame(fr, &cr->qualifier, &fi, out_err);
+    if (rc != NO) {
+      if (rc == YES) {
+        cr->binding_from = fi;
+        cr->correlation_depth = depth;
+      } else if (out_err && out_err->code == QIR_BINDERR_NONE) {
+        ADBX_ERR_SETF(out_err, QIR_BINDERR_INPUT,
+                      "Invalid binder input while resolving '%s.%s'.",
+                      qir_ident_cstr(&cr->qualifier),
+                      qir_ident_cstr(&cr->column));
+      }
+      return rc;
+    }
+  }
+
+  ADBX_ERR_SETF(out_err, QIR_BINDERR_UNRESOLVED_COLREF,
+                "Unable to bind column reference '%s.%s'.",
+                qir_ident_cstr(&cr->qualifier), qir_ident_cstr(&cr->column));
+  return NO;
+}
+
+/* Modifies the binding values of 'fi' by searching for matches inside
+ * 'cte_env'. */
+static AdbxStatus qir_bind_from_item(QirFromItem *fi,
+                                     const QirCteFrame *cte_env,
+                                     QirBindErr *out_err) {
+  if (!fi)
+    return OK;
+
+  fi->binding_cte = NULL;
+
+  switch (fi->kind) {
+  case QIR_FROM_BASE_REL: {
+    // Only unqualified RangeVar names can resolve to a visible CTE. Qualified
+    // schema.table syntax always stays a database relation.
+    if (!fi->u.rel.schema.name || fi->u.rel.schema.name[0] != '\0' ||
+        !fi->u.rel.name.name || fi->u.rel.name.name[0] == '\0') {
+      return OK;
+    }
+
+    const QirCte *cte = NULL;
+    AdbxTriStatus rc =
+        qir_find_cte_in_frame(cte_env, &fi->u.rel.name, &cte, out_err);
+    if (rc == YES)
+      fi->binding_cte = cte;
+    else if (rc == ERR) {
+      if (out_err && out_err->code == QIR_BINDERR_NONE) {
+        ADBX_ERR_SETF(out_err, QIR_BINDERR_INPUT,
+                      "Invalid binder input while resolving FROM item '%s'.",
+                      qir_ident_cstr(&fi->u.rel.name));
+      }
+      return ERR;
+    }
+    return OK;
+  }
+
+  case QIR_FROM_SUBQUERY:
+  case QIR_FROM_VALUES:
+  case QIR_FROM_UNSUPPORTED:
+  default:
+    return OK;
+  }
+}
+
+/* Traverses all the expressions of 'e' and populates their binding metadata.
+ * Returns OK if it can bind all the expression, else ERR. */
+static AdbxStatus qir_bind_expr_rec(QirExpr *e, const QirRangeFrame *range_env,
+                                    const QirCteFrame *cte_env,
+                                    QirBindErr *out_err) {
+  if (!e)
+    return OK;
+
+  switch (e->kind) {
+  case QIR_EXPR_COLREF:
+    return qir_bind_colref(range_env, &e->u.colref, out_err) == YES ? OK : ERR;
+  case QIR_EXPR_PARAM:
+  case QIR_EXPR_LITERAL:
+    return OK;
+  case QIR_EXPR_FUNCALL:
+    for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
+      AdbxStatus rc =
+          qir_bind_expr_rec(e->u.funcall.args[i], range_env, cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    return OK;
+  case QIR_EXPR_CAST:
+    return qir_bind_expr_rec(e->u.cast.expr, range_env, cte_env, out_err);
+  case QIR_EXPR_OP:
+    if (e->u.op.lhs) {
+      AdbxStatus rc =
+          qir_bind_expr_rec(e->u.op.lhs, range_env, cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    for (uint32_t i = 0; i < e->u.op.nargs; i++) {
+      AdbxStatus rc =
+          qir_bind_expr_rec(e->u.op.args[i], range_env, cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    return OK;
+  case QIR_EXPR_AND:
+  case QIR_EXPR_OR: {
+    AdbxStatus rc = qir_bind_expr_rec(e->u.bin.l, range_env, cte_env, out_err);
+    if (rc != OK)
+      return rc;
+    return qir_bind_expr_rec(e->u.bin.r, range_env, cte_env, out_err);
+  }
+  case QIR_EXPR_NOT:
+    return qir_bind_expr_rec(e->u.bin.l, range_env, cte_env, out_err);
+  case QIR_EXPR_CASE:
+    if (e->u.case_.arg) {
+      AdbxStatus rc =
+          qir_bind_expr_rec(e->u.case_.arg, range_env, cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
+      const QirCaseWhen *w = e->u.case_.whens ? e->u.case_.whens[i] : NULL;
+      if (!w)
+        continue;
+      AdbxStatus rc =
+          qir_bind_expr_rec(w->when_expr, range_env, cte_env, out_err);
+      if (rc != OK)
+        return rc;
+      rc = qir_bind_expr_rec(w->then_expr, range_env, cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    return qir_bind_expr_rec(e->u.case_.else_expr, range_env, cte_env, out_err);
+  case QIR_EXPR_WINDOWFUNC:
+    for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
+      AdbxStatus rc = qir_bind_expr_rec(e->u.window.func.args[i], range_env,
+                                        cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
+      AdbxStatus rc = qir_bind_expr_rec(e->u.window.partition_by[i], range_env,
+                                        cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
+      AdbxStatus rc = qir_bind_expr_rec(e->u.window.order_by[i], range_env,
+                                        cte_env, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    return OK;
+  case QIR_EXPR_SUBQUERY:
+    if (!e->u.subquery)
+      return OK;
+    // Expression subqueries inherit both outer range aliases and visible CTEs,
+    // which is what makes correlated references bindable.
+    return qir_bind_query_rec(e->u.subquery, range_env, cte_env, out_err);
+  case QIR_EXPR_UNSUPPORTED:
+  default:
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_UNSUPPORTED,
+                  "Unsupported expression cannot be bound.");
+    return ERR;
+  }
+}
+
+/* Traverses 'q' and asigns binding metadata to the different entities owned by
+ * 'q'. Returns OK if it can bind all the entities, else ERR. */
+static AdbxStatus qir_bind_query_rec(QirQuery *q,
+                                     const QirRangeFrame *outer_ranges,
+                                     const QirCteFrame *outer_ctes,
+                                     QirBindErr *out_err) {
+  if (!q)
+    return ERR;
+  if (q->status != QIR_OK) {
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_UNSUPPORTED, "%s",
+                  q->status_reason ? q->status_reason
+                                   : "Unsupported query structure.");
+    return ERR;
+  }
+
+  for (uint32_t i = 0; i < q->nctes; i++) {
+    QirCte *cte = q->ctes ? q->ctes[i] : NULL;
+    if (!cte || !cte->query)
+      continue;
+    // CTE bodies can see outer CTEs and only the earlier siblings of the same
+    // WITH clause. They must not see themselves, later siblings, or any outer
+    // query range aliases.
+    QirCteFrame cte_prefix = {
+        .query = q,
+        .nvisible = i,
+        .outer = outer_ctes,
+    };
+    AdbxStatus rc = qir_bind_query_rec(cte->query, NULL, &cte_prefix, out_err);
+    if (rc != OK)
+      return rc;
+  }
+
+  // The main query body can reference every local CTE plus any CTEs inherited
+  // from enclosing query blocks.
+  QirCteFrame cte_all = {.query = q, .nvisible = q->nctes, .outer = outer_ctes};
+  QirRangeFrame range_all = {
+      .query = q,
+      .has_from_root = q->from_root != NULL,
+      .njoins_visible = q->njoins,
+      .outer = outer_ranges,
+  };
+  QirRangeFrame range_join_on = {
+      .query = q,
+      .has_from_root = q->from_root != NULL,
+      .njoins_visible = 0,
+      .outer = outer_ranges,
+  };
+
+  if (q->from_root) {
+    AdbxStatus rc = qir_bind_from_item(q->from_root, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+    if (q->from_root->kind == QIR_FROM_SUBQUERY && q->from_root->u.subquery) {
+      // FROM-subqueries are isolated from outer range aliases, they can only
+      // reference CTEs
+      rc =
+          qir_bind_query_rec(q->from_root->u.subquery, NULL, &cte_all, out_err);
+      if (rc != OK)
+        return rc;
+    }
+  }
+
+  // Bind joins left-to-right. Each ON clause sees the accumulated left chain
+  // plus its own RHS, but not aliases introduced by successive joins.
+  for (uint32_t i = 0; i < q->njoins; i++) {
+    QirJoin *j = q->joins ? q->joins[i] : NULL;
+    if (!j)
+      continue;
+
+    AdbxStatus rc = qir_bind_from_item(j->rhs, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+    if (j->rhs && j->rhs->kind == QIR_FROM_SUBQUERY && j->rhs->u.subquery) {
+      // JOIN rhs subqueries follow the same non-LATERAL rule as
+      // FROM-subqueries.
+      rc = qir_bind_query_rec(j->rhs->u.subquery, NULL, &cte_all, out_err);
+      if (rc != OK)
+        return rc;
+    }
+    if (j->on) {
+      range_join_on.njoins_visible = i + 1;
+      AdbxStatus rc =
+          qir_bind_expr_rec(j->on, &range_join_on, &cte_all, out_err);
+      if (rc != OK)
+        return rc;
+    }
+  }
+
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
+    if (!si || !si->value)
+      continue;
+    AdbxStatus rc =
+        qir_bind_expr_rec(si->value, &range_all, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+  }
+
+  if (q->where) {
+    AdbxStatus rc = qir_bind_expr_rec(q->where, &range_all, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+  }
+
+  for (uint32_t i = 0; i < q->n_group_by; i++) {
+    AdbxStatus rc = qir_bind_expr_rec(q->group_by ? q->group_by[i] : NULL,
+                                      &range_all, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+  }
+
+  if (q->having) {
+    AdbxStatus rc = qir_bind_expr_rec(q->having, &range_all, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+  }
+
+  for (uint32_t i = 0; i < q->n_order_by; i++) {
+    AdbxStatus rc = qir_bind_expr_rec(q->order_by ? q->order_by[i] : NULL,
+                                      &range_all, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+  }
+
+  // Union branches are siblings: they share the lead query's outer context and
+  // CTE visibility, but do not become outer ranges of one another.
+  for (QirQuery *branch = q->union_next; branch; branch = branch->union_next) {
+    AdbxStatus rc = qir_bind_query_rec(branch, outer_ranges, &cte_all, out_err);
+    if (rc != OK)
+      return rc;
+  }
+
   return OK;
+}
+
+AdbxTriStatus bind_query_ir(QirQuery *q, QirBindErr *out_err) {
+  QirBindErr local_err = {0};
+  QirBindErr *err = out_err ? out_err : &local_err;
+
+  ADBX_ERR_CLEAR(err, QIR_BINDERR_NONE);
+  if (!q) {
+    ADBX_ERR_SETF(err, QIR_BINDERR_INPUT, "Invalid binder input.");
+    return ERR;
+  }
+
+  if (qir_bind_query_rec(q, NULL, NULL, err) == OK)
+    return YES;
+  if (err->code == QIR_BINDERR_INPUT)
+    return ERR;
+  return NO;
+}
+
+static QirTouchKind qir_bound_touch_kind(const QirColRef *cr) {
+  const QirFromItem *fi = cr ? cr->binding_from : NULL;
+  if (!fi)
+    return QIR_TOUCH_UNKNOWN;
+  if (fi->kind == QIR_FROM_BASE_REL)
+    return fi->binding_cte ? QIR_TOUCH_DERIVED : QIR_TOUCH_BASE;
+  if (fi->kind == QIR_FROM_SUBQUERY || fi->kind == QIR_FROM_VALUES)
+    return QIR_TOUCH_DERIVED;
+  return QIR_TOUCH_UNKNOWN;
 }
 
 // Forward declaration for mutual recursion (expr can contain subquery; query
 // contains expr).
-static void qir_extract_from_query_rec(const QirQuery *q, QirScope scope,
-                                       QirTouchReport *tr, PtrVec *touches,
-                                       const QirQuery *cte_scope);
+static AdbxStatus qir_walk_query_chain_rec(const QirQuery *q, QirScope scope,
+                                           QirTouchFn fn, void *ctx);
 
-/* Walk an expression tree and record every column reference encountered. Adds
- * the columns to 'tr'.
- *
- * The "owner_query" is the query block whose FROM/JOIN aliases define the
- * namespace for resolving qualifiers in this expression. */
-static void qir_extract_from_expr_rec(const QirQuery *owner_query,
-                                      const QirQuery *cte_scope,
-                                      const QirExpr *e, QirScope scope,
-                                      QirTouchReport *tr, PtrVec *touches) {
-  if (!e || !tr)
-    return;
+/* Walks one expression tree and invokes 'fn' for every colref it encounters.
+ * Unsupported expressions are skipped here because structural validation lives
+ * elsewhere. */
+static AdbxStatus qir_walk_expr_rec(const QirQuery *owner_query,
+                                    const QirExpr *e, QirScope scope,
+                                    QirTouchFn fn, void *ctx) {
+  if (!fn)
+    return ERR;
+  if (!e)
+    return OK;
 
   switch (e->kind) {
   case QIR_EXPR_COLREF: {
-    QirTouchKind kind = qir_resolve_qualifier_kind(owner_query, cte_scope,
-                                                   &e->u.colref.qualifier);
+    QirTouchKind kind = qir_bound_touch_kind(&e->u.colref);
     if (e->u.colref.column.name && strcmp(e->u.colref.column.name, "*") == 0) {
-      // Star touches cannot be mapped to a specific column, so treat them as
-      // unknown.
+      // Star touches cannot be mapped to one direct column, so the walker
+      // surfaces them as UNKNOWN.
       kind = QIR_TOUCH_UNKNOWN;
     }
-    if (qir_touch_report_add(tr, scope, kind, &e->u.colref, owner_query,
-                             touches) != OK) {
-      tr->has_unsupported =
-          true; // allocation failure treated as "cannot safely proceed"
-    }
-    break;
+    return fn(scope, owner_query, &e->u.colref, kind, ctx);
   }
 
   case QIR_EXPR_PARAM:
   case QIR_EXPR_LITERAL:
-    // Params and literals do not introduce column touches.
-    break;
+    return OK;
 
   case QIR_EXPR_FUNCALL:
-    // Even "safe" function calls can reference columns through their arguments.
-    // Touch extraction must walk arguments regardless of allowlist decisions.
     for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.funcall.args[i],
-                                scope, tr, touches);
+      AdbxStatus rc =
+          qir_walk_expr_rec(owner_query, e->u.funcall.args[i], scope, fn, ctx);
+      if (rc != OK)
+        return rc;
     }
-    break;
+    return OK;
 
   case QIR_EXPR_CAST:
-    // Cast touches come from the underlying expression.
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.cast.expr, scope, tr,
-                              touches);
-    break;
+    return qir_walk_expr_rec(owner_query, e->u.cast.expr, scope, fn, ctx);
 
   case QIR_EXPR_OP:
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.op.lhs, scope, tr,
-                              touches);
+    if (qir_walk_expr_rec(owner_query, e->u.op.lhs, scope, fn, ctx) != OK)
+      return ERR;
     for (uint32_t i = 0; i < e->u.op.nargs; i++) {
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.op.args[i], scope,
-                                tr, touches);
+      AdbxStatus rc =
+          qir_walk_expr_rec(owner_query, e->u.op.args[i], scope, fn, ctx);
+      if (rc != OK)
+        return rc;
     }
-    break;
+    return OK;
 
   case QIR_EXPR_AND:
   case QIR_EXPR_OR:
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.l, scope, tr,
-                              touches);
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.r, scope, tr,
-                              touches);
-    break;
+    if (qir_walk_expr_rec(owner_query, e->u.bin.l, scope, fn, ctx) != OK)
+      return ERR;
+    return qir_walk_expr_rec(owner_query, e->u.bin.r, scope, fn, ctx);
 
   case QIR_EXPR_NOT:
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.bin.l, scope, tr,
-                              touches);
-    break;
+    return qir_walk_expr_rec(owner_query, e->u.bin.l, scope, fn, ctx);
 
   case QIR_EXPR_CASE:
-    // CASE may reference columns in arg, WHEN, THEN, and ELSE branches.
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.case_.arg, scope, tr,
-                              touches);
+    if (qir_walk_expr_rec(owner_query, e->u.case_.arg, scope, fn, ctx) != OK)
+      return ERR;
     for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
       QirCaseWhen *w = e->u.case_.whens[i];
       if (!w)
         continue;
-      qir_extract_from_expr_rec(owner_query, cte_scope, w->when_expr, scope, tr,
-                                touches);
-      qir_extract_from_expr_rec(owner_query, cte_scope, w->then_expr, scope, tr,
-                                touches);
+      if (qir_walk_expr_rec(owner_query, w->when_expr, scope, fn, ctx) != OK)
+        return ERR;
+      if (qir_walk_expr_rec(owner_query, w->then_expr, scope, fn, ctx) != OK)
+        return ERR;
     }
-    qir_extract_from_expr_rec(owner_query, cte_scope, e->u.case_.else_expr,
-                              scope, tr, touches);
-    break;
+    return qir_walk_expr_rec(owner_query, e->u.case_.else_expr, scope, fn, ctx);
 
   case QIR_EXPR_WINDOWFUNC:
-    // Window functions can reference columns in args and window clauses.
     for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
-      qir_extract_from_expr_rec(owner_query, cte_scope,
-                                e->u.window.func.args[i], scope, tr, touches);
+      AdbxStatus rc = qir_walk_expr_rec(owner_query, e->u.window.func.args[i],
+                                        scope, fn, ctx);
+      if (rc != OK)
+        return rc;
     }
     for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
-      qir_extract_from_expr_rec(owner_query, cte_scope,
-                                e->u.window.partition_by[i], scope, tr,
-                                touches);
+      AdbxStatus rc = qir_walk_expr_rec(owner_query, e->u.window.partition_by[i],
+                                        scope, fn, ctx);
+      if (rc != OK)
+        return rc;
     }
     for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
-      qir_extract_from_expr_rec(owner_query, cte_scope, e->u.window.order_by[i],
-                                scope, tr, touches);
+      AdbxStatus rc = qir_walk_expr_rec(owner_query, e->u.window.order_by[i],
+                                        scope, fn, ctx);
+      if (rc != OK)
+        return rc;
     }
-    break;
+    return OK;
 
   case QIR_EXPR_SUBQUERY:
-    // Subquery introduces a new scope for alias resolution and also should
-    // be treated as "nested" for Sensitive Mode rules.
-    if (e->u.subquery) {
-      qir_extract_from_query_rec(e->u.subquery, QIR_SCOPE_NESTED, tr, touches,
-                                 cte_scope);
-    }
-    break;
+    if (!e->u.subquery)
+      return OK;
+    return qir_walk_query_chain_rec(e->u.subquery, QIR_SCOPE_NESTED, fn, ctx);
 
   case QIR_EXPR_UNSUPPORTED:
   default:
-    tr->has_unsupported = true;
-    break;
+    return OK;
   }
 }
 
-/* Walk a query block, recording touches from:
- * - CTE bodies (always treated as nested scope)
- * - FROM subqueries (nested)
- * - JOIN rhs subqueries (nested)
- * - JOIN ON predicates (current query scope)
- * - SELECT list (current query scope)
- * - WHERE (current query scope) */
-static void qir_extract_from_query_rec(const QirQuery *q, QirScope scope,
-                                       QirTouchReport *tr, PtrVec *touches,
-                                       const QirQuery *cte_scope) {
-  if (!q || !tr)
-    return;
+/* Walks one query block plus its nested queries, but not its union_next
+ * siblings. The chain walk is handled separately so later set-op branches are
+ * visited exactly once. */
+static AdbxStatus qir_walk_one_query_rec(const QirQuery *q, QirScope scope,
+                                         QirTouchFn fn, void *ctx) {
+  if (!q || !fn)
+    return ERR;
 
-  // If backend has already flagged unsupported constructs, carry it through.
-  if (q->status == QIR_UNSUPPORTED)
-    tr->has_unsupported = true;
-
-  // Visible CTEs for this scope: use local CTEs if present, otherwise inherit.
-  const QirQuery *scope_cte = (q->nctes > 0) ? q : cte_scope;
-
-  // Recurse into CTE bodies (always nested relative to the parent query).
+  // CTE bodies are nested relative to the query block that defines them.
   for (uint32_t i = 0; i < q->nctes; i++) {
     const QirCte *cte = q->ctes ? q->ctes[i] : NULL;
     if (!cte || !cte->query)
       continue;
-    qir_extract_from_query_rec(cte->query, QIR_SCOPE_NESTED, tr, touches,
-                               scope_cte);
+    if (qir_walk_query_chain_rec(cte->query, QIR_SCOPE_NESTED, fn, ctx) != OK)
+      return ERR;
   }
 
-  // Recurse into FROM subquery (nested)
   if (q->from_root && q->from_root->kind == QIR_FROM_SUBQUERY &&
       q->from_root->u.subquery) {
-    qir_extract_from_query_rec(q->from_root->u.subquery, QIR_SCOPE_NESTED, tr,
-                               touches, scope_cte);
+    if (qir_walk_query_chain_rec(q->from_root->u.subquery, QIR_SCOPE_NESTED, fn,
+                                 ctx) != OK) {
+      return ERR;
+    }
   }
 
-  // Recurse into JOIN RHS subqueries and JOIN ON expressions
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirJoin *j = q->joins ? q->joins[i] : NULL;
     if (!j)
       continue;
 
     if (j->rhs && j->rhs->kind == QIR_FROM_SUBQUERY && j->rhs->u.subquery) {
-      qir_extract_from_query_rec(j->rhs->u.subquery, QIR_SCOPE_NESTED, tr,
-                                 touches, scope_cte);
+      if (qir_walk_query_chain_rec(j->rhs->u.subquery, QIR_SCOPE_NESTED, fn,
+                                   ctx) != OK) {
+        return ERR;
+      }
     }
 
-    if (j->on) {
-      qir_extract_from_expr_rec(q, scope_cte, j->on, scope, tr, touches);
-    }
+    if (j->on && qir_walk_expr_rec(q, j->on, scope, fn, ctx) != OK)
+      return ERR;
   }
 
-  // SELECT list touches (expressions can reference columns).
   for (uint32_t i = 0; i < q->nselect; i++) {
     const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
-    if (!si)
+    if (!si || !si->value)
       continue;
-
-    if (!si->value) {
-      tr->has_unsupported = true;
-      continue;
-    }
-    qir_extract_from_expr_rec(q, scope_cte, si->value, scope, tr, touches);
+    if (qir_walk_expr_rec(q, si->value, scope, fn, ctx) != OK)
+      return ERR;
   }
 
-  // WHERE touches
-  if (q->where) {
-    qir_extract_from_expr_rec(q, scope_cte, q->where, scope, tr, touches);
-  }
+  if (q->where && qir_walk_expr_rec(q, q->where, scope, fn, ctx) != OK)
+    return ERR;
 
-  // GROUP BY touches
   for (uint32_t i = 0; i < q->n_group_by; i++) {
     QirExpr *e = q->group_by ? q->group_by[i] : NULL;
-    if (!e) {
-      tr->has_unsupported = true;
+    if (!e)
       continue;
-    }
-    qir_extract_from_expr_rec(q, scope_cte, e, scope, tr, touches);
+    if (qir_walk_expr_rec(q, e, scope, fn, ctx) != OK)
+      return ERR;
   }
 
-  // HAVING touches
-  if (q->having) {
-    qir_extract_from_expr_rec(q, scope_cte, q->having, scope, tr, touches);
-  }
+  if (q->having && qir_walk_expr_rec(q, q->having, scope, fn, ctx) != OK)
+    return ERR;
 
-  // ORDER BY touches
   for (uint32_t i = 0; i < q->n_order_by; i++) {
     QirExpr *e = q->order_by ? q->order_by[i] : NULL;
-    if (!e) {
-      tr->has_unsupported = true;
+    if (!e)
       continue;
-    }
-    qir_extract_from_expr_rec(q, scope_cte, e, scope, tr, touches);
+    if (qir_walk_expr_rec(q, e, scope, fn, ctx) != OK)
+      return ERR;
   }
 
-  // Walk union_next chain. Each branch is a sibling query that shares the
-  // father's CTE scope. We keep the same scope (MAIN / NESTED) since the
-  // union branches are at the same level as the father.
-  for (const QirQuery *branch = q->union_next; branch;
-       branch = branch->union_next) {
-    qir_extract_from_query_rec(branch, scope, tr, touches, scope_cte);
-  }
+  return OK;
 }
 
-/* Entry point to produce a QirTouchReport from a QueryIR.
- *
- * The function:
- * - Collects all column references reachable in the IR (main + nested queries).
- * - Classifies each touch as BASE/DERIVED/UNKNOWN, based on qualifier
- * resolution against the owning query block's aliases.
- * - Sets has_unknown_touches when a qualifier cannot be resolved.
- * - Sets has_unsupported when IR contains UNSUPPORTED nodes or allocation
- * fails. */
-QirTouchReport *qir_extract_touches(const QirQuery *q) {
-  if (!q)
-    return NULL;
+/* Walks one query plus its union_next chain. Sibling set-op branches stay in
+ * the same MAIN/NESTED scope as the lead query. */
+static AdbxStatus qir_walk_query_chain_rec(const QirQuery *q, QirScope scope,
+                                           QirTouchFn fn, void *ctx) {
+  if (!q || !fn)
+    return ERR;
 
-  QirTouchReport *tr = (QirTouchReport *)xcalloc(1, sizeof(*tr));
-  if (!tr)
-    return NULL;
-  if (arena_init(&tr->arena, NULL, NULL) != OK) {
-    free(tr);
-    return NULL;
+  for (const QirQuery *cur = q; cur; cur = cur->union_next) {
+    if (qir_walk_one_query_rec(cur, scope, fn, ctx) != OK)
+      return ERR;
   }
+  return OK;
+}
 
-  PtrVec touches = {0};
-
-  // Start at top-level query in MAIN scope.
-  qir_extract_from_query_rec(q, QIR_SCOPE_MAIN, tr, &touches, q);
-
-  // Flatten the pointer list into a contiguous array for cache-friendly
-  // traversal by validators. The array is arena-owned.
-  if (tr->ntouches > 0) {
-    tr->touches = (QirTouch **)ptrvec_flatten(&touches, &tr->arena);
-    if (!tr->touches)
-      tr->has_unsupported = true;
-  }
-  ptrvec_clean(&touches);
-
-  // If we saw unknown touches or unsupported constructs, caller may reject.
-  // Treat any non-OK status as unsupported for validation gating.
-  if (q->status != QIR_OK)
-    tr->has_unsupported = true;
-
-  return tr;
+AdbxStatus qir_walk_touches(const QirQuery *q, QirTouchFn fn, void *ctx) {
+  if (!q || !fn)
+    return ERR;
+  return qir_walk_query_chain_rec(q, QIR_SCOPE_MAIN, fn, ctx);
 }
 
 /* Renders a FROM item into 'out' and returns out->data (or "" on error).
@@ -528,33 +823,30 @@ const char *qir_from_to_str(const QirFromItem *fi, StrBuf *out) {
 
   switch (fi->kind) {
   case QIR_FROM_BASE_REL: {
-    const char *schema = fi->u.rel.schema.name;
-    const char *table = fi->u.rel.name.name;
-    if (schema && schema[0] != '\0') {
-      (void)sb_append_bytes(out, schema, strlen(schema));
-      (void)sb_append_bytes(out, ".", 1);
-    }
-    if (table && table[0] != '\0') {
-      (void)sb_append_bytes(out, table, strlen(table));
+    if (fi->binding_cte && fi->binding_cte->name.name &&
+        fi->binding_cte->name.name[0] != '\0') {
+      (void)sb_append_bytes(out, "cte(", 4);
+      (void)sb_append_bytes(out, fi->binding_cte->name.name,
+                            strlen(fi->binding_cte->name.name));
+      (void)sb_append_bytes(out, ")", 1);
     } else {
-      (void)sb_append_bytes(out, "<unknown>", 9);
+      const char *schema = fi->u.rel.schema.name;
+      const char *table = fi->u.rel.name.name;
+      if (schema && schema[0] != '\0') {
+        (void)sb_append_bytes(out, schema, strlen(schema));
+        (void)sb_append_bytes(out, ".", 1);
+      }
+      if (table && table[0] != '\0') {
+        (void)sb_append_bytes(out, table, strlen(table));
+      } else {
+        (void)sb_append_bytes(out, "<unknown>", 9);
+      }
     }
     break;
   }
   case QIR_FROM_SUBQUERY:
     (void)sb_append_bytes(out, "subquery", 8);
     break;
-  case QIR_FROM_CTE_REF: {
-    (void)sb_append_bytes(out, "cte(", 4);
-    if (fi->u.cte_name.name && fi->u.cte_name.name[0] != '\0') {
-      (void)sb_append_bytes(out, fi->u.cte_name.name,
-                            strlen(fi->u.cte_name.name));
-    } else {
-      (void)sb_append_bytes(out, "<unknown>", 9);
-    }
-    (void)sb_append_bytes(out, ")", 1);
-    break;
-  }
   case QIR_FROM_VALUES:
     (void)sb_append_bytes(out, "values", 6);
     break;
