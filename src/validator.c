@@ -528,8 +528,7 @@ static AdbxStatus validator_visit_touch(QirScope scope,
   if (kind == QIR_TOUCH_UNKNOWN) {
     const char *desc = qir_colref_to_str(colref, &ctx->scratch);
     set_err(ctx, VERR_NO_COLUMN_ALIAS,
-            "Unknown column reference '%s'. Every table must have an alias, "
-            "and every column must be qualified as alias.column.",
+            "Unknown or unresolved column reference '%s'.",
             desc);
     return ERR;
   }
@@ -1817,8 +1816,7 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
         set_err(&ctx, VERR_NO_COLUMN_ALIAS, "%s",
                 bind_err.msg[0] != '\0'
                     ? bind_err.msg
-                    : "Every table must have an alias, and every column must "
-                      "be qualified as alias.column.");
+                    : "Unable to resolve one or more column references.");
       } else if (bind_err.code == QIR_BINDERR_UNSUPPORTED) {
         set_err(&ctx, VERR_UNSUPPORTED_QUERY, "%s",
                 bind_err.msg[0] != '\0' ? bind_err.msg

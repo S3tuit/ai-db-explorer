@@ -624,7 +624,7 @@ static void test_validator_from_notes(void) {
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.fiscal_code AS fc, COUNT(*) FROM users u WHERE "
                   "u.status = true GROUP BY fc LIMIT 10;",
-                  0, VERR_NO_COLUMN_ALIAS);
+                  0, VERR_SENSITIVE_LOC);
   ASSERT_VALIDATE(db, cp, policy,
                   "SELECT u.id FROM users u WHERE $1 = $2 LIMIT 10;", 0,
                   VERR_PARAM_NON_SENSITIVE);
@@ -640,7 +640,7 @@ static void test_validator_from_notes(void) {
       db, cp, policy,
       "SELECT u.status, MAX(u.fiscal_code) AS m FROM users u GROUP BY u.status "
       "HAVING m IS NOT NULL LIMIT 10;",
-      0, VERR_NO_COLUMN_ALIAS);
+      0, VERR_SENSITIVE_SELECT_EXPR);
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy,
       "SELECT row_number() OVER (ORDER BY u.fiscal_code) AS rn FROM users u "

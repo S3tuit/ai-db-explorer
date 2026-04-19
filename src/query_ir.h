@@ -59,9 +59,9 @@ typedef struct QirCaseExpr QirCaseExpr;
 typedef struct QirFromItem QirFromItem;
 typedef struct QirCte QirCte;
 
-// alias.column
+// qualifier.column or bare column
 typedef struct QirColRef {
-  QirIdent qualifier;              // table alias
+  QirIdent qualifier;              // table alias, or "" for bare column
   QirIdent column;                 // column name
   const QirFromItem *binding_from; // bound visible range item
   uint32_t correlation_depth;      // 0=local, 1+=outer scope
@@ -84,7 +84,7 @@ typedef struct QirTypeRef {
 // ----------------------------
 
 typedef enum QirExprKind {
-  QIR_EXPR_COLREF = 1, // alias.column
+  QIR_EXPR_COLREF = 1, // qualifier.column or bare column
   QIR_EXPR_PARAM,      // $n
   QIR_EXPR_LITERAL,    // backend may produce; validator may reject depending on
                        // policy
@@ -214,8 +214,9 @@ typedef enum QirFromKind {
 struct QirFromItem {
   QirFromKind kind;
 
-  // Policy: every range item must have an alias; references must use that
-  // alias.
+  // Policy: every range item must have an alias; qualified references should
+  // use that alias. Binder may also allow bare columns in the conservative
+  // single-visible-range case.
   QirIdent alias;
 
   union {
@@ -433,11 +434,5 @@ const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out);
  * Error semantics: no return value; on invalid input it is a no-op. */
 void qir_set_status(QirQuery *q, Arena *arena, QirStatus status,
                     const char *reason);
-
-/* Resolves ORDER BY alias references to SELECT item expressions.
- * Ownership: returned pointer is owned by the QueryIR arena.
- * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
- * Returns the resolved expression or the original expression if no match. */
-QirExpr *qir_resolve_order_alias(QirQuery *q, Arena *arena, QirExpr *expr);
 
 #endif // QUERY_IR_H

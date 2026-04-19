@@ -83,45 +83,12 @@ static AdbxTriStatus qir_ident_eq(const QirIdent *a, const QirIdent *b) {
   return strcmp(a->name, b->name) == 0 ? YES : NO;
 }
 
-/* Resolves ORDER BY alias references to SELECT item expressions.
- * Ownership: returned pointer is owned by the QueryIR arena.
- * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
- * Returns the resolved expression or the original expression if no match. */
-QirExpr *qir_resolve_order_alias(QirQuery *q, Arena *arena, QirExpr *expr) {
-  if (!q || !expr || expr->kind != QIR_EXPR_COLREF)
-    return expr;
-  if (!expr->u.colref.qualifier.name ||
-      expr->u.colref.qualifier.name[0] != '\0') {
-    return expr;
-  }
-
-  const char *name = expr->u.colref.column.name;
-  if (!name || name[0] == '\0')
-    return expr;
-
-  QirExpr *resolved = NULL;
-  for (uint32_t i = 0; i < q->nselect; i++) {
-    QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
-    if (!si || !si->out_alias.name)
-      continue;
-    if (strcmp(si->out_alias.name, name) == 0) {
-      if (resolved) {
-        qir_set_status(q, arena, QIR_UNSUPPORTED, "ambiguous ORDER BY alias");
-        return expr;
-      }
-      resolved = si->value;
-    }
-  }
-  return resolved ? resolved : expr;
-}
-
-/* Stack of visible range aliases. The local frame exposes 'from_root' plus only
+/* Stack of visible range aliases. The local '*query' exposes 'from_root' plus
  * the join RHS items in [0, njoins_visible). We need the prefix because each
  * JOIN ... ON may reference only the left chain plus the current RHS; later
  * joins are not visible there. */
 typedef struct QirRangeFrame {
   const QirQuery *query;
-  bool has_from_root;
   uint32_t njoins_visible;
   const struct QirRangeFrame *outer;
 } QirRangeFrame;
@@ -133,6 +100,11 @@ typedef struct QirCteFrame {
   uint32_t nvisible;
   const struct QirCteFrame *outer; // pointer to outer scope
 } QirCteFrame;
+
+typedef enum QirBindExprMode {
+  QIR_BIND_EXPR_NORMAL = 0,
+  QIR_BIND_EXPR_ALLOW_OUTPUT_ALIAS,
+} QirBindExprMode;
 
 static AdbxStatus qir_bind_query_rec(QirQuery *q,
                                      const QirRangeFrame *outer_ranges,
@@ -184,8 +156,7 @@ static AdbxTriStatus qir_find_from_in_frame(const QirRangeFrame *fr,
 
   // Range-item visibility is local to one query block. Correlated lookup is
   // handled separately by qir_bind_colref() walking the outer frame chain.
-  if (fr->has_from_root &&
-      qir_from_item_matches_visible_name(q->from_root, name) == YES)
+  if (qir_from_item_matches_visible_name(q->from_root, name) == YES)
     match = q->from_root;
 
   for (uint32_t i = 0; i < njoins_visible; i++) {
@@ -265,8 +236,19 @@ static AdbxTriStatus qir_bind_colref(const QirRangeFrame *range_env,
   cr->correlation_depth = 0;
 
   if (!cr->qualifier.name || cr->qualifier.name[0] == '\0') {
+    // Conservative support for bare columns: they are allowed only when the
+    // current visible range set contains exactly one local item (from_root)
+    // and no correlated outer range scopes are visible. This avoids guessing
+    // across joins or nested scopes without schema-aware column lookup.
+    if (range_env->outer == NULL && range_env->njoins_visible == 0 &&
+        range_env->query && range_env->query->from_root) {
+      cr->binding_from = range_env->query->from_root;
+      cr->correlation_depth = 0;
+      return YES;
+    }
+
     ADBX_ERR_SETF(out_err, QIR_BINDERR_UNRESOLVED_COLREF,
-                  "Unqualified column reference '%s' cannot be bound.",
+                  "Unable to bind bare column reference '%s' in this scope.",
                   qir_ident_cstr(&cr->column));
     return NO;
   }
@@ -276,8 +258,7 @@ static AdbxTriStatus qir_bind_colref(const QirRangeFrame *range_env,
   uint32_t depth = 0;
   for (const QirRangeFrame *fr = range_env; fr; fr = fr->outer, depth++) {
     const QirFromItem *fi = NULL;
-    AdbxTriStatus rc =
-        qir_find_from_in_frame(fr, &cr->qualifier, &fi, out_err);
+    AdbxTriStatus rc = qir_find_from_in_frame(fr, &cr->qualifier, &fi, out_err);
     if (rc != NO) {
       if (rc == YES) {
         cr->binding_from = fi;
@@ -341,89 +322,155 @@ static AdbxStatus qir_bind_from_item(QirFromItem *fi,
   }
 }
 
-/* Traverses all the expressions of 'e' and populates their binding metadata.
- * Returns OK if it can bind all the expression, else ERR. */
-static AdbxStatus qir_bind_expr_rec(QirExpr *e, const QirRangeFrame *range_env,
+/* Resolves one bare column reference against the current query block's SELECT
+ * aliases. Output aliases are local to one query block, so this doesn't search
+ * outer range frames. Returns YES and writes one borrowed expression pointer on
+ * unique match, NO when there is no alias match, and ERR on ambiguous alias or
+ * invalid input. */
+static AdbxTriStatus qir_resolve_output_alias(const QirRangeFrame *range_env,
+                                              const QirColRef *cr,
+                                              QirExpr **resolved_expr,
+                                              QirBindErr *out_err) {
+  if (resolved_expr)
+    *resolved_expr = NULL;
+  if (!range_env || !range_env->query || !cr)
+    return ERR;
+  if (cr->qualifier.name && cr->qualifier.name[0] != '\0')
+    return NO;
+
+  const char *name = cr->column.name;
+  if (!name || name[0] == '\0')
+    return NO;
+
+  QirExpr *match = NULL;
+  for (uint32_t i = 0; i < range_env->query->nselect; i++) {
+    QirSelectItem *si = range_env->query->select_items
+                            ? range_env->query->select_items[i]
+                            : NULL;
+    if (!si || !si->out_alias.name || !si->value)
+      continue;
+    if (strcmp(si->out_alias.name, name) != 0)
+      continue;
+    if (match) {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_AMBIGUOUS_COLREF,
+                    "Ambiguous output alias '%s'.", name);
+      return ERR;
+    }
+    match = si->value;
+  }
+
+  if (!match)
+    return NO;
+  if (resolved_expr)
+    *resolved_expr = match;
+  return YES;
+}
+
+/* Traverses the expression tree rooted at '*slot' and populates binder
+ * metadata. In GROUP BY/HAVING/ORDER BY mode, bare column references are first
+ * resolved against local SELECT aliases; if an alias matches, the caller-owned
+ * slot is rewritten to point at that SELECT expression and then rebound in
+ * normal mode. Returns OK on success, else ERR and writes 'out_err'. */
+static AdbxStatus qir_bind_expr_rec(QirExpr **slot,
+                                    const QirRangeFrame *range_env,
                                     const QirCteFrame *cte_env,
-                                    QirBindErr *out_err) {
-  if (!e)
+                                    QirBindExprMode mode, QirBindErr *out_err) {
+  QirExpr *e = slot ? *slot : NULL;
+  if (!range_env)
+    return ERR;
+  if (!e | !slot)
     return OK;
 
   switch (e->kind) {
   case QIR_EXPR_COLREF:
+    if (mode == QIR_BIND_EXPR_ALLOW_OUTPUT_ALIAS) {
+      QirExpr *resolved = NULL;
+      AdbxTriStatus rc =
+          qir_resolve_output_alias(range_env, &e->u.colref, &resolved, out_err);
+      if (rc == YES) {
+        *slot = resolved;
+        return qir_bind_expr_rec(slot, range_env, cte_env, QIR_BIND_EXPR_NORMAL,
+                                 out_err);
+      }
+      if (rc == ERR)
+        return ERR;
+    }
     return qir_bind_colref(range_env, &e->u.colref, out_err) == YES ? OK : ERR;
   case QIR_EXPR_PARAM:
   case QIR_EXPR_LITERAL:
     return OK;
   case QIR_EXPR_FUNCALL:
     for (uint32_t i = 0; i < e->u.funcall.nargs; i++) {
-      AdbxStatus rc =
-          qir_bind_expr_rec(e->u.funcall.args[i], range_env, cte_env, out_err);
+      AdbxStatus rc = qir_bind_expr_rec(&e->u.funcall.args[i], range_env,
+                                        cte_env, mode, out_err);
       if (rc != OK)
         return rc;
     }
     return OK;
   case QIR_EXPR_CAST:
-    return qir_bind_expr_rec(e->u.cast.expr, range_env, cte_env, out_err);
+    return qir_bind_expr_rec(&e->u.cast.expr, range_env, cte_env, mode,
+                             out_err);
   case QIR_EXPR_OP:
     if (e->u.op.lhs) {
       AdbxStatus rc =
-          qir_bind_expr_rec(e->u.op.lhs, range_env, cte_env, out_err);
+          qir_bind_expr_rec(&e->u.op.lhs, range_env, cte_env, mode, out_err);
       if (rc != OK)
         return rc;
     }
     for (uint32_t i = 0; i < e->u.op.nargs; i++) {
-      AdbxStatus rc =
-          qir_bind_expr_rec(e->u.op.args[i], range_env, cte_env, out_err);
+      AdbxStatus rc = qir_bind_expr_rec(&e->u.op.args[i], range_env, cte_env,
+                                        mode, out_err);
       if (rc != OK)
         return rc;
     }
     return OK;
   case QIR_EXPR_AND:
   case QIR_EXPR_OR: {
-    AdbxStatus rc = qir_bind_expr_rec(e->u.bin.l, range_env, cte_env, out_err);
+    AdbxStatus rc =
+        qir_bind_expr_rec(&e->u.bin.l, range_env, cte_env, mode, out_err);
     if (rc != OK)
       return rc;
-    return qir_bind_expr_rec(e->u.bin.r, range_env, cte_env, out_err);
+    return qir_bind_expr_rec(&e->u.bin.r, range_env, cte_env, mode, out_err);
   }
   case QIR_EXPR_NOT:
-    return qir_bind_expr_rec(e->u.bin.l, range_env, cte_env, out_err);
+    return qir_bind_expr_rec(&e->u.bin.l, range_env, cte_env, mode, out_err);
   case QIR_EXPR_CASE:
     if (e->u.case_.arg) {
       AdbxStatus rc =
-          qir_bind_expr_rec(e->u.case_.arg, range_env, cte_env, out_err);
+          qir_bind_expr_rec(&e->u.case_.arg, range_env, cte_env, mode, out_err);
       if (rc != OK)
         return rc;
     }
     for (uint32_t i = 0; i < e->u.case_.nwhens; i++) {
-      const QirCaseWhen *w = e->u.case_.whens ? e->u.case_.whens[i] : NULL;
+      QirCaseWhen *w = e->u.case_.whens ? e->u.case_.whens[i] : NULL;
       if (!w)
         continue;
       AdbxStatus rc =
-          qir_bind_expr_rec(w->when_expr, range_env, cte_env, out_err);
+          qir_bind_expr_rec(&w->when_expr, range_env, cte_env, mode, out_err);
       if (rc != OK)
         return rc;
-      rc = qir_bind_expr_rec(w->then_expr, range_env, cte_env, out_err);
+      rc = qir_bind_expr_rec(&w->then_expr, range_env, cte_env, mode, out_err);
       if (rc != OK)
         return rc;
     }
-    return qir_bind_expr_rec(e->u.case_.else_expr, range_env, cte_env, out_err);
+    return qir_bind_expr_rec(&e->u.case_.else_expr, range_env, cte_env, mode,
+                             out_err);
   case QIR_EXPR_WINDOWFUNC:
     for (uint32_t i = 0; i < e->u.window.func.nargs; i++) {
-      AdbxStatus rc = qir_bind_expr_rec(e->u.window.func.args[i], range_env,
-                                        cte_env, out_err);
+      AdbxStatus rc = qir_bind_expr_rec(&e->u.window.func.args[i], range_env,
+                                        cte_env, mode, out_err);
       if (rc != OK)
         return rc;
     }
     for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
-      AdbxStatus rc = qir_bind_expr_rec(e->u.window.partition_by[i], range_env,
-                                        cte_env, out_err);
+      AdbxStatus rc = qir_bind_expr_rec(&e->u.window.partition_by[i], range_env,
+                                        cte_env, mode, out_err);
       if (rc != OK)
         return rc;
     }
     for (uint32_t i = 0; i < e->u.window.n_order_by; i++) {
-      AdbxStatus rc = qir_bind_expr_rec(e->u.window.order_by[i], range_env,
-                                        cte_env, out_err);
+      AdbxStatus rc = qir_bind_expr_rec(&e->u.window.order_by[i], range_env,
+                                        cte_env, mode, out_err);
       if (rc != OK)
         return rc;
     }
@@ -479,13 +526,11 @@ static AdbxStatus qir_bind_query_rec(QirQuery *q,
   QirCteFrame cte_all = {.query = q, .nvisible = q->nctes, .outer = outer_ctes};
   QirRangeFrame range_all = {
       .query = q,
-      .has_from_root = q->from_root != NULL,
       .njoins_visible = q->njoins,
       .outer = outer_ranges,
   };
   QirRangeFrame range_join_on = {
       .query = q,
-      .has_from_root = q->from_root != NULL,
       .njoins_visible = 0,
       .outer = outer_ranges,
   };
@@ -523,8 +568,8 @@ static AdbxStatus qir_bind_query_rec(QirQuery *q,
     }
     if (j->on) {
       range_join_on.njoins_visible = i + 1;
-      AdbxStatus rc =
-          qir_bind_expr_rec(j->on, &range_join_on, &cte_all, out_err);
+      AdbxStatus rc = qir_bind_expr_rec(&j->on, &range_join_on, &cte_all,
+                                        QIR_BIND_EXPR_NORMAL, out_err);
       if (rc != OK)
         return rc;
     }
@@ -534,34 +579,39 @@ static AdbxStatus qir_bind_query_rec(QirQuery *q,
     QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
     if (!si || !si->value)
       continue;
-    AdbxStatus rc =
-        qir_bind_expr_rec(si->value, &range_all, &cte_all, out_err);
+    AdbxStatus rc = qir_bind_expr_rec(&si->value, &range_all, &cte_all,
+                                      QIR_BIND_EXPR_NORMAL, out_err);
     if (rc != OK)
       return rc;
   }
 
   if (q->where) {
-    AdbxStatus rc = qir_bind_expr_rec(q->where, &range_all, &cte_all, out_err);
+    AdbxStatus rc = qir_bind_expr_rec(&q->where, &range_all, &cte_all,
+                                      QIR_BIND_EXPR_NORMAL, out_err);
     if (rc != OK)
       return rc;
   }
 
   for (uint32_t i = 0; i < q->n_group_by; i++) {
-    AdbxStatus rc = qir_bind_expr_rec(q->group_by ? q->group_by[i] : NULL,
-                                      &range_all, &cte_all, out_err);
+    AdbxStatus rc =
+        qir_bind_expr_rec(q->group_by ? &q->group_by[i] : NULL, &range_all,
+                          &cte_all, QIR_BIND_EXPR_ALLOW_OUTPUT_ALIAS, out_err);
     if (rc != OK)
       return rc;
   }
 
   if (q->having) {
-    AdbxStatus rc = qir_bind_expr_rec(q->having, &range_all, &cte_all, out_err);
+    AdbxStatus rc =
+        qir_bind_expr_rec(&q->having, &range_all, &cte_all,
+                          QIR_BIND_EXPR_ALLOW_OUTPUT_ALIAS, out_err);
     if (rc != OK)
       return rc;
   }
 
   for (uint32_t i = 0; i < q->n_order_by; i++) {
-    AdbxStatus rc = qir_bind_expr_rec(q->order_by ? q->order_by[i] : NULL,
-                                      &range_all, &cte_all, out_err);
+    AdbxStatus rc =
+        qir_bind_expr_rec(q->order_by ? &q->order_by[i] : NULL, &range_all,
+                          &cte_all, QIR_BIND_EXPR_ALLOW_OUTPUT_ALIAS, out_err);
     if (rc != OK)
       return rc;
   }
@@ -690,8 +740,8 @@ static AdbxStatus qir_walk_expr_rec(const QirQuery *owner_query,
         return rc;
     }
     for (uint32_t i = 0; i < e->u.window.n_partition_by; i++) {
-      AdbxStatus rc = qir_walk_expr_rec(owner_query, e->u.window.partition_by[i],
-                                        scope, fn, ctx);
+      AdbxStatus rc = qir_walk_expr_rec(
+          owner_query, e->u.window.partition_by[i], scope, fn, ctx);
       if (rc != OK)
         return rc;
     }
@@ -879,9 +929,6 @@ const char *qir_colref_to_str(const QirColRef *cr, StrBuf *out) {
 
   if (cr->qualifier.name && cr->qualifier.name[0] != '\0') {
     (void)sb_append_bytes(out, cr->qualifier.name, strlen(cr->qualifier.name));
-    (void)sb_append_bytes(out, ".", 1);
-  } else {
-    (void)sb_append_bytes(out, "<unknown>", 9);
     (void)sb_append_bytes(out, ".", 1);
   }
 

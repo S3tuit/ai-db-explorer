@@ -290,9 +290,10 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, Arena *a, QirQuery *q) {
   uint32_t nparts = 0;
   int saw_star = 0;
 
-  // The code caps at 2 segments (it allows up to 2 for alias.column). If more
-  // than 2 segments arrive (like schema.table.column), it marks the query as
-  // unsupported and discards extra segments to avoid undefined behavior.
+  // The code caps at 2 segments (it allows bare column or qualifier.column).
+  // If more than 2 segments arrive (like schema.table.column), it marks the
+  // query as unsupported and discards extra segments to avoid undefined
+  // behavior.
   JsonGetter elem = {0};
   while ((rc = jsget_array_objects_next(jg, &it, &elem)) == YES) {
     JsonGetter sub = {0};
@@ -2339,7 +2340,6 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
         rc = ERR;
         break;
       }
-      expr = qir_resolve_order_alias(q, a, expr);
 
       if (ptrvec_push(&orders, expr) != OK) {
         rc = ERR;

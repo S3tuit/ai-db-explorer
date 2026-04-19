@@ -386,7 +386,7 @@ static void test_sql_standard_order_by(void) {
   qir_handle_destroy(&h);
 }
 
-/* A6. ORDER BY resolves SELECT alias. */
+/* A6. ORDER BY alias stays syntactic until binder substitutes SELECT expr. */
 static void test_sql_standard_order_by_alias(void) {
   const char *sql = "WITH cte_people AS ("
                     "  SELECT p.name AS nm "
@@ -402,11 +402,57 @@ static void test_sql_standard_order_by_alias(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->n_order_by == 1);
-  ASSERT_COLREF(h.q->order_by[0], "p", "nm");
+  ASSERT_COLREF(h.q->order_by[0], "", "a_name");
 
   ASSERT_BIND_OK(&h);
+  ASSERT_COLREF(h.q->order_by[0], "p", "nm");
   ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "p", "nm");
   ASSERT_TOUCH(h.q, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "name");
+
+  qir_handle_destroy(&h);
+}
+
+/* A6b. Nested ORDER BY alias resolution must stay local to the subquery. */
+static void test_sql_standard_nested_order_by_alias_is_local(void) {
+  const char *sql = "SELECT p.name AS nm "
+                    "FROM private.people AS p "
+                    "WHERE p.id = ("
+                    "  SELECT o.user_id AS nm "
+                    "  FROM orders AS o "
+                    "  WHERE o.user_id = p.id "
+                    "  ORDER BY nm "
+                    "  LIMIT 1"
+                    ");";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nselect == 1);
+  ASSERT_IDENT_EQ(&h.q->select_items[0]->out_alias, "nm");
+  ASSERT_TRUE(h.q->where != NULL);
+  ASSERT_OP(h.q->where, QIR_OP_EQ, "=");
+  ASSERT_TRUE(h.q->where->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->kind == QIR_EXPR_OP);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.nargs == 1);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args[0] != NULL);
+  ASSERT_TRUE(h.q->where->u.op.args[0]->u.op.args[0]->kind ==
+              QIR_EXPR_SUBQUERY);
+
+  QirQuery *sq = h.q->where->u.op.args[0]->u.op.args[0]->u.subquery;
+  ASSERT_TRUE(sq != NULL);
+  ASSERT_TRUE(sq->nselect == 1);
+  ASSERT_IDENT_EQ(&sq->select_items[0]->out_alias, "nm");
+  ASSERT_TRUE(sq->n_order_by == 1);
+  ASSERT_COLREF(sq->order_by[0], "", "nm");
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_TRUE(sq->order_by[0] == sq->select_items[0]->value);
+  ASSERT_TRUE(sq->order_by[0] != h.q->select_items[0]->value);
+  ASSERT_COLREF(sq->order_by[0], "o", "user_id");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "name");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "o", "user_id");
 
   qir_handle_destroy(&h);
 }
@@ -1158,7 +1204,7 @@ static void test_sql_standard_update_rejected(void) {
   qir_handle_destroy(&h);
 }
 
-/* D6. ORDER BY with conflicting aliases. */
+/* D6. ORDER BY with conflicting aliases fails during binding. */
 static void test_sql_standard_order_by_alias_conflict(void) {
   const char *sql = "SELECT p.name AS nm, "
                     "       p.surname AS nm "
@@ -1169,12 +1215,16 @@ static void test_sql_standard_order_by_alias_conflict(void) {
   parse_sql_postgres(sql, &h);
 
   ASSERT_TRUE(h.q != NULL);
-  ASSERT_TRUE(h.q->status == QIR_UNSUPPORTED);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->n_order_by == 1);
+  ASSERT_COLREF(h.q->order_by[0], "", "nm");
+
+  ASSERT_BIND_FAILS(&h, QIR_BINDERR_AMBIGUOUS_COLREF);
 
   qir_handle_destroy(&h);
 }
 
-/* E1. Unqualified column reference. */
+/* E1. Bare column binds when exactly one local range item is visible. */
 static void test_sql_standard_unqualified_col(void) {
   const char *sql = "SELECT name AS name "
                     "FROM private.people AS p;";
@@ -1187,6 +1237,11 @@ static void test_sql_standard_unqualified_col(void) {
   ASSERT_TRUE(h.q->select_items[0]->value->kind == QIR_EXPR_COLREF);
   ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.colref.qualifier, "");
   ASSERT_IDENT_EQ(&h.q->select_items[0]->value->u.colref.column, "name");
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_COLREF_BINDING(&h.q->select_items[0]->value->u.colref, h.q->from_root,
+                        0);
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "", "name");
 
   qir_handle_destroy(&h);
 }
@@ -1363,7 +1418,34 @@ static void test_sql_standard_group_by_having(void) {
   qir_handle_destroy(&h);
 }
 
-/* E9. Window function with only PARTITION BY. */
+/* E9. GROUP BY can resolve SELECT aliases inside larger expressions. */
+static void test_sql_standard_group_by_alias_in_func(void) {
+  const char *sql = "SELECT lower(u.fiscal_code) AS fc "
+                    "FROM users u "
+                    "GROUP BY upper(fc);";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->n_group_by == 1);
+  ASSERT_TRUE(h.q->group_by[0] != NULL);
+  ASSERT_TRUE(h.q->group_by[0]->kind == QIR_EXPR_FUNCALL);
+  ASSERT_IDENT_EQ(&h.q->group_by[0]->u.funcall.name, "upper");
+  ASSERT_TRUE(h.q->group_by[0]->u.funcall.nargs == 1);
+  ASSERT_COLREF(h.q->group_by[0]->u.funcall.args[0], "", "fc");
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_TRUE(h.q->group_by[0]->u.funcall.args[0] == h.q->select_items[0]->value);
+  ASSERT_TRUE(h.q->group_by[0]->u.funcall.args[0]->kind == QIR_EXPR_FUNCALL);
+  ASSERT_IDENT_EQ(&h.q->group_by[0]->u.funcall.args[0]->u.funcall.name, "lower");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "u", "fiscal_code");
+
+  qir_handle_destroy(&h);
+}
+
+/* E10. Window function with only PARTITION BY. */
 static void test_sql_standard_window_partition_only(void) {
   const char *sql = "SELECT row_number() OVER (PARTITION BY p.region) AS rn "
                     "FROM private.people AS p;";
@@ -1383,7 +1465,7 @@ static void test_sql_standard_window_partition_only(void) {
   qir_handle_destroy(&h);
 }
 
-/* E10. Unqualified/unknown qualifier should be marked as UNKNOWN touch. */
+/* E11. Unresolved column references should fail during binding. */
 static void test_sql_standard_unknown_touch(void) {
   const char *sql = "SELECT p.name AS name "
                     "FROM private.people AS p "
@@ -1400,7 +1482,28 @@ static void test_sql_standard_unknown_touch(void) {
   qir_handle_destroy(&h);
 }
 
-/* E11. VALUES in FROM. */
+/* E12. Bare columns remain rejected in correlated nested scopes. */
+static void test_sql_standard_correlated_bare_col_rejected(void) {
+  const char *sql = "SELECT u.id "
+                    "FROM users u "
+                    "WHERE EXISTS ("
+                    "  SELECT 1 "
+                    "  FROM orders o "
+                    "  WHERE name = 'Goku'"
+                    ");";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_FAILS(&h, QIR_BINDERR_UNRESOLVED_COLREF);
+
+  qir_handle_destroy(&h);
+}
+
+/* E13. VALUES in FROM. */
 static void test_sql_standard_values_from_rejected(void) {
   const char *sql = "SELECT v.x AS x "
                     "FROM (VALUES (1), (2)) AS v(x) "
@@ -1741,6 +1844,7 @@ int main(void) {
   test_sql_standard_not();
   test_sql_standard_order_by();
   test_sql_standard_order_by_alias();
+  test_sql_standard_nested_order_by_alias_is_local();
   test_sql_standard_distinct();
   test_sql_standard_func_call();
   test_sql_standard_minmax_and_coalesce();
@@ -1782,7 +1886,9 @@ int main(void) {
   test_sql_standard_window();
   test_sql_standard_window_partition_only();
   test_sql_standard_group_by_having();
+  test_sql_standard_group_by_alias_in_func();
   test_sql_standard_unknown_touch();
+  test_sql_standard_correlated_bare_col_rejected();
   test_sql_standard_values_from_rejected();
   test_sql_standard_null_comparison();
   test_left_join_base_touches();
