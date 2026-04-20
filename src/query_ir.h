@@ -265,6 +265,8 @@ typedef struct QirSelectItem {
 
 struct QirCte {
   QirIdent name;
+  QirIdent *colnames; // optional WITH x(a,b,...) column list
+  uint32_t ncolnames;
   QirQuery *query;
 };
 
@@ -273,6 +275,7 @@ struct QirCte {
 // ----------------------------
 
 struct QirQuery {
+  Arena *arena; // owning arena used by the binder for safe IR rewrites
   QirStatus status;
   const char *status_reason; // arena-owned; NULL if unset. Indicates the
                              // reason why the status is not QIR_OK
@@ -280,7 +283,6 @@ struct QirQuery {
   QirStmtFlags stmt_flags;
 
   // Conservative feature flags (backend sets these).
-  bool has_star; // SELECT * or table.*
   bool has_distinct;
   bool has_offset;
 
@@ -387,6 +389,8 @@ typedef enum QirBindErrCode {
   QIR_BINDERR_NONE = 0,
   QIR_BINDERR_INPUT,
   QIR_BINDERR_UNSUPPORTED,
+  QIR_BINDERR_INVALID_CTE,
+  QIR_BINDERR_STAR,
   QIR_BINDERR_UNRESOLVED_COLREF,
   QIR_BINDERR_UNRESOLVED_CTE,
   QIR_BINDERR_AMBIGUOUS_COLREF,
@@ -399,9 +403,9 @@ typedef struct QirBindErr {
 } QirBindErr;
 
 /* Binds column references and FROM/JOIN base relations against visible query
- * scopes and CTE names. It annotates the IR in-place and performs no heap
- * allocations. Returns YES on success, NO on unresolved/ambiguous bindings,
- * and ERR on invalid input. */
+ * scopes and CTE names. It may also rewrite SELECT * / alias.* into explicit
+ * derived column references using the query arena. Returns YES on success, NO
+ * on unresolved/ambiguous/unsafe bindings, and ERR on invalid input. */
 AdbxTriStatus bind_query_ir(QirQuery *q, QirBindErr *out_err);
 
 /* Walks every column reference reachable from 'q' in stable depth-first order.

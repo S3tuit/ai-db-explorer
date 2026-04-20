@@ -28,6 +28,7 @@ AdbxStatus qir_handle_init(QirQueryHandle *h) {
   }
   memset(q, 0, sizeof(*q));
 
+  q->arena = &h->arena;
   q->status = QIR_OK;
   q->status_reason = NULL;
   q->kind = QIR_STMT_SELECT;
@@ -116,6 +117,261 @@ static const char *qir_ident_cstr(const QirIdent *id) {
   return (id && id->name && id->name[0] != '\0') ? id->name : "<unknown>";
 }
 
+/* Returns YES if 'cr' is the syntactic * / alias.* placeholder. */
+static AdbxTriStatus qir_colref_is_star(const QirColRef *cr) {
+  if (!cr || !cr->column.name)
+    return NO;
+  return strcmp(cr->column.name, "*") == 0 ? YES : NO;
+}
+
+/* Returns YES if 'e' is a direct star select placeholder. */
+static AdbxTriStatus qir_expr_is_star_colref(const QirExpr *e) {
+  if (!e || e->kind != QIR_EXPR_COLREF)
+    return NO;
+  return qir_colref_is_star(&e->u.colref);
+}
+
+/* Returns the visible SQL name of one range item in the current query block. */
+static const char *qir_from_item_visible_name(const QirFromItem *fi) {
+  if (!fi)
+    return NULL;
+  if (fi->alias.name && fi->alias.name[0] != '\0')
+    return fi->alias.name;
+  if (fi->kind == QIR_FROM_BASE_REL && fi->u.rel.name.name &&
+      fi->u.rel.name.name[0] != '\0') {
+    return fi->u.rel.name.name;
+  }
+  return NULL;
+}
+
+/* Returns the exposed output name of one SELECT item, or NULL when the binder
+ * cannot recover it safely. */
+static const char *qir_select_item_exposed_name(const QirSelectItem *si) {
+  if (!si || !si->value)
+    return NULL;
+  if (si->out_alias.name && si->out_alias.name[0] != '\0')
+    return si->out_alias.name;
+  if (si->value->kind != QIR_EXPR_COLREF ||
+      qir_colref_is_star(&si->value->u.colref) == YES) {
+    return NULL;
+  }
+  if (!si->value->u.colref.column.name ||
+      si->value->u.colref.column.name[0] == '\0') {
+    return NULL;
+  }
+  return si->value->u.colref.column.name;
+}
+
+/* Checks that all the 'ncols' identifiers in 'cols' are known. */
+static AdbxStatus qir_validate_named_columns(const QirIdent *cols,
+                                             uint32_t ncols,
+                                             const char *ctx_name,
+                                             QirBindErr *out_err) {
+  if (ncols == 0)
+    return OK;
+  if (!cols) {
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                  "Unable to expand SELECT * because %s has no output names.",
+                  ctx_name ? ctx_name : "the source");
+    return ERR;
+  }
+  for (uint32_t i = 0; i < ncols; i++) {
+    if (!cols[i].name || cols[i].name[0] == '\0') {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                    "Unable to expand SELECT * because %s output column %u has "
+                    "no name.",
+                    ctx_name ? ctx_name : "the source", i + 1);
+      return ERR;
+    }
+  }
+  return OK;
+}
+
+/* Checks that every projected column name of 'q' is known, else, returns ERR
+ * and modifies 'out_err'. */
+static AdbxStatus qir_validate_query_projection_names(const QirQuery *q,
+                                                      const char *ctx_name,
+                                                      QirBindErr *out_err) {
+  if (!q)
+    return ERR;
+  if (q->nselect == 0) {
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                  "Unable to expand SELECT * because %s has no projected "
+                  "columns.",
+                  ctx_name ? ctx_name : "the source");
+    return ERR;
+  }
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
+    if (!qir_select_item_exposed_name(si)) {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                    "Unable to expand SELECT * because %s output column %u has "
+                    "no name.",
+                    ctx_name ? ctx_name : "the source", i + 1);
+      return ERR;
+    }
+  }
+  return OK;
+}
+
+/* Validates the declared exposed shape of one CTE after its body has been
+ * fully bound. This is general query semantics, not star-specific validation:
+ * every later reference to the CTE should see a coherent exposed arity. */
+static AdbxStatus qir_validate_cte_shape(const QirCte *cte,
+                                         QirBindErr *out_err) {
+  if (!cte || !cte->query)
+    return ERR;
+  if (cte->ncolnames == 0)
+    return OK;
+  if (!cte->colnames) {
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_INVALID_CTE,
+                  "CTE '%s' declares output column names but none were parsed.",
+                  qir_ident_cstr(&cte->name));
+    return ERR;
+  }
+  if (cte->ncolnames != cte->query->nselect) {
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_INVALID_CTE,
+                  "CTE '%s' column list does not match its projection.",
+                  qir_ident_cstr(&cte->name));
+    return ERR;
+  }
+  for (uint32_t i = 0; i < cte->ncolnames; i++) {
+    if (!cte->colnames[i].name || cte->colnames[i].name[0] == '\0') {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_INVALID_CTE,
+                    "CTE '%s' output column %u has no name.",
+                    qir_ident_cstr(&cte->name), i + 1);
+      return ERR;
+    }
+  }
+  return OK;
+}
+
+/* Returns the exposed output count of 'fi' if it's an expandable range item,
+ * meaning we know the columns exposed by 'fi'. The numer of columns is
+ * returned via 'out_ncols' when this returns OK. */
+static AdbxStatus qir_expandable_from_item_ncols(const QirFromItem *fi,
+                                                 uint32_t *out_ncols,
+                                                 QirBindErr *out_err) {
+  if (out_ncols)
+    *out_ncols = 0;
+  if (!fi)
+    return ERR;
+
+  switch (fi->kind) {
+  case QIR_FROM_BASE_REL:
+    if (!fi->binding_cte || !fi->binding_cte->query) {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                    "Unable to expand SELECT * from base relation '%s'.",
+                    qir_ident_cstr(&fi->u.rel.name));
+      return ERR;
+    }
+    if (fi->binding_cte->ncolnames > 0) {
+      if (qir_validate_named_columns(
+              fi->binding_cte->colnames, fi->binding_cte->ncolnames,
+              qir_ident_cstr(&fi->binding_cte->name), out_err) != OK) {
+        return ERR;
+      }
+      if (out_ncols)
+        *out_ncols = fi->binding_cte->ncolnames;
+      return OK;
+    }
+    if (qir_validate_query_projection_names(
+            fi->binding_cte->query, qir_ident_cstr(&fi->binding_cte->name),
+            out_err) != OK) {
+      return ERR;
+    }
+    if (out_ncols)
+      *out_ncols = fi->binding_cte->query->nselect;
+    return OK;
+  case QIR_FROM_SUBQUERY:
+    if (!fi->u.subquery)
+      return ERR;
+    if (qir_validate_query_projection_names(fi->u.subquery, "the subquery",
+                                            out_err) != OK) {
+      return ERR;
+    }
+    if (out_ncols)
+      *out_ncols = fi->u.subquery->nselect;
+    return OK;
+  case QIR_FROM_VALUES:
+    if (fi->u.values.ncolnames == 0) {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                    "Unable to expand SELECT * because the VALUES item has no "
+                    "column names.");
+      return ERR;
+    }
+    if (qir_validate_named_columns(fi->u.values.colnames,
+                                   fi->u.values.ncolnames, "the VALUES item",
+                                   out_err) != OK) {
+      return ERR;
+    }
+    if (out_ncols)
+      *out_ncols = fi->u.values.ncolnames;
+    return OK;
+  case QIR_FROM_UNSUPPORTED:
+  default:
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                  "Unable to expand SELECT * from an unsupported range item.");
+    return ERR;
+  }
+}
+
+/* Returns the exposed output name at 'idx' from 'fi'. 'fi' should be an
+ * already-validated source, else this returns NULL.
+ */
+static const char *qir_expandable_from_item_colname_at(const QirFromItem *fi,
+                                                       uint32_t idx) {
+  if (!fi)
+    return NULL;
+  switch (fi->kind) {
+  case QIR_FROM_BASE_REL:
+    if (!fi->binding_cte)
+      return NULL;
+    if (fi->binding_cte->ncolnames > 0) {
+      return (fi->binding_cte->colnames && idx < fi->binding_cte->ncolnames)
+                 ? fi->binding_cte->colnames[idx].name
+                 : NULL;
+    }
+    if (!fi->binding_cte->query || !fi->binding_cte->query->select_items ||
+        idx >= fi->binding_cte->query->nselect) {
+      return NULL;
+    }
+    return qir_select_item_exposed_name(
+        fi->binding_cte->query->select_items[idx]);
+  case QIR_FROM_SUBQUERY:
+    if (!fi->u.subquery || !fi->u.subquery->select_items ||
+        idx >= fi->u.subquery->nselect) {
+      return NULL;
+    }
+    return qir_select_item_exposed_name(fi->u.subquery->select_items[idx]);
+  case QIR_FROM_VALUES:
+    return (fi->u.values.colnames && idx < fi->u.values.ncolnames)
+               ? fi->u.values.colnames[idx].name
+               : NULL;
+  case QIR_FROM_UNSUPPORTED:
+  default:
+    return NULL;
+  }
+}
+
+/* Builds one synthetic "qual.col AS col" select item during star expansion. */
+static QirSelectItem *
+qir_new_expanded_select_item(Arena *arena, const char *qual, const char *col) {
+  if (!arena || !qual || qual[0] == '\0' || !col || col[0] == '\0')
+    return NULL;
+  QirSelectItem *si =
+      (QirSelectItem *)arena_calloc(arena, (uint32_t)sizeof(*si));
+  QirExpr *e = (QirExpr *)arena_calloc(arena, (uint32_t)sizeof(*e));
+  if (!si || !e)
+    return NULL;
+  e->kind = QIR_EXPR_COLREF;
+  e->u.colref.qualifier.name = qual;
+  e->u.colref.column.name = col;
+  si->value = e;
+  si->out_alias.name = col;
+  return si;
+}
+
 /* Returns YES/NO if 'name' references the table at 'fi'. */
 static AdbxTriStatus qir_from_item_matches_visible_name(const QirFromItem *fi,
                                                         const QirIdent *name) {
@@ -167,7 +423,7 @@ static AdbxTriStatus qir_find_from_in_frame(const QirRangeFrame *fr,
     if (match) {
       ADBX_ERR_SETF(out_err, QIR_BINDERR_AMBIGUOUS_COLREF,
                     "Ambiguous column qualifier '%s'.", qir_ident_cstr(name));
-      return NO;
+      return ERR;
     }
     match = fi;
   }
@@ -210,7 +466,7 @@ static AdbxTriStatus qir_find_cte_in_frame(const QirCteFrame *cte_env,
       if (match) {
         ADBX_ERR_SETF(out_err, QIR_BINDERR_AMBIGUOUS_CTE,
                       "Ambiguous CTE reference '%s'.", qir_ident_cstr(name));
-        return NO;
+        return ERR;
       }
       match = cte;
     }
@@ -322,6 +578,170 @@ static AdbxStatus qir_bind_from_item(QirFromItem *fi,
   }
 }
 
+/* Appends the explicit columns exposed by 'fi' to 'dst_items' starting at
+ * 'dst_idx' during star expansion. Modifies 'dst_idx' and allocates new memory
+ * inside 'q's Arena. */
+static AdbxStatus qir_append_expanded_from_item(QirQuery *q,
+                                                QirSelectItem **dst_items,
+                                                uint32_t *dst_idx,
+                                                const QirFromItem *fi,
+                                                QirBindErr *out_err) {
+  uint32_t ncols = 0;
+  const char *qual;
+
+  if (!q || !q->arena || !dst_items || !dst_idx || !fi)
+    return ERR;
+  qual = qir_from_item_visible_name(fi);
+  if (!qual || qual[0] == '\0') {
+    ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                  "Unable to expand SELECT * because one source has no visible "
+                  "name.");
+    return ERR;
+  }
+  if (qir_expandable_from_item_ncols(fi, &ncols, out_err) != OK)
+    return ERR;
+  for (uint32_t i = 0; i < ncols; i++) {
+    const char *col = qir_expandable_from_item_colname_at(fi, i);
+    QirSelectItem *si = NULL;
+    if (!col || col[0] == '\0') {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                    "Unable to expand SELECT * because source '%s' exposes an "
+                    "unnamed column.",
+                    qual);
+      return ERR;
+    }
+    si = qir_new_expanded_select_item(q->arena, qual, col);
+    if (!si)
+      return ERR;
+    dst_items[*dst_idx] = si;
+    (*dst_idx)++;
+  }
+  return OK;
+}
+
+/* Expands SELECT * / alias.* into explicit derived colrefs before expression
+ * binding. Only local query-block sources participate in star expansion. */
+static AdbxStatus qir_resolve_select(QirQuery *q,
+                                     const QirRangeFrame *range_env,
+                                     QirBindErr *out_err) {
+  bool saw_star = false;
+  uint32_t new_nselect = 0;
+  QirSelectItem **new_items = NULL;
+  uint32_t dst = 0;
+
+  if (!q || !q->arena || !range_env || range_env->query != q)
+    return ERR;
+
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
+    if (si && qir_expr_is_star_colref(si->value) == YES) {
+      saw_star = true;
+      break;
+    }
+  }
+  if (!saw_star)
+    return OK;
+
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    const QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
+    if (!si || !si->value || qir_expr_is_star_colref(si->value) != YES) {
+      new_nselect++;
+      continue;
+    }
+    const QirColRef *cr = &si->value->u.colref;
+
+    if (cr->qualifier.name && cr->qualifier.name[0] != '\0') {
+      const QirFromItem *fi = NULL;
+      uint32_t ncols = 0;
+      AdbxTriStatus rc =
+          qir_find_from_in_frame(range_env, &cr->qualifier, &fi, out_err);
+      if (rc == YES) {
+        if (qir_expandable_from_item_ncols(fi, &ncols, out_err) != OK)
+          return ERR;
+        new_nselect += ncols;
+        continue;
+      }
+      if (rc == ERR)
+        return ERR;
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_UNRESOLVED_COLREF,
+                    "Unable to bind column reference '%s.*'.",
+                    qir_ident_cstr(&cr->qualifier));
+      return ERR;
+    }
+
+    // If we see a bare SELECT * with no alias, we have to make sure that all
+    // the table (FROM + JOIN) are expandable
+    uint32_t star_cols = 0;
+    if (q->from_root) {
+      uint32_t ncols = 0;
+      if (qir_expandable_from_item_ncols(q->from_root, &ncols, out_err) != OK)
+        return ERR;
+      star_cols += ncols;
+    }
+    for (uint32_t j = 0; j < range_env->njoins_visible; j++) {
+      const QirJoin *join = q->joins ? q->joins[j] : NULL;
+      const QirFromItem *fi = join ? join->rhs : NULL;
+      uint32_t ncols = 0;
+      if (!fi)
+        continue;
+      if (qir_expandable_from_item_ncols(fi, &ncols, out_err) != OK)
+        return ERR;
+      star_cols += ncols;
+    }
+    if (star_cols == 0) {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                    "Unable to expand SELECT * without any FROM source.");
+      return ERR;
+    }
+    new_nselect += star_cols;
+  }
+
+  if (new_nselect == 0)
+    return OK;
+  new_items = (QirSelectItem **)arena_calloc(
+      q->arena, (uint32_t)(new_nselect * sizeof(*new_items)));
+  if (!new_items)
+    return ERR;
+
+  // Copy, as-is, the non stat columns and expand the star columns
+  for (uint32_t i = 0; i < q->nselect; i++) {
+    QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;
+    if (!si || !si->value || qir_expr_is_star_colref(si->value) != YES) {
+      new_items[dst++] = si;
+      continue;
+    }
+    const QirColRef *cr = &si->value->u.colref;
+
+    if (cr->qualifier.name && cr->qualifier.name[0] != '\0') {
+      const QirFromItem *fi = NULL;
+      AdbxTriStatus rc =
+          qir_find_from_in_frame(range_env, &cr->qualifier, &fi, out_err);
+      if (rc != YES || qir_append_expanded_from_item(q, new_items, &dst, fi,
+                                                     out_err) != OK) {
+        return ERR;
+      }
+      continue;
+    }
+
+    if (q->from_root && qir_append_expanded_from_item(
+                            q, new_items, &dst, q->from_root, out_err) != OK) {
+      return ERR;
+    }
+    for (uint32_t j = 0; j < range_env->njoins_visible; j++) {
+      const QirJoin *join = q->joins ? q->joins[j] : NULL;
+      const QirFromItem *fi = join ? join->rhs : NULL;
+      if (!fi)
+        continue;
+      if (qir_append_expanded_from_item(q, new_items, &dst, fi, out_err) != OK)
+        return ERR;
+    }
+  }
+
+  q->select_items = new_items;
+  q->nselect = dst;
+  return OK;
+}
+
 /* Resolves one bare column reference against the current query block's SELECT
  * aliases. Output aliases are local to one query block, so this doesn't search
  * outer range frames. Returns YES and writes one borrowed expression pointer on
@@ -383,6 +803,11 @@ static AdbxStatus qir_bind_expr_rec(QirExpr **slot,
 
   switch (e->kind) {
   case QIR_EXPR_COLREF:
+    if (qir_colref_is_star(&e->u.colref) == YES) {
+      ADBX_ERR_SETF(out_err, QIR_BINDERR_STAR,
+                    "SELECT * must be expanded before expression binding.");
+      return ERR;
+    }
     if (mode == QIR_BIND_EXPR_ALLOW_OUTPUT_ALIAS) {
       QirExpr *resolved = NULL;
       AdbxTriStatus rc =
@@ -519,6 +944,8 @@ static AdbxStatus qir_bind_query_rec(QirQuery *q,
     AdbxStatus rc = qir_bind_query_rec(cte->query, NULL, &cte_prefix, out_err);
     if (rc != OK)
       return rc;
+    if (qir_validate_cte_shape(cte, out_err) != OK)
+      return ERR;
   }
 
   // The main query body can reference every local CTE plus any CTEs inherited
@@ -574,6 +1001,11 @@ static AdbxStatus qir_bind_query_rec(QirQuery *q,
         return rc;
     }
   }
+
+  // Expand SELECT * / alias.* only after local derived sources have been bound,
+  // so we can rewrite the select list using the exact derived output names.
+  if (qir_resolve_select(q, &range_all, out_err) != OK)
+    return ERR;
 
   for (uint32_t i = 0; i < q->nselect; i++) {
     QirSelectItem *si = q->select_items ? q->select_items[i] : NULL;

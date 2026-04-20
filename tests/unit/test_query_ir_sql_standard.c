@@ -34,6 +34,24 @@ static void assert_bind_fails(const QirQueryHandle *h, QirBindErrCode expected,
 #define ASSERT_BIND_FAILS(h, expected)                                          \
   assert_bind_fails((h), (expected), __FILE__, __LINE__)
 
+/* Asserts that binding fails with one specific binder error and message
+ * substring. */
+static void assert_bind_fails_msg(const QirQueryHandle *h,
+                                  QirBindErrCode expected,
+                                  const char *substr, const char *file,
+                                  int line) {
+  ASSERT_TRUE_AT(h != NULL, file, line);
+  ASSERT_TRUE_AT(h->q != NULL, file, line);
+  ASSERT_TRUE_AT(substr != NULL, file, line);
+  QirBindErr err = {0};
+  AdbxTriStatus rc = bind_query_ir(h->q, &err);
+  ASSERT_TRUE_AT(rc != YES, file, line);
+  ASSERT_TRUE_AT(err.code == expected, file, line);
+  ASSERT_TRUE_AT(strstr(err.msg, substr) != NULL, file, line);
+}
+#define ASSERT_BIND_FAILS_MSG(h, expected, substr)                              \
+  assert_bind_fails_msg((h), (expected), (substr), __FILE__, __LINE__)
+
 typedef struct TouchMatchCtx {
   QirScope scope;
   QirTouchKind kind;
@@ -223,7 +241,6 @@ static void test_sql_standard_predicates_and_limit(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->kind == QIR_STMT_SELECT);
-  ASSERT_TRUE(h.q->has_star == false);
   ASSERT_TRUE(h.q->limit_value == 200);
 
   // SELECT list
@@ -833,7 +850,32 @@ static void test_sql_standard_cte_cannot_see_itself(void) {
   qir_handle_destroy(&h);
 }
 
-/* B5. Subquery in FROM. */
+/* B5. Duplicate visible CTE names must fail with an ambiguous CTE bind error. */
+static void test_sql_standard_cte_ambiguous_lookup(void) {
+  const char *sql = "WITH x AS ("
+                    "  SELECT 1 AS a"
+                    "), "
+                    "x AS ("
+                    "  SELECT 2 AS a"
+                    ") "
+                    "SELECT z.a AS a "
+                    "FROM x AS z;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nctes == 2);
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "x");
+  ASSERT_IDENT_EQ(&h.q->ctes[1]->name, "x");
+
+  ASSERT_BIND_FAILS_MSG(&h, QIR_BINDERR_AMBIGUOUS_CTE, "Ambiguous CTE");
+
+  qir_handle_destroy(&h);
+}
+
+/* B6. Subquery in FROM. */
 static void test_sql_standard_subquery_from(void) {
   const char *sql = "SELECT x.name AS name "
                     "FROM ("
@@ -1111,13 +1153,13 @@ static void test_sql_standard_nested_with_shadows_outer_cte(void) {
   qir_handle_destroy(&h);
 }
 
-/* C1. Star should be detected inside CTE body. */
-static void test_sql_standard_star_in_cte(void) {
-  const char *sql = "WITH x AS ("
-                    "  SELECT p.* "
+/* C1. Parser preserves explicit CTE output column names. */
+static void test_sql_standard_cte_column_list_parsed(void) {
+  const char *sql = "WITH x(a, b) AS ("
+                    "  SELECT p.name, p.region "
                     "  FROM private.people AS p"
                     ") "
-                    "SELECT x.name AS name "
+                    "SELECT x.a AS a "
                     "FROM x AS x;";
 
   QirQueryHandle h = {0};
@@ -1126,11 +1168,318 @@ static void test_sql_standard_star_in_cte(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
   ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_TRUE(h.q->ctes[0] != NULL);
   ASSERT_TRUE(h.q->ctes[0]->query != NULL);
-  ASSERT_TRUE(h.q->ctes[0]->query->has_star == true);
+  ASSERT_TRUE(h.q->ctes[0]->colnames != NULL);
+  ASSERT_TRUE(h.q->ctes[0]->ncolnames == 2);
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->colnames[0], "a");
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->colnames[1], "b");
+
+  qir_handle_destroy(&h);
+}
+
+/* C2. Parser keeps explicit CTE column names even when the inner arity
+ * disagrees; binder/validator decide later whether the query is valid.
+ */
+static void test_sql_standard_cte_column_list_count_mismatch_preserved(void) {
+  const char *sql = "WITH x(a, b) AS ("
+                    "  SELECT p.name "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT x.a AS a "
+                    "FROM x AS x;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nctes == 1);
+  ASSERT_TRUE(h.q->ctes[0] != NULL);
+  ASSERT_TRUE(h.q->ctes[0]->query != NULL);
+  ASSERT_TRUE(h.q->ctes[0]->colnames != NULL);
+  ASSERT_TRUE(h.q->ctes[0]->ncolnames == 2);
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->colnames[0], "a");
+  ASSERT_IDENT_EQ(&h.q->ctes[0]->colnames[1], "b");
+
+  qir_handle_destroy(&h);
+}
+
+/* C3. Explicit CTE column lists override inner projection names during star
+ * expansion.
+ */
+static void test_sql_standard_star_in_cte_column_list_overrides_names(void) {
+  const char *sql = "WITH x(a, b) AS ("
+                    "  SELECT p.name, p.region "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT * "
+                    "FROM x AS x "
+                    "ORDER BY a;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
 
   ASSERT_BIND_OK(&h);
-  ASSERT_TOUCH(h.q, QIR_SCOPE_NESTED, QIR_TOUCH_UNKNOWN, "p", "*");
+  ASSERT_TRUE(h.q->nselect == 2);
+  ASSERT_IDENT_EQ(&h.q->select_items[0]->out_alias, "a");
+  ASSERT_IDENT_EQ(&h.q->select_items[1]->out_alias, "b");
+  ASSERT_COLREF(h.q->select_items[0]->value, "x", "a");
+  ASSERT_COLREF(h.q->select_items[1]->value, "x", "b");
+  ASSERT_TRUE(h.q->n_order_by == 1);
+  ASSERT_TRUE(h.q->order_by[0] == h.q->select_items[0]->value);
+  ASSERT_COLREF(h.q->order_by[0], "x", "a");
+
+  qir_handle_destroy(&h);
+}
+
+/* C4. Non-star references should also fail closed when a CTE column list does
+ * not match the CTE projection width.
+ */
+static void test_sql_standard_cte_column_list_non_star_mismatch_rejected(void) {
+  const char *sql = "WITH x(a, b) AS ("
+                    "  SELECT p.name "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT x.a AS a "
+                    "FROM x AS x;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_FAILS_MSG(&h, QIR_BINDERR_INVALID_CTE,
+                        "column list does not match its projection");
+
+  qir_handle_destroy(&h);
+}
+
+/* C5. SELECT * over a bound CTE expands into explicit derived column refs. */
+static void test_sql_standard_star_in_cte(void) {
+  const char *sql = "WITH x AS ("
+                    "  SELECT p.name AS name, p.region AS region "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT * "
+                    "FROM x AS x;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+  ASSERT_TRUE(h.q->nctes == 1);
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_TRUE(h.q->nselect == 2);
+  ASSERT_IDENT_EQ(&h.q->select_items[0]->out_alias, "name");
+  ASSERT_IDENT_EQ(&h.q->select_items[1]->out_alias, "region");
+  ASSERT_COLREF(h.q->select_items[0]->value, "x", "name");
+  ASSERT_COLREF(h.q->select_items[1]->value, "x", "region");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "name");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "region");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "x", "name");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "x", "region");
+
+  qir_handle_destroy(&h);
+}
+
+/* C6. Qualified star resolves against the current visible derived source. */
+static void test_sql_standard_qualified_star_in_cte(void) {
+  const char *sql = "WITH x AS ("
+                    "  SELECT p.name AS name, p.region AS region "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT x.* "
+                    "FROM x AS x;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_TRUE(h.q->nselect == 2);
+  ASSERT_COLREF(h.q->select_items[0]->value, "x", "name");
+  ASSERT_COLREF(h.q->select_items[1]->value, "x", "region");
+
+  qir_handle_destroy(&h);
+}
+
+/* C7. CTE star expansion fails closed when the derived source exposes unnamed
+ * expressions.
+ */
+static void test_sql_standard_star_in_cte_rejected_for_unnamed_expr(void) {
+  const char *sql = "WITH x AS ("
+                    "  SELECT upper(p.name) "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT * "
+                    "FROM x AS x;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_FAILS(&h, QIR_BINDERR_STAR);
+
+  qir_handle_destroy(&h);
+}
+
+/* C8. Subquery star expansion uses the subquery's exposed output names. */
+static void test_sql_standard_star_in_subquery(void) {
+  const char *sql = "SELECT * "
+                    "FROM ("
+                    "  SELECT p.name AS name, p.region AS region "
+                    "  FROM private.people AS p"
+                    ") AS s;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_TRUE(h.q->nselect == 2);
+  ASSERT_COLREF(h.q->select_items[0]->value, "s", "name");
+  ASSERT_COLREF(h.q->select_items[1]->value, "s", "region");
+
+  qir_handle_destroy(&h);
+}
+
+/* C9. Subquery star expansion rejects unnamed output expressions. */
+static void test_sql_standard_star_in_subquery_rejected_for_unnamed_expr(void) {
+  const char *sql = "SELECT * "
+                    "FROM ("
+                    "  SELECT upper(p.name) "
+                    "  FROM private.people AS p"
+                    ") AS s;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_FAILS(&h, QIR_BINDERR_STAR);
+
+  qir_handle_destroy(&h);
+}
+
+/* C10. VALUES with explicit column names can expand SELECT *. */
+static void test_sql_standard_star_in_values(void) {
+  const char *sql = "SELECT * "
+                    "FROM (VALUES (1, 2)) AS v(a, b) "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_TRUE(h.q->nselect == 2);
+  ASSERT_IDENT_EQ(&h.q->select_items[0]->out_alias, "a");
+  ASSERT_IDENT_EQ(&h.q->select_items[1]->out_alias, "b");
+  ASSERT_COLREF(h.q->select_items[0]->value, "v", "a");
+  ASSERT_COLREF(h.q->select_items[1]->value, "v", "b");
+
+  qir_handle_destroy(&h);
+}
+
+/* C11. VALUES without exposed column names keep SELECT * rejected. */
+static void test_sql_standard_star_in_values_rejected_without_colnames(void) {
+  const char *sql = "SELECT * "
+                    "FROM (VALUES (1, 2)) AS v "
+                    "LIMIT 10;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_FAILS(&h, QIR_BINDERR_STAR);
+
+  qir_handle_destroy(&h);
+}
+
+/* C12. Base relations still do not allow SELECT *. */
+static void test_sql_standard_star_in_base_rel_rejected(void) {
+  const char *sql = "SELECT * "
+                    "FROM private.people AS p;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_FAILS(&h, QIR_BINDERR_STAR);
+
+  qir_handle_destroy(&h);
+}
+
+/* C13. Mixed derived/base sources keep plain star rejected. */
+static void test_sql_standard_star_join_mixed_base_rejected(void) {
+  const char *sql = "WITH x AS ("
+                    "  SELECT p.name AS name "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT * "
+                    "FROM x AS x "
+                    "INNER JOIN private.people AS p ON 1 = 1;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_FAILS(&h, QIR_BINDERR_STAR);
+
+  qir_handle_destroy(&h);
+}
+
+/* C14. Plain star over multiple derived sources expands left-to-right in SQL
+ * FROM/JOIN order.
+ */
+static void test_sql_standard_star_join_all_derived_accepted(void) {
+  const char *sql = "WITH x AS ("
+                    "  SELECT p.name AS name "
+                    "  FROM private.people AS p"
+                    "), "
+                    "y AS ("
+                    "  SELECT p.region AS region "
+                    "  FROM private.people AS p"
+                    ") "
+                    "SELECT * "
+                    "FROM x AS x "
+                    "INNER JOIN ("
+                    "  SELECT y.region AS region "
+                    "  FROM y AS y"
+                    ") AS s ON 1 = 1;";
+
+  QirQueryHandle h = {0};
+  parse_sql_postgres(sql, &h);
+
+  ASSERT_TRUE(h.q != NULL);
+  ASSERT_TRUE(h.q->status == QIR_OK);
+
+  ASSERT_BIND_OK(&h);
+  ASSERT_TRUE(h.q->nselect == 2);
+  ASSERT_COLREF(h.q->select_items[0]->value, "x", "name");
+  ASSERT_COLREF(h.q->select_items[1]->value, "s", "region");
 
   qir_handle_destroy(&h);
 }
@@ -1860,6 +2209,7 @@ int main(void) {
   test_sql_standard_cte_sensitive_col();
   test_sql_standard_cte_cannot_see_later_sibling();
   test_sql_standard_cte_cannot_see_itself();
+  test_sql_standard_cte_ambiguous_lookup();
   test_sql_standard_subquery_from();
   test_sql_standard_from_subquery_cannot_see_outer_alias();
   test_sql_standard_subquery_where();
@@ -1869,7 +2219,20 @@ int main(void) {
   test_sql_standard_not_in_subquery();
   test_sql_standard_nested_with_sees_outer_cte();
   test_sql_standard_nested_with_shadows_outer_cte();
+  test_sql_standard_cte_column_list_parsed();
+  test_sql_standard_cte_column_list_count_mismatch_preserved();
+  test_sql_standard_star_in_cte_column_list_overrides_names();
+  test_sql_standard_cte_column_list_non_star_mismatch_rejected();
   test_sql_standard_star_in_cte();
+  test_sql_standard_qualified_star_in_cte();
+  test_sql_standard_star_in_cte_rejected_for_unnamed_expr();
+  test_sql_standard_star_in_subquery();
+  test_sql_standard_star_in_subquery_rejected_for_unnamed_expr();
+  test_sql_standard_star_in_values();
+  test_sql_standard_star_in_values_rejected_without_colnames();
+  test_sql_standard_star_in_base_rel_rejected();
+  test_sql_standard_star_join_mixed_base_rejected();
+  test_sql_standard_star_join_all_derived_accepted();
   test_sql_standard_multi_stmt_rejected();
   test_sql_standard_comment_multi_stmt_rejected();
   test_sql_standard_txn_rejected();

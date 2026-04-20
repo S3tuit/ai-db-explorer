@@ -247,6 +247,7 @@ static inline QirQuery *pg_qir_new_query(Arena *a) {
   QirQuery *q = (QirQuery *)arena_calloc(a, (uint32_t)sizeof(*q));
   if (!q)
     return NULL;
+  q->arena = a;
   q->status = QIR_OK;
   q->kind = QIR_STMT_SELECT;
   q->stmt_flags = QIR_STMTF_NONE;
@@ -275,7 +276,7 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
 
 /* Parses a ColumnRef node into a QirExpr.
  * Ownership: returned expression is arena-owned.
- * Side effects: may set has_star or mark QIR_UNSUPPORTED.
+ * Side effects: may mark QIR_UNSUPPORTED.
  * Returns NULL on allocation error. */
 static QirExpr *pg_parse_colref(const JsonGetter *jg, Arena *a, QirQuery *q) {
   if (!jg || !a || !q)
@@ -320,7 +321,6 @@ static QirExpr *pg_parse_colref(const JsonGetter *jg, Arena *a, QirQuery *q) {
   }
 
   if (saw_star) {
-    q->has_star = true;
     if (nparts > 1) {
       qir_set_status(q, a, QIR_UNSUPPORTED, "unsupported column reference");
       return pg_qir_new_expr(a, QIR_EXPR_UNSUPPORTED);
@@ -1783,26 +1783,27 @@ static QirFromItem *pg_parse_rangevar(const JsonGetter *jg, Arena *a) {
   return fi;
 }
 
-/* Parses alias column list (AS v(x,y,...) ) into arena-owned QirIdent array.
+/* Parses one string identifier array field into arena-owned QirIdent array.
  * Ownership: returned array is arena-owned.
  * Side effects: allocates arena memory.
  * Returns OK/ERR. */
-static AdbxStatus pg_parse_alias_colnames(const JsonGetter *alias_obj, Arena *a,
-                                          QirIdent **out_cols,
-                                          uint32_t *out_ncols) {
-  if (!alias_obj || !a || !out_cols || !out_ncols)
+static AdbxStatus pg_parse_ident_list_field(const JsonGetter *obj,
+                                            const char *field_name, Arena *a,
+                                            QirIdent **out_cols,
+                                            uint32_t *out_ncols) {
+  if (!obj || !field_name || !a || !out_cols || !out_ncols)
     return ERR;
   *out_cols = NULL;
   *out_ncols = 0;
 
   JsonArrIter it = {0};
-  if (jsget_array_objects_begin(alias_obj, "colnames", &it) != YES)
+  if (jsget_array_objects_begin(obj, field_name, &it) != YES)
     return OK;
 
   PtrVec cols = {0};
   JsonGetter elem = {0};
   int rc = 0;
-  while ((rc = jsget_array_objects_next(alias_obj, &it, &elem)) == YES) {
+  while ((rc = jsget_array_objects_next(obj, &it, &elem)) == YES) {
     JsonGetter sjg = {0};
     if (jsget_object(&elem, "String", &sjg) != YES) {
       rc = ERR;
@@ -1951,8 +1952,9 @@ static AdbxStatus pg_parse_join_expr(const JsonGetter *jg, Arena *a,
           if (jsget_object(&ssjg, "alias", &ajg) == YES) {
             fi->alias.name = pg_parse_alias_name(&ajg, a);
             if (fi->kind == QIR_FROM_VALUES) {
-              if (pg_parse_alias_colnames(&ajg, a, &fi->u.values.colnames,
-                                          &fi->u.values.ncolnames) != OK) {
+              if (pg_parse_ident_list_field(&ajg, "colnames", a,
+                                            &fi->u.values.colnames,
+                                            &fi->u.values.ncolnames) != OK) {
                 qir_set_status(q, a, QIR_UNSUPPORTED, "invalid VALUES alias");
               }
             }
@@ -2042,8 +2044,9 @@ static AdbxStatus pg_parse_from_item(const JsonGetter *jg, Arena *a,
     if (jsget_object(&ssjg, "alias", &ajg) == YES) {
       fi->alias.name = pg_parse_alias_name(&ajg, a);
       if (fi->kind == QIR_FROM_VALUES) {
-        if (pg_parse_alias_colnames(&ajg, a, &fi->u.values.colnames,
-                                    &fi->u.values.ncolnames) != OK) {
+        if (pg_parse_ident_list_field(&ajg, "colnames", a,
+                                      &fi->u.values.colnames,
+                                      &fi->u.values.ncolnames) != OK) {
           qir_set_status(q, a, QIR_UNSUPPORTED, "invalid VALUES alias");
         }
       }
@@ -2252,6 +2255,11 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
         if (jsget_string_decode_alloc(&ctejg, "ctename", &tmp) == YES) {
           cte->name.name = pg_arena_transfer_lower(a, tmp);
         }
+        if (pg_parse_ident_list_field(&ctejg, "aliascolnames", a,
+                                      &cte->colnames, &cte->ncolnames) != OK) {
+          rc = ERR;
+          break;
+        }
 
         JsonGetter cqjg = {0};
         if (jsget_object(&ctejg, "ctequery", &cqjg) == YES) {
@@ -2287,7 +2295,6 @@ static AdbxStatus pg_parse_select_stmt(const JsonGetter *jg, Arena *a,
     } else if (branches.len > 0) {
       // First branch body -> lead query.
       QirQuery *first = (QirQuery *)branches.items[0];
-      q->has_star = first->has_star;
       q->has_distinct = first->has_distinct;
       q->select_items = first->select_items;
       q->nselect = first->nselect;
@@ -2942,13 +2949,6 @@ static AdbxStatus pg_exec_impl(DbBackend *db, const char *sql,
   PgImpl *p = (PgImpl *)db->impl;
   if (!p->conn) {
     ADBX_ERR_SETF(&db_err, DBERR_GENERIC, "not connected");
-    goto fail;
-  }
-
-  // even if this limit is version-dependent, it's a defensive check
-  if (strlen(sql) > PG_QUERY_MAX_BYTES) {
-    ADBX_ERR_SETF(&db_err, DBERR_GENERIC,
-                  "SQL exceeds 8192 bytes (libpq query buffer limit)");
     goto fail;
   }
 

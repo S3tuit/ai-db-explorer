@@ -285,11 +285,6 @@ static void test_validator_rejects_rules(void) {
   ASSERT_VALIDATE(db, cp, policy, "SELECT * FROM users u WHERE u.id = 1;", 0,
                   VERR_STAR);
 
-  ASSERT_VALIDATE_MSG(db, cp, policy,
-                      "SELECT u.name FROM users u JOIN balance ON u.id = "
-                      "u.user_id WHERE u.id = 1;",
-                      0, VERR_NO_TABLE_ALIAS, "Missing alias in JOIN item");
-
   ASSERT_VALIDATE_PARAMS(
       db, cp, policy, "SELECT u.id FROM users u WHERE u.status = $1;", 0,
       VERR_PARAM_NON_SENSITIVE, NULL, tok_fc1, ARRLEN(tok_fc1));
@@ -465,13 +460,6 @@ static void test_validator_from_notes(void) {
                   "SELECT u.name, e.* FROM users u INNER JOIN expenses e ON "
                   "e.user_id = u.id WHERE u.id = $1;",
                   0, VERR_STAR);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.name FROM users u CROSS JOIN cards WHERE u.id = 1;",
-                  0, VERR_NO_TABLE_ALIAS);
-  ASSERT_VALIDATE(db, cp, policy,
-                  "SELECT u.name, e.amount FROM users u INNER JOIN expenses ON "
-                  "expenses.user_id = u.id WHERE u.id = 1;",
-                  0, VERR_NO_COLUMN_ALIAS);
   ASSERT_VALIDATE_MSG(db, cp, policy,
                       "SELECT LOWER2(u.fiscal_code) FROM users u LIMIT 199;", 0,
                       VERR_FUNC_UNSAFE, "lower2");
@@ -1333,21 +1321,151 @@ static void test_validator_cte_shadowing(void) {
 
   // REJECT: the first CTE still reads the real users.fiscal_code base column;
   // the later same-name CTE must not hide that nested sensitive touch.
-  ASSERT_VALIDATE_MSG(
-      db, cp, policy,
-      "WITH sneaky AS ("
-      "  SELECT u.fiscal_code AS trick "
-      "  FROM users u "
-      "  LIMIT 10"
-      "), users AS ("
-      "  SELECT v.name AS fiscal_code "
-      "  FROM users v "
-      "  LIMIT 10"
-      ") "
-      "SELECT s.trick "
-      "FROM sneaky s "
-      "LIMIT 10;",
-      0, VERR_SENSITIVE_OUTSIDE_MAIN, "fiscal_code");
+  ASSERT_VALIDATE_MSG(db, cp, policy,
+                      "WITH sneaky AS ("
+                      "  SELECT u.fiscal_code AS trick "
+                      "  FROM users u "
+                      "  LIMIT 10"
+                      "), users AS ("
+                      "  SELECT v.name AS fiscal_code "
+                      "  FROM users v "
+                      "  LIMIT 10"
+                      ") "
+                      "SELECT s.trick "
+                      "FROM sneaky s "
+                      "LIMIT 10;",
+                      0, VERR_SENSITIVE_OUTSIDE_MAIN, "fiscal_code");
+
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
+/* Validator now relies on binder disambiguation instead of a blanket
+ * table-alias requirement. These cases pin the intended policy:
+ * alias-free single-range queries may pass, while ambiguous or unresolved
+ * references still fail closed.
+ */
+static void test_validator_without_table_aliases(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+  SafetyPolicy *policy = &cp->safe_policy;
+  ASSERT_TRUE(policy != NULL);
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  ASSERT_VALIDATE(db, cp, policy, "SELECT upper(name), name FROM users;", 1,
+                  VERR_NONE);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT upper(users.name), users.name FROM users;", 1,
+                  VERR_NONE);
+
+  ASSERT_VALIDATE_MSG(db, cp, policy,
+                      "SELECT users.name FROM users "
+                      "INNER JOIN users ON 1 = 1;",
+                      0, VERR_NO_COLUMN_ALIAS, "Ambiguous");
+
+  ASSERT_VALIDATE_MSG(db, cp, policy,
+                      "SELECT u.id FROM users u "
+                      "WHERE EXISTS ("
+                      "  SELECT 1 "
+                      "  FROM orders o "
+                      "  WHERE name = 'Goku'"
+                      ");",
+                      0, VERR_NO_COLUMN_ALIAS,
+                      "Unable to bind bare column reference 'name'");
+
+  ASSERT_VALIDATE(db, cp, policy, "SELECT fiscal_code FROM users LIMIT 10;", 1,
+                  VERR_NONE);
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT upper(users.fiscal_code) FROM users LIMIT 10;", 0,
+                  VERR_SENSITIVE_SELECT_EXPR);
+
+  db_destroy(db);
+  catalog_destroy(cat);
+}
+
+/* Binder now owns safe SELECT * / alias.* expansion. Validator should accept
+ * stars that expand entirely over derived sources and keep rejecting unsafe
+ * star shapes.
+ */
+static void test_validator_safe_derived_stars(void) {
+  ConnCatalog *cat = load_test_catalog();
+  ASSERT_TRUE(cat != NULL);
+  ConnProfile *cp = NULL;
+  ASSERT_TRUE(catalog_list(cat, &cp, 1) == 1);
+  ASSERT_TRUE(cp != NULL);
+  SafetyPolicy *policy = &cp->safe_policy;
+  ASSERT_TRUE(policy != NULL);
+  DbBackend *db = postgres_backend_create();
+  ASSERT_TRUE(db != NULL);
+
+  ASSERT_VALIDATE(db, cp, policy,
+                  "WITH x AS ("
+                  "  SELECT u.name AS name, u.country AS country "
+                  "  FROM users u "
+                  "  LIMIT 10"
+                  ") "
+                  "SELECT * FROM x LIMIT 10;",
+                  1, VERR_NONE);
+
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT * "
+                  "FROM ("
+                  "  SELECT u.name AS name "
+                  "  FROM users u "
+                  "  LIMIT 10"
+                  ") AS s "
+                  "LIMIT 10;",
+                  1, VERR_NONE);
+
+  ASSERT_VALIDATE(db, cp, policy,
+                  "SELECT * "
+                  "FROM (VALUES ('it', 'rome')) AS v(country, city) "
+                  "LIMIT 10;",
+                  1, VERR_NONE);
+
+  ASSERT_VALIDATE(db, cp, policy,
+                  "WITH x AS ("
+                  "  SELECT u.name AS name "
+                  "  FROM users u "
+                  "  LIMIT 10"
+                  ") "
+                  "SELECT * "
+                  "FROM x "
+                  "INNER JOIN ("
+                  "  SELECT y.country AS country "
+                  "  FROM ("
+                  "    SELECT u.country AS country "
+                  "    FROM users u "
+                  "    LIMIT 10"
+                  "  ) AS y"
+                  ") AS s ON 1 = 1 "
+                  "LIMIT 10;",
+                  1, VERR_NONE);
+
+  ASSERT_VALIDATE(db, cp, policy,
+                  "WITH x AS ("
+                  "  SELECT u.name AS name "
+                  "  FROM users u "
+                  "  LIMIT 10"
+                  ") "
+                  "SELECT * "
+                  "FROM x "
+                  "INNER JOIN users u ON 1 = 1 "
+                  "LIMIT 10;",
+                  0, VERR_STAR);
+
+  ASSERT_VALIDATE(db, cp, policy,
+                  "WITH x AS ("
+                  "  SELECT upper(u.name) "
+                  "  FROM users u "
+                  "  LIMIT 10"
+                  ") "
+                  "SELECT * FROM x LIMIT 10;",
+                  0, VERR_STAR);
 
   db_destroy(db);
   catalog_destroy(cat);
@@ -1364,6 +1482,8 @@ int main(void) {
   test_validator_safe_funcs_pg();
   test_validator_sensitive_union();
   test_validator_cte_shadowing();
+  test_validator_without_table_aliases();
+  test_validator_safe_derived_stars();
   fprintf(stderr, "OK: test_validator\n");
   return 0;
 }

@@ -20,12 +20,15 @@
  *      + If at least one sensitive column is referenced, switches sensitive
  *        mode on. Vault should be opened, else, it fails.
  *
+ *  - bind_query_ir() used for:
+ *      + All column and CTE name binding.
+ *      + Safe SELECT * / alias.* expansion over derived sources only.
+ *      + Rejecting unsafe star expansion before validator policy runs.
+ *
  *  - Pass A. It contains all the validations that are independent of the mode
  *    (sensitive mode on/off) and independent of token parameters. Pass A
  *    checks that:
- *      + All tables have aliases (FROM/JOIN).
  *      + All functions are safe to call.
- *      + No SELECT * / alias.* (rejects q->has_star).
  *      + Nested subqueries satisfy the same Pass A rules.
  *
  *  - Pass B. It validates token parameter usage regardless of sensitive mode.
@@ -363,33 +366,6 @@ static AdbxTriStatus validator_validate_param_domain_for_col(
 
   if (ctx->param_used)
     ctx->param_used[(uint32_t)param_idx - 1u] = 1u;
-  return YES;
-}
-
-/* Validates that every QirFromItem and QirJoin has an alias. Returns YES, or
- * NO/ERR and sets '*err'. */
-static AdbxTriStatus validate_range_aliases(ValidatorCtx *ctx,
-                                            const QirQuery *q) {
-  if (!q)
-    return ERR;
-
-  if (q->from_root) {
-    if (!q->from_root->alias.name || q->from_root->alias.name[0] == '\0') {
-      const char *desc = qir_from_to_str(q->from_root, &ctx->scratch);
-      set_err(ctx, VERR_NO_TABLE_ALIAS, "Missing alias in FROM item: %s.",
-              desc);
-      return NO;
-    }
-  }
-  for (uint32_t i = 0; i < q->njoins; i++) {
-    const QirJoin *j = q->joins[i];
-    if (!j || !j->rhs || !j->rhs->alias.name || j->rhs->alias.name[0] == '\0') {
-      const char *desc = qir_from_to_str(j ? j->rhs : NULL, &ctx->scratch);
-      set_err(ctx, VERR_NO_TABLE_ALIAS, "Missing alias in JOIN item: %s.",
-              desc);
-      return NO;
-    }
-  }
   return YES;
 }
 
@@ -1120,19 +1096,6 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
   if (!ctx || !ctx->db || !ctx->cp || !q)
     return ERR;
 
-  // SELECT * is forbidden regardless of Sensitive Mode.
-  if (q->has_star) {
-    set_err(ctx, VERR_STAR, "SELECT * is not allowed.");
-    return NO;
-  }
-
-  // Even in nested queries, we require aliases for all range items. Without
-  // this, a nested query could hide ambiguous references and we would miss it
-  // because touch extraction only sees column references.
-  int rc = validate_range_aliases(ctx, q);
-  if (rc != YES)
-    return rc;
-
   // Function allowlist enforcement across the query.
   // SELECT
   for (uint32_t i = 0; i < q->nselect; i++) {
@@ -1191,26 +1154,26 @@ static AdbxTriStatus validate_query_pass_a(ValidatorCtx *ctx,
 
   // Recurse into nested queries
   for (uint32_t i = 0; i < q->nctes; i++) {
-    rc = validate_query_pass_a(ctx, q->ctes[i]->query);
+    int rc = validate_query_pass_a(ctx, q->ctes[i]->query);
     if (rc != YES)
       return rc;
   }
   if (q->from_root && q->from_root->kind == QIR_FROM_SUBQUERY) {
-    rc = validate_query_pass_a(ctx, q->from_root->u.subquery);
+    int rc = validate_query_pass_a(ctx, q->from_root->u.subquery);
     if (rc != YES)
       return rc;
   }
   for (uint32_t i = 0; i < q->njoins; i++) {
     const QirFromItem *fi = q->joins[i]->rhs;
     if (fi && fi->kind == QIR_FROM_SUBQUERY) {
-      rc = validate_query_pass_a(ctx, fi->u.subquery);
+      int rc = validate_query_pass_a(ctx, fi->u.subquery);
       if (rc != YES)
         return rc;
     }
   }
   for (const QirQuery *branch = q->union_next; branch;
        branch = branch->union_next) {
-    rc = validate_query_pass_a(ctx, branch);
+    int rc = validate_query_pass_a(ctx, branch);
     if (rc != YES)
       return rc;
   }
@@ -1581,10 +1544,6 @@ static AdbxTriStatus validate_query_pass_c_sensitive(ValidatorCtx *ctx,
   if (!ctx || !ctx->db || !ctx->cp || !q)
     return ERR;
 
-  if (q->has_star) {
-    set_err(ctx, VERR_STAR, "SELECT * is not allowed.");
-    return NO;
-  }
   if (q->has_distinct) {
     set_err(ctx, VERR_DISTINCT_SENSITIVE,
             "DISTINCT is not allowed in sensitive mode.");
@@ -1798,14 +1757,6 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
     sb_clean(&ctx.scratch);
     return ERR;
   }
-  if (q->has_star) {
-    set_err(&ctx, VERR_STAR, "SELECT * is not allowed.");
-    qir_handle_destroy(&h);
-    free(param_used);
-    sb_clean(&ctx.scratch);
-    return ERR;
-  }
-
   // Binding pass
   {
     QirBindErr bind_err = {0};
@@ -1817,6 +1768,14 @@ AdbxStatus validate_query(const ValidatorRequest *req, ValidateQueryOut *out) {
                 bind_err.msg[0] != '\0'
                     ? bind_err.msg
                     : "Unable to resolve one or more column references.");
+      } else if (bind_err.code == QIR_BINDERR_STAR) {
+        set_err(&ctx, VERR_STAR, "%s",
+                bind_err.msg[0] != '\0' ? bind_err.msg
+                                        : "SELECT * is not allowed.");
+      } else if (bind_err.code == QIR_BINDERR_INVALID_CTE) {
+        set_err(&ctx, VERR_ANALYZE_FAIL, "%s",
+                bind_err.msg[0] != '\0' ? bind_err.msg
+                                        : "Invalid CTE shape.");
       } else if (bind_err.code == QIR_BINDERR_UNSUPPORTED) {
         set_err(&ctx, VERR_UNSUPPORTED_QUERY, "%s",
                 bind_err.msg[0] != '\0' ? bind_err.msg
