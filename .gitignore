@@ -76,3 +76,6 @@ dist/*
 
 # generated packaging artifacts
 packaging/rpm/adbxplorer.spec
+
+# personal security assessments
+security_assessment/*

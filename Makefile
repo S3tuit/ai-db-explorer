@@ -93,13 +93,14 @@ TEST_BROKER_RUN_UTILS_OBJ := build/tests/unit/test_broker_run_utils.o
 INTEGRATION_TEST_SRC := $(wildcard tests/integration/*/test_*.c)
 INTEGRATION_TEST_BINS := $(patsubst tests/integration/%.c,build/tests/integration/%,$(INTEGRATION_TEST_SRC))
 POSTGRES_SEED_BIN := build/tests/integration/postgres/seed_file_secret_store
+SECURITY_ASSESS_SEED_BIN := build/security_assessment/seed_file_secret_store
 
 # Benchmarks: each benchmarks/bench_foo.c -> build/benchmarks/bench_foo
 BENCH_SRC := $(wildcard benchmarks/bench_*.c)
 BENCH_BINS := $(patsubst benchmarks/%.c,build/benchmarks/%,$(BENCH_SRC))
 BENCH_COMMON_SRC := src/arena.c src/utils.c
 
-.PHONY: all clean run install uninstall dist rpm-spec srpm test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-files vendor-verify vendor-freshness
+.PHONY: all clean run install uninstall dist rpm-spec srpm test test-unit test-unit-notty test-integration docker-test-postgres test-build compdb asan clean-testobj pg-dump-ast bench gen-files vendor-verify vendor-freshness security-assessment-build
 
 all: $(BIN)
 
@@ -288,6 +289,17 @@ build/tests/unit/test_secret_store_file: build/tests/unit/test_secret_store_file
 $(POSTGRES_SEED_BIN): build/tests/integration/postgres/seed_file_secret_store.o $(TEST_CORE_OBJ) build/testobj/secret_store_file.o
 	@mkdir -p $(dir $@)
 	$(CC) $^ -o $@ $(TSAN) $(PIE_LDFLAGS)
+
+# Used for personal security assessment runs
+build/security_assessment/seed_file_secret_store.o: security_assessment/seed_file_secret_store.c
+	@mkdir -p $(dir $@)
+	$(CC) $(TCFLAGS) $(TSAN) -c $< -o $@
+
+$(SECURITY_ASSESS_SEED_BIN): build/security_assessment/seed_file_secret_store.o $(TEST_CORE_OBJ) build/testobj/secret_store_file.o
+	@mkdir -p $(dir $@)
+	$(CC) $^ -o $@ $(TSAN) $(PIE_LDFLAGS)
+
+security-assessment-build: $(SECURITY_ASSESS_SEED_BIN)
 
 # Run unit tests
 test-unit: EXTRA_TCFLAGS=-DADBX_TEST_MODE
