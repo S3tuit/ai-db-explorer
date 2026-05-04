@@ -191,8 +191,9 @@ static AdbxStatus broker_read_handshake_req(BrokerMcpSession *sess,
 
   StrBuf payload;
   sb_init(&payload);
-  AdbxStatus rc = frame_read_len(&sess->bc, &payload);
-  if (rc != OK) {
+  FrameReadLenStatus rc =
+      frame_read_len(&sess->bc, &payload, HANDSHAKE_REQ_WIRE_SIZE);
+  if (rc != FRAME_READ_LEN_OK) {
     sb_clean(&payload);
     return ERR;
   }
@@ -1716,8 +1717,17 @@ AdbxStatus broker_run(Broker *b) {
         StrBuf req;
         sb_init(&req);
         BrokerResponse *resp = NULL;
-        AdbxStatus rr = frame_read_len(&sess->bc, &req);
-        if (rr != OK || req.len > MAX_REQ_LEN) {
+        FrameReadLenStatus rr = frame_read_len(&sess->bc, &req, MAX_REQ_LEN);
+        if (rr == FRAME_READ_LEN_ERR_OVERSIZE) {
+          TLOG("ERROR - drop client: request frame exceeds broker cap %u "
+               "bytes",
+               MAX_REQ_LEN);
+          sb_clean(&req);
+          parr_drop_swap(b->active_sessions, (uint32_t)i);
+          nsessions--;
+          continue;
+        }
+        if (rr != FRAME_READ_LEN_OK) {
           // framing error -> drop client
           TLOG("ERROR - drop client: frame_read_len rc=%d len=%zu", rr,
                req.len);
@@ -1727,18 +1737,6 @@ AdbxStatus broker_run(Broker *b) {
           continue;
         }
         TLOG("INFO - received request len=%zu", req.len);
-
-        if (req.len > MAX_REQ_LEN) {
-          char buf[128];
-          snprintf(buf, sizeof(buf),
-                   "Request too large: received %zu bytes; maximum allowed is "
-                   "%d bytes.",
-                   req.len, MAX_REQ_LEN);
-          McpId id = {0};
-          mcp_id_init_u32(&id, 0);
-          resp = bresp_create_err(&id, BRESPERR_INREQ, "%s", buf);
-          goto send_q_res;
-        }
 
         AdbxStatus hr =
             broker_handle_request(b, sess, req.data, req.len, &resp);
@@ -1753,7 +1751,6 @@ AdbxStatus broker_run(Broker *b) {
         }
 
         // Send response frame
-      send_q_res:
         if (broker_write_response(sess, resp) != OK) {
           fprintf(stderr, "Broker: failed to write response\n");
           TLOG("ERROR - drop client: failed to write response");

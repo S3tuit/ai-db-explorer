@@ -17,13 +17,25 @@ typedef enum {
   FRAME_RPC_STYLE_JSONL,
 } FrameRpcStyle;
 
+typedef enum {
+  FRAME_READ_LEN_OK = 0,
+  FRAME_READ_LEN_ERR_INPUT = -1,
+  FRAME_READ_LEN_ERR_IO = -2,
+  FRAME_READ_LEN_ERR_OVERSIZE = -3,
+  FRAME_READ_LEN_ERR_BUFFER = -4,
+} FrameReadLenStatus;
+
 /* Writes <n><n bytes from 'payload'> with big-endian uint32 length prefix. */
 AdbxStatus frame_write_len(BufChannel *bc, const void *payload, uint32_t n);
 
 /* Reads <n><n bytes> with big-endian uint32 length prefix and stores them into
- * 'out_payload'.
- * Returns OK on success, ERR on malformed frame, overflow, or I/O error. */
-AdbxStatus frame_read_len(BufChannel *bc, StrBuf *out_payload);
+ * 'out_payload'. When 'max_payload_len' is non-zero, frames larger than that
+ * cap are rejected immediately after reading the length prefix and before
+ * reading or allocating the payload body. The codec-level STRBUF_MAX_BYTES
+ * bound is always enforced.
+ */
+FrameReadLenStatus frame_read_len(BufChannel *bc, StrBuf *out_payload,
+                                  size_t max_payload_len);
 
 /* Writes one MCP stdio payload using the requested framing style.
  * CONTENT_LENGTH writes a Content-Length header block; JSONL writes the payload

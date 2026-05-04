@@ -19,35 +19,39 @@ AdbxStatus frame_write_len(BufChannel *bc, const void *payload,
   return bufch_write2v(bc, &hdr, sizeof(hdr), payload, (size_t)hostlong);
 }
 
-AdbxStatus frame_read_len(BufChannel *bc, StrBuf *out_payload) {
+FrameReadLenStatus frame_read_len(BufChannel *bc, StrBuf *out_payload,
+                                  size_t max_payload_len) {
   if (!bc || !out_payload)
-    return ERR;
+    return FRAME_READ_LEN_ERR_INPUT;
+
+  out_payload->len = 0;
 
   // read first 4 bytes
   uint32_t netlong;
   if (bufch_read_exact(bc, &netlong, sizeof(netlong)) != OK)
-    return ERR;
+    return FRAME_READ_LEN_ERR_IO;
 
   uint32_t n = ntohl(netlong);
 
   if (n > STRBUF_MAX_BYTES)
-    return ERR;
+    return FRAME_READ_LEN_ERR_OVERSIZE;
+  if (max_payload_len != 0 && (size_t)n > max_payload_len)
+    return FRAME_READ_LEN_ERR_OVERSIZE;
 #if SIZE_MAX < UINT32_MAX
   if (n > SIZE_MAX)
-    return ERR;
+    return FRAME_READ_LEN_ERR_OVERSIZE;
 #endif
 
-  out_payload->len = 0;
   if (n == 0)
-    return OK;
+    return FRAME_READ_LEN_OK;
 
   char *dst = NULL;
   if (sb_prepare_for_write(out_payload, (size_t)n, &dst) != OK) {
-    return ERR;
+    return FRAME_READ_LEN_ERR_BUFFER;
   }
   if (bufch_read_exact(bc, (unsigned char *)dst, (size_t)n) != OK)
-    return ERR;
-  return OK;
+    return FRAME_READ_LEN_ERR_IO;
+  return FRAME_READ_LEN_OK;
 }
 
 /* Writes Content-Length framed payload:
