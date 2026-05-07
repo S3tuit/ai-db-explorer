@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 
 #include "broker.h"
-#include "arena.h"
 #include "broker_response.h"
 #include "frame_codec.h"
 #include "handshake_codec.h"
@@ -49,6 +48,11 @@
 #define ABSOLUTE_TTL (8 * 60 * 60) // 8 hours
 #define IDLE_TTL (20 * 60)         // 20 minutes
 
+#ifdef ADBX_TEST_MODE
+// Env var used to overwrite the token cap of each session
+#define TEST_TOKEN_ARENA_CAP_ENV "ADBX_TEST_TOKEN_ARENA_CAP_BYTES"
+#endif
+
 struct Broker {
   int listen_fd;           // file descriptor of the socket used to
                            // accept incoming connection requets
@@ -69,11 +73,9 @@ typedef struct BrokerMcpSession {
   BufChannel bc;
   int fd; // connection identity (owned by bc). -1 if disconnected but resumable
   uint8_t resume_token[RESUME_TOKEN_LEN]; // can be used to resume the session
-  uint32_t generation;                    // session-wide token generation
-  Arena arena;            // stores per-session token value bytes
-  PackedArray *db_stores; // owned array of DbTokenStore*
-  time_t created_at;      // for absolute TTL
-  time_t last_active;     // for idle TTL
+  SensitiveTokSession *tok_session;       // session-wide token storage
+  time_t created_at;                      // for absolute TTL
+  time_t last_active;                     // for idle TTL
 } BrokerMcpSession;
 
 /* Resolves a positive TTL override from environment in test builds.
@@ -101,6 +103,30 @@ static uint32_t broker_ttl_from_env_or_default(const char *name,
     return fallback_ttl;
   if (parsed == 0 || parsed > UINT32_MAX)
     return fallback_ttl;
+  return (uint32_t)parsed;
+#endif
+}
+
+/* Test-only override for the sensitive-token arena cap.
+ * Production sessions always use SESSION_TOKEN_ARENA_CAP_BYTES; integration
+ * tests use this hook to force generation rollover without allocating large
+ * result sets.
+ */
+static uint32_t broker_token_arena_cap_bytes(void) {
+#ifndef ADBX_TEST_MODE
+  return SESSION_TOKEN_ARENA_CAP_BYTES;
+#else
+  const char *raw = getenv(TEST_TOKEN_ARENA_CAP_ENV);
+  if (!raw || raw[0] == '\0')
+    return SESSION_TOKEN_ARENA_CAP_BYTES;
+
+  char *end = NULL;
+  errno = 0;
+  unsigned long long parsed = strtoull(raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0')
+    return SESSION_TOKEN_ARENA_CAP_BYTES;
+  if (parsed == 0 || parsed > UINT32_MAX)
+    return SESSION_TOKEN_ARENA_CAP_BYTES;
   return (uint32_t)parsed;
 #endif
 }
@@ -305,10 +331,8 @@ static ssize_t broker_find_idle_by_token(const PackedArray *idle,
 static void session_owned_clean(BrokerMcpSession *s) {
   if (!s)
     return;
-  parr_destroy(s->db_stores);
-  s->db_stores = NULL;
-  arena_clean(&s->arena);
-  s->arena = (Arena){0};
+  stok_session_destroy(s->tok_session);
+  s->tok_session = NULL;
 }
 
 /* Cleanup callback for active session slots.
@@ -359,14 +383,12 @@ static uint32_t sessions_add_from_pending(PackedArray *active,
   memset(dst, 0, sizeof(*dst));
   dst->bc = pending->bc;
   dst->fd = pending->fd;
-  dst->arena = pending->arena;
-  dst->db_stores = pending->db_stores;
+  dst->tok_session = pending->tok_session;
 
   // pending no longer owns channel/fd after transfer.
   pending->fd = -1;
   memset(&pending->bc, 0, sizeof(pending->bc));
-  pending->arena = (Arena){0};
-  pending->db_stores = NULL;
+  pending->tok_session = NULL;
 
   if (out_sess)
     *out_sess = dst;
@@ -388,16 +410,13 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
   /* Save fields we need before the active slot is cleaned/overwritten. */
   uint8_t token[RESUME_TOKEN_LEN];
   memcpy(token, src->resume_token, RESUME_TOKEN_LEN);
-  uint32_t generation = src->generation;
-  Arena arena = src->arena;
-  PackedArray *db_stores = src->db_stores;
+  SensitiveTokSession *tok_session = src->tok_session;
   time_t created = src->created_at;
 
   /* Tear down the live connection. */
   bufch_clean(&src->bc);
   src->fd = -1;
-  src->arena = (Arena){0};
-  src->db_stores = NULL;
+  src->tok_session = NULL;
 
   /* Remove from active (cleanup callback is safe — bufch_clean is
    * idempotent). */
@@ -412,15 +431,15 @@ static void session_move_to_idle(PackedArray *active, PackedArray *idle,
   /* Insert into idle. */
   BrokerMcpSession *dst = NULL;
   uint32_t idx = parr_emplace(idle, (void **)&dst);
-  if (idx == UINT32_MAX || !dst)
+  if (idx == UINT32_MAX || !dst) {
+    stok_session_destroy(tok_session);
     return;
+  }
 
   memset(dst, 0, sizeof(*dst));
   dst->fd = -1;
   memcpy(dst->resume_token, token, RESUME_TOKEN_LEN);
-  dst->generation = generation;
-  dst->arena = arena;
-  dst->db_stores = db_stores;
+  dst->tok_session = tok_session;
   dst->created_at = created;
   dst->last_active = time(NULL);
 }
@@ -560,46 +579,11 @@ void broker_destroy(Broker *b) {
 
 /*-------------------------------- Tools Call -------------------------------*/
 
-/* Cleans one packed-array slot that stores a DbTokenStore.
- * It borrows 'obj' and does not allocate memory.
- * Side effects: releases token-store owned arrays/hash/pools.
- * Error semantics: none (void cleanup callback).
- */
-static void broker_db_store_cleanup(void *obj, void *ctx) {
-  (void)ctx;
-  DbTokenStore **slot = (DbTokenStore **)obj;
-  if (!slot)
-    return;
-  stok_store_destroy(*slot);
-  *slot = NULL;
-}
-
-/* Finds one DbTokenStore by exact connection name.
- * It borrows 'stores' and 'connection_name'; no allocations.
- * Side effects: none.
- * Error semantics: returns mutable store pointer on match, NULL otherwise.
- */
-static DbTokenStore *broker_find_store(PackedArray *stores,
-                                       const char *connection_name) {
-  if (!stores || !connection_name)
-    return NULL;
-
-  size_t n = parr_len(stores);
-  for (size_t i = 0; i < n; i++) {
-    DbTokenStore **slot = (DbTokenStore **)parr_at(stores, (uint32_t)i);
-    if (!slot || !*slot)
-      continue;
-    AdbxTriStatus eq = stok_store_matches_conn_name(*slot, connection_name);
-    if (eq == YES)
-      return *slot;
-  }
-  return NULL;
-}
-
 /* Resolves per-session store for the selected connection, lazily creating it.
  * It borrows 'sess' and 'profile' and returns a borrowed pointer in
  * '*out_store'.
- * Side effects: may append one DbTokenStore to an already-initialized session.
+ * Side effects: may append one DbTokenStore to an already-initialized token
+ * session.
  * Error semantics: returns OK on success, ERR on invalid input or allocation
  * failure.
  */
@@ -610,32 +594,14 @@ static AdbxStatus broker_get_or_init_store(BrokerMcpSession *sess,
     *out_store = NULL;
   if (!sess || !profile || !profile->connection_name || !out_store)
     return ERR;
-  if (!sess->db_stores || sess->arena.head == NULL || sess->arena.tail == NULL)
+  if (stok_session_is_ok(sess->tok_session) != YES)
     return ERR;
 
-  assert(sess->arena.cap > 0);
-  assert(sess->arena.block_sz > 0);
-
-  DbTokenStore *found =
-      broker_find_store(sess->db_stores, profile->connection_name);
-  if (found) {
-    *out_store = found;
-    return OK;
-  }
-
-  DbTokenStore **slot = NULL;
-  uint32_t idx = parr_emplace(sess->db_stores, (void **)&slot);
-  if (idx == UINT32_MAX || !slot)
+  DbTokenStore *store =
+      stok_session_get_or_create_store(sess->tok_session, profile);
+  if (!store)
     return ERR;
-  *slot = NULL;
 
-  DbTokenStore *store = stok_store_create(profile, &sess->arena);
-  if (!store) {
-    parr_drop_swap(sess->db_stores, idx);
-    return ERR;
-  }
-
-  *slot = store;
   *out_store = store;
   return OK;
 }
@@ -738,7 +704,6 @@ static void broker_run_sql_query(const BrokerRunArgs *args,
   QueryResultBuildPolicy qb_policy = {
       .plan = &vout.plan,
       .store = store,
-      .generation = sess->generation,
   };
 
   DbExecResult exec_res;
@@ -892,40 +857,39 @@ static void broker_run_sql_query_tokens(const BrokerRunArgs *args,
       goto free_n_return;
     }
 
-    ParsedTokView parsed = {0};
-    if (stok_parse_view_inplace(tok, &parsed) != OK) {
+    const SensitiveTok *bound = NULL;
+    StokResolveStatus tok_rc = stok_store_resolve_token(store, tok, &bound);
+    if (tok_rc == STOK_RESOLVE_ERR_FORMAT) {
       *out_resp =
-          bresp_create_tool_err(id,
-                                "Invalid token format '%s'. Expected "
-                                "tok_<connection>_<generation>_<index>.",
-                                tok);
+          bresp_create_tool_err(id, "Invalid token format. Expected "
+                                    "tok_<connection>_<generation>_<index>.");
       free(tok);
       goto free_n_return;
     }
-
-    if (strcmp(parsed.connection_name, conn_name) != 0) {
+    if (tok_rc == STOK_RESOLVE_ERR_CONNECTION) {
       *out_resp = bresp_create_tool_err(
           id,
-          "Token connection mismatch: token is bound to '%s' but "
-          "request connectionName is '%s'.",
-          parsed.connection_name, conn_name);
+          "Token connection mismatch: token is not bound to request "
+          "connectionName '%s'.",
+          conn_name);
       free(tok);
       goto free_n_return;
     }
-    if (parsed.generation != sess->generation) {
+    if (tok_rc == STOK_RESOLVE_ERR_STALE) {
       *out_resp = bresp_create_tool_err(
-          id,
-          "Stale token generation: token=%u current=%u. Run a fresh "
-          "sensitive query first.",
-          parsed.generation, sess->generation);
+          id, "Stale token generation. Run a fresh sensitive query first.");
       free(tok);
       goto free_n_return;
     }
-
-    const SensitiveTok *bound = stok_store_get(store, parsed.index);
-    if (!bound) {
+    if (tok_rc == STOK_RESOLVE_ERR_UNKNOWN) {
+      *out_resp =
+          bresp_create_tool_err(id, "Unknown token index for this session.");
+      free(tok);
+      goto free_n_return;
+    }
+    if (tok_rc != STOK_RESOLVE_OK || !bound) {
       *out_resp = bresp_create_tool_err(
-          id, "Unknown token index %u for this session.", parsed.index);
+          id, "Invalid token parameter for this session.");
       free(tok);
       goto free_n_return;
     }
@@ -973,7 +937,6 @@ static void broker_run_sql_query_tokens(const BrokerRunArgs *args,
   QueryResultBuildPolicy qb_policy = {
       .plan = &vout.plan,
       .store = store,
-      .generation = sess->generation,
   };
 
   // Build the params array that will be used by the DbBackend for query
@@ -1377,7 +1340,7 @@ static AdbxStatus verify_peer_uid(int cfd) {
 /* Initializes token-state containers for one broker session.
  * It borrows and mutates 'sess'; ownership of created members stays in the
  * session and is later released by session cleanup callbacks.
- * Side effects: allocate/init the per-session Arena and db_stores array.
+ * Side effects: allocates the per-session sensitive-token state.
  * Error semantics: returns OK when state is ready, ERR on invalid input,
  * inconsistent partial state, or allocation failure.
  */
@@ -1386,20 +1349,11 @@ static AdbxStatus broker_session_token_state_init(BrokerMcpSession *sess) {
     return ERR;
 
   // session should be empty/zeroed during initialization
-  assert(arena_is_zeroed(&sess->arena) == YES);
-  assert(!sess->db_stores);
+  assert(!sess->tok_session);
 
-  uint32_t cap = SESSION_TOKEN_ARENA_CAP_BYTES;
-  if (arena_init(&sess->arena, NULL, &cap) != OK)
+  sess->tok_session = stok_session_create(broker_token_arena_cap_bytes());
+  if (!sess->tok_session)
     return ERR;
-
-  sess->db_stores = parr_create(sizeof(DbTokenStore *));
-  if (!sess->db_stores) {
-    arena_clean(&sess->arena);
-    return ERR;
-  }
-  parr_set_cleanup(sess->db_stores, broker_db_store_cleanup, NULL);
-
   return OK;
 }
 
@@ -1409,7 +1363,7 @@ inline static AdbxTriStatus
 broker_session_token_state_ok(BrokerMcpSession *sess) {
   if (!sess)
     return ERR;
-  if (!sess->db_stores || arena_is_ok(&sess->arena) != YES)
+  if (stok_session_is_ok(sess->tok_session) != YES)
     return NO;
   return YES;
 }
@@ -1539,15 +1493,12 @@ static AdbxStatus broker_do_handshake(Broker *b, int cfd) {
       goto send_n_close;
     }
     memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
-    active_sess->generation = idle_sess->generation;
-    active_sess->arena = idle_sess->arena;
-    active_sess->db_stores = idle_sess->db_stores;
+    active_sess->tok_session = idle_sess->tok_session;
     active_sess->created_at = resume_created_at;
     active_sess->last_active = now;
 
     // idle session lost owenership of these entities
-    idle_sess->arena = (Arena){0};
-    idle_sess->db_stores = NULL;
+    idle_sess->tok_session = NULL;
 
     // Remove stale idle record.
     parr_drop_swap(b->idle_sessions, (uint32_t)idle_idx);
@@ -1577,7 +1528,6 @@ static AdbxStatus broker_do_handshake(Broker *b, int cfd) {
       goto send_n_close;
     }
     memcpy(active_sess->resume_token, out_token, RESUME_TOKEN_LEN);
-    active_sess->generation = 0;
     if (broker_session_token_state_init(active_sess) != OK) {
       status = HS_ERR_INTERNAL;
       goto send_n_close;

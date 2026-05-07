@@ -78,7 +78,12 @@ static AdbxTriStatus db_relation_kind_is_valid(DbRelationKind kind) {
 static inline char *db_relation_info_copy_str(Arena *arena, const char *src) {
   if (!arena || !src)
     return NULL;
-  return (char *)arena_add_nul(arena, (void *)src, (uint32_t)strlen(src));
+  char *out = NULL;
+  if (arena_add_nul(arena, (void *)src, (uint32_t)strlen(src),
+                    (void **)&out) != OK) {
+    return NULL;
+  }
+  return out;
 }
 
 DbRelationInfo *db_relation_info_create(uint32_t ncols) {
@@ -95,9 +100,8 @@ DbRelationInfo *db_relation_info_create(uint32_t ncols) {
       free(info);
       return NULL;
     }
-    info->cols =
-        (DbRelationColumn *)arena_calloc(&info->arena, (uint32_t)cols_bytes);
-    if (!info->cols) {
+    if (arena_calloc(&info->arena, (uint32_t)cols_bytes,
+                     (void **)&info->cols) != OK) {
       arena_clean(&info->arena);
       free(info);
       return NULL;

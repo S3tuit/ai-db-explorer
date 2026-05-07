@@ -76,22 +76,29 @@ AdbxTriStatus arena_is_zeroed(const Arena *ar);
  */
 AdbxTriStatus arena_is_ok(const Arena *ar);
 
-/* Allocates 'len' bytes inside the arena and returns the pointer.
- * Memory is uninitialized. Returns NULL on error. */
-void *arena_alloc(Arena *ar, uint32_t len);
-
-/* Allocates 'len' bytes inside the arena and returns the pointer.
- * Memory is zero-initialized. Returns NULL on error. */
-void *arena_calloc(Arena *ar, uint32_t len);
-
-/* Copies 'len' bytes from 'start_v' into the arena.
- * Returns a pointer to the stored copy on success, NULL on error. */
-void *arena_add(Arena *ar, void *start_v, uint32_t len);
-
-/* Copies 'len' bytes from 'start_v' into the arena and appends a NUL byte.
- * Use this for C strings. Returns a pointer to the stored copy, NULL on error.
+/* Allocates 'len' bytes inside the arena into '*out_ptr'.
+ * Memory is uninitialized.
+ * Returns OK on success, AS_CAP when the arena cap would be exceeded, or ERR on
+ * invalid input/overflow.
  */
-void *arena_add_nul(Arena *ar, void *start_v, uint32_t len);
+AdbxStatus arena_alloc(Arena *ar, uint32_t len, void **out_ptr);
+
+/* Allocates 'len' bytes inside the arena into '*out_ptr'.
+ * Memory is zero-initialized.
+ * Returns OK on success, AS_CAP when the arena cap would be exceeded, or ERR on
+ * invalid input/overflow.
+ */
+AdbxStatus arena_calloc(Arena *ar, uint32_t len, void **out_ptr);
+
+/* Copies 'len' bytes from 'start_v' into the arena and writes the stored copy
+ * pointer into '*out_ptr'. */
+AdbxStatus arena_add(Arena *ar, void *start_v, uint32_t len, void **out_ptr);
+
+/* Copies 'len' bytes from 'start_v' into the arena, appends a NUL byte, and
+ * writes the stored copy pointer into '*out_ptr'. Use this for C strings.
+ */
+AdbxStatus arena_add_nul(Arena *ar, void *start_v, uint32_t len,
+                         void **out_ptr);
 
 /* Returns the number of bytes used by the data inside 'ar'. */
 uint32_t arena_get_used(Arena *ar);

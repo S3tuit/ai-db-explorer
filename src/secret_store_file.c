@@ -144,7 +144,10 @@ static inline char *ss_arena_dup_cstr(Arena *arena, const char *s) {
   size_t n = strlen(s);
   if (n > UINT32_MAX)
     return NULL;
-  return (char *)arena_add_nul(arena, (void *)s, (uint32_t)n);
+  char *out = NULL;
+  if (arena_add_nul(arena, (void *)s, (uint32_t)n, (void **)&out) != OK)
+    return NULL;
+  return out;
 }
 
 /* Initializes one list with arena-backed entry array of size n.
@@ -169,9 +172,9 @@ static AdbxStatus ss_list_init_with_n_entries(SecretEntryList *out, size_t n) {
   if (arena_init(&out->arena, NULL, NULL) != OK)
     return ERR;
 
-  SecretEntry *entries = (SecretEntry *)arena_calloc(
-      &out->arena, (uint32_t)(n * sizeof(*entries)));
-  if (!entries) {
+  SecretEntry *entries = NULL;
+  if (arena_calloc(&out->arena, (uint32_t)(n * sizeof(*entries)),
+                   (void **)&entries) != OK) {
     ss_entries_clean(out);
     return ERR;
   }

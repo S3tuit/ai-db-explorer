@@ -174,14 +174,16 @@ AdbxTriStatus arena_is_ok(const Arena *ar) {
   return YES;
 }
 
-/* Ensure 'extra' bytes available, growing by adding blocks if needed.
- * Returns OK on success, ERR if cap reached or errors occurred. */
 /* Ensures 'extra' bytes are available, growing by adding a block.
  * Ownership: arena retains ownership of blocks.
  * Side effects: may allocate a new block.
- * Returns OK on success, ERR on cap/overflow. */
+ * Returns OK on success, AS_CAP on cap exhaustion, ERR on invalid
+ * input/overflow. */
 AdbxStatus arena_ensure(Arena *ar, uint32_t extra) {
   if (!ar)
+    return ERR;
+  if (!ar->head || !ar->tail || ar->cap == 0 || ar->block_sz == 0 ||
+      ar->used > ar->cap)
     return ERR;
 
   // overflow guard: used + extra
@@ -190,15 +192,17 @@ AdbxStatus arena_ensure(Arena *ar, uint32_t extra) {
 
   uint32_t needed = ar->used + extra;
   if (needed > ar->cap)
-    return ERR;
+    return AS_CAP;
 
   // If the current block has space, we're done.
   if (ar->tail && (ar->tail->cap - ar->tail->used) >= extra)
     return OK;
+  if (!ar->tail)
+    return ERR;
 
   uint32_t remaining = ar->cap - ar->used;
   if (remaining < extra)
-    return ERR;
+    return AS_CAP;
 
   // Blocks keep doubling in size each time one is added
   uint32_t new_sz = ar->block_sz;
@@ -215,7 +219,7 @@ AdbxStatus arena_ensure(Arena *ar, uint32_t extra) {
   if (new_sz > remaining)
     new_sz = remaining;
   if (new_sz < extra)
-    return ERR;
+    return AS_CAP;
 
   ArenaBlock *nb = arena_block_create(new_sz);
   ar->tail->next = nb;
@@ -225,21 +229,26 @@ AdbxStatus arena_ensure(Arena *ar, uint32_t extra) {
 }
 
 /* Bumps the arena cursor by 'len' bytes (aligned up to ARENA_ALIGN)
- * and returns a pointer to the start of the reserved region.
+ * and writes a pointer to the start of the reserved region into '*out_payload'.
  * Padding bytes between 'len' and the aligned size are zeroed.
- * Returns NULL on invalid input, overflow, or capacity failure.
+ * Returns OK on success, AS_CAP on cap exhaustion, ERR on invalid
+ * input/overflow.
  */
-static inline uint8_t *arena_reserve(Arena *ar, uint32_t len) {
-  if (!ar)
-    return NULL;
+static inline AdbxStatus arena_reserve(Arena *ar, uint32_t len,
+                                       uint8_t **out_payload) {
+  if (out_payload)
+    *out_payload = NULL;
+  if (!ar || !out_payload)
+    return ERR;
 
   if (len > UINT32_MAX - ARENA_ALIGN)
-    return NULL;
+    return ERR;
 
   const uint32_t entry_sz = arena_align_up_u32(len, ARENA_ALIGN);
 
-  if (arena_ensure(ar, entry_sz) != OK)
-    return NULL;
+  AdbxStatus rc = arena_ensure(ar, entry_sz);
+  if (rc != OK)
+    return rc;
 
   uint8_t *payload = ar->tail->data + ar->tail->used;
 
@@ -249,48 +258,79 @@ static inline uint8_t *arena_reserve(Arena *ar, uint32_t len) {
 
   ar->tail->used += entry_sz;
   ar->used += entry_sz;
-  return payload;
+  *out_payload = payload;
+  return OK;
 }
 
-void *arena_alloc(Arena *ar, uint32_t len) {
-  return (void *)arena_reserve(ar, len);
+AdbxStatus arena_alloc(Arena *ar, uint32_t len, void **out_ptr) {
+  if (out_ptr)
+    *out_ptr = NULL;
+  if (!out_ptr)
+    return ERR;
+
+  uint8_t *payload = NULL;
+  AdbxStatus rc = arena_reserve(ar, len, &payload);
+  if (rc != OK)
+    return rc;
+  *out_ptr = payload;
+  return OK;
 }
 
-void *arena_calloc(Arena *ar, uint32_t len) {
-  uint8_t *payload = arena_reserve(ar, len);
-  if (!payload)
-    return NULL;
+AdbxStatus arena_calloc(Arena *ar, uint32_t len, void **out_ptr) {
+  if (out_ptr)
+    *out_ptr = NULL;
+  if (!out_ptr)
+    return ERR;
+
+  uint8_t *payload = NULL;
+  AdbxStatus rc = arena_reserve(ar, len, &payload);
+  if (rc != OK)
+    return rc;
   if (len != 0)
     memset(payload, 0, len);
-  return payload;
+  *out_ptr = payload;
+  return OK;
 }
 
-void *arena_add(Arena *ar, void *start_v, uint32_t len) {
+AdbxStatus arena_add(Arena *ar, void *start_v, uint32_t len, void **out_ptr) {
+  if (out_ptr)
+    *out_ptr = NULL;
+  if (!out_ptr)
+    return ERR;
   if (!start_v && len != 0)
-    return NULL;
+    return ERR;
 
-  uint8_t *payload = arena_reserve(ar, len);
-  if (!payload)
-    return NULL;
+  uint8_t *payload = NULL;
+  AdbxStatus rc = arena_reserve(ar, len, &payload);
+  if (rc != OK)
+    return rc;
   if (len != 0)
     memcpy(payload, start_v, len);
-  return payload;
+  *out_ptr = payload;
+  return OK;
 }
 
-void *arena_add_nul(Arena *ar, void *start_v, uint32_t len) {
+AdbxStatus arena_add_nul(Arena *ar, void *start_v, uint32_t len,
+                         void **out_ptr) {
+  if (out_ptr)
+    *out_ptr = NULL;
+  if (!out_ptr)
+    return ERR;
   if (!start_v && len != 0)
-    return NULL;
+    return ERR;
 
   if (len > UINT32_MAX - 1u)
-    return NULL;
+    return ERR;
 
-  uint8_t *payload = arena_reserve(ar, len + 1u);
-  if (!payload)
-    return NULL;
+  uint8_t *payload = NULL;
+  AdbxStatus rc = arena_reserve(ar, len + 1u, &payload);
+  if (rc != OK)
+    return rc;
   if (len != 0)
     memcpy(payload, start_v, len);
   payload[len] = '\0';
-  return payload;
+  *out_ptr = payload;
+  return OK;
 }
 
 uint32_t arena_get_used(Arena *ar) {
@@ -318,8 +358,8 @@ AdbxStatus ptrvec_push(PtrVec *v, void *ptr) {
 void **ptrvec_flatten(PtrVec *v, Arena *a) {
   if (!v || !a || v->len == 0)
     return NULL;
-  void **arr = (void **)arena_alloc(a, (uint32_t)(v->len * sizeof(*arr)));
-  if (!arr)
+  void **arr = NULL;
+  if (arena_alloc(a, (uint32_t)(v->len * sizeof(*arr)), (void **)&arr) != OK)
     return NULL;
   memcpy(arr, v->items, v->len * sizeof(*arr));
   return arr;

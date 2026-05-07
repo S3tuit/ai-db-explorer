@@ -21,8 +21,8 @@ AdbxStatus qir_handle_init(QirQueryHandle *h) {
   if (arena_init(&h->arena, &size, &cap) != OK)
     return ERR;
 
-  QirQuery *q = (QirQuery *)arena_calloc(&h->arena, (uint32_t)sizeof(*q));
-  if (!q) {
+  QirQuery *q = NULL;
+  if (arena_calloc(&h->arena, (uint32_t)sizeof(*q), (void **)&q) != OK) {
     arena_clean(&h->arena);
     return ERR;
   }
@@ -63,8 +63,8 @@ void qir_set_status(QirQuery *q, Arena *arena, QirStatus status,
     return;
   if (!q->status_reason && reason) {
     if (arena) {
-      q->status_reason = (const char *)arena_add_nul(arena, (void *)reason,
-                                                     (uint32_t)strlen(reason));
+      (void)arena_add_nul(arena, (void *)reason, (uint32_t)strlen(reason),
+                           (void **)&q->status_reason);
     } else {
       q->status_reason = reason;
     }
@@ -359,10 +359,10 @@ static QirSelectItem *
 qir_new_expanded_select_item(Arena *arena, const char *qual, const char *col) {
   if (!arena || !qual || qual[0] == '\0' || !col || col[0] == '\0')
     return NULL;
-  QirSelectItem *si =
-      (QirSelectItem *)arena_calloc(arena, (uint32_t)sizeof(*si));
-  QirExpr *e = (QirExpr *)arena_calloc(arena, (uint32_t)sizeof(*e));
-  if (!si || !e)
+  QirSelectItem *si = NULL;
+  QirExpr *e = NULL;
+  if (arena_calloc(arena, (uint32_t)sizeof(*si), (void **)&si) != OK ||
+      arena_calloc(arena, (uint32_t)sizeof(*e), (void **)&e) != OK)
     return NULL;
   e->kind = QIR_EXPR_COLREF;
   e->u.colref.qualifier.name = qual;
@@ -698,9 +698,9 @@ static AdbxStatus qir_resolve_select(QirQuery *q,
 
   if (new_nselect == 0)
     return OK;
-  new_items = (QirSelectItem **)arena_calloc(
-      q->arena, (uint32_t)(new_nselect * sizeof(*new_items)));
-  if (!new_items)
+  new_items = NULL;
+  if (arena_calloc(q->arena, (uint32_t)(new_nselect * sizeof(*new_items)),
+                   (void **)&new_items) != OK)
     return ERR;
 
   // Copy, as-is, the non stat columns and expand the star columns
