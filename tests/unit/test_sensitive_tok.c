@@ -2,18 +2,28 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "arena.h"
 #include "sensitive_tok.h"
 #include "test.h"
 
-/* Initializes a bounded arena used by token-store tests.
- * It borrows 'arena' and mutates it in-place.
- * Side effects: allocates first arena block.
- * Error semantics: asserts on failure.
- */
-static void init_test_arena(Arena *arena) {
-  uint32_t cap = 4u * 1024u * 1024u;
-  ASSERT_TRUE(arena_init(arena, NULL, &cap) == OK);
+static SensitiveTokSession *create_test_session(uint32_t cap) {
+  SensitiveTokSession *sess = stok_session_create(cap);
+  ASSERT_TRUE(sess != NULL);
+  ASSERT_TRUE(stok_session_is_ok(sess) == YES);
+  return sess;
+}
+
+static DbTokenStore *create_test_store(SensitiveTokSession *sess,
+                                       const char *conn_name,
+                                       SafetyColumnStrategy mode) {
+  ConnProfile cp = make_profile(conn_name, mode);
+  DbTokenStore *store = stok_session_get_or_create_store(sess, &cp);
+  ASSERT_TRUE(store != NULL);
+  return store;
+}
+
+static DbTokenStore *create_det_store(SensitiveTokSession *sess,
+                                      const char *conn_name) {
+  return create_test_store(sess, conn_name, SAFETY_COLSTRAT_DETERMINISTIC);
 }
 
 static void test_parse_view_ok(void) {
@@ -78,48 +88,41 @@ static void test_parse_view_failure_does_not_mutate_input(void) {
 }
 
 static void test_store_init_and_clean(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
 
   ASSERT_TRUE(store != NULL);
   ASSERT_TRUE(stok_store_len(store) == 0);
 
-  stok_store_destroy(store);
   stok_store_destroy(NULL);
-
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 static void test_store_init_bad_input(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
 
   ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  ASSERT_TRUE(stok_store_create(NULL, &arena) == NULL);
-  ASSERT_TRUE(stok_store_create(&cp, NULL) == NULL);
+  ASSERT_TRUE(stok_session_create(0) == NULL);
+  ASSERT_TRUE(stok_session_get_or_create_store(NULL, &cp) == NULL);
+  ASSERT_TRUE(stok_session_get_or_create_store(sess, NULL) == NULL);
 
   ConnProfile bad = {0};
-  ASSERT_TRUE(stok_store_create(&bad, &arena) == NULL);
+  ASSERT_TRUE(stok_session_get_or_create_store(sess, &bad) == NULL);
 
   ConnProfile bad_mode = make_profile("pgmain", (SafetyColumnStrategy)9999);
-  ASSERT_TRUE(stok_store_create(&bad_mode, &arena) == NULL);
+  ASSERT_TRUE(stok_session_get_or_create_store(sess, &bad_mode) == NULL);
 
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 static void test_store_connection_match_helpers(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
 
   ConnProfile a_cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  ConnProfile b_cp = make_profile("pgmain", SAFETY_COLSTRAT_RANDOMIZED);
   ConnProfile c_cp = make_profile("analytics", SAFETY_COLSTRAT_RANDOMIZED);
-  DbTokenStore *a = stok_store_create(&a_cp, &arena);
-  DbTokenStore *b = stok_store_create(&b_cp, &arena);
-  DbTokenStore *c = stok_store_create(&c_cp, &arena);
+  DbTokenStore *a = stok_session_get_or_create_store(sess, &a_cp);
+  DbTokenStore *b = stok_session_get_or_create_store(sess, &a_cp);
+  DbTokenStore *c = stok_session_get_or_create_store(sess, &c_cp);
   ASSERT_TRUE(a != NULL);
   ASSERT_TRUE(b != NULL);
   ASSERT_TRUE(c != NULL);
@@ -134,10 +137,7 @@ static void test_store_connection_match_helpers(void) {
   ASSERT_TRUE(stok_store_matches_conn_name(NULL, "pgmain") == ERR);
   ASSERT_TRUE(stok_store_matches_conn_name(a, NULL) == ERR);
 
-  stok_store_destroy(a);
-  stok_store_destroy(b);
-  stok_store_destroy(c);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies accessor edge cases for NULL and out-of-range indexes. */
@@ -145,10 +145,8 @@ static void test_store_get_len_edge_cases(void) {
   ASSERT_TRUE(stok_store_len(NULL) == 0);
   ASSERT_TRUE(stok_store_get(NULL, 0) == NULL);
 
-  Arena arena = {0};
-  init_test_arena(&arena);
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   ASSERT_TRUE(stok_store_len(store) == 0);
@@ -162,23 +160,19 @@ static void test_store_get_len_edge_cases(void) {
       .pg_oid = 23u,
   };
   char tok[SENSITIVE_TOK_BUFSZ] = {0};
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &in, tok) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in, tok) > 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
   ASSERT_TRUE(stok_store_get(store, 0) != NULL);
   ASSERT_TRUE(stok_store_get(store, 1) == NULL);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies deterministic mode compares domains by bytes, not pointer identity.
  */
 static void test_create_token_deterministic_pointer_independence(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   char v1[] = {'a', 'b', 'c'};
@@ -218,32 +212,28 @@ static void test_create_token_deterministic_pointer_independence(void) {
   char tok3[SENSITIVE_TOK_BUFSZ] = {0};
   char tok4[SENSITIVE_TOK_BUFSZ] = {0};
 
-  ASSERT_TRUE(stok_store_create_token(store, 9u, &in1, tok1) > 0);
-  ASSERT_TRUE(stok_store_create_token(store, 9u, &in1_same, tok2) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in1_same, tok2) > 0);
   ASSERT_TRUE(strcmp(tok1, tok2) == 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
 
-  ASSERT_TRUE(stok_store_create_token(store, 9u, &in2, tok3) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in2, tok3) > 0);
   ASSERT_TRUE(strcmp(tok3, tok1) != 0);
   ASSERT_TRUE(stok_store_len(store) == 2);
 
-  ASSERT_TRUE(stok_store_create_token(store, 9u, &in3, tok4) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in3, tok4) > 0);
   ASSERT_TRUE(strcmp(tok4, tok1) != 0);
   ASSERT_TRUE(stok_store_len(store) == 3);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies SQL NULL payloads are supported and deduplicated in deterministic
  * mode for identical domain keys.
  */
 static void test_create_token_null_value_deterministic(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   SensitiveTokIn in = {
@@ -256,8 +246,8 @@ static void test_create_token_null_value_deterministic(void) {
   char tok1[SENSITIVE_TOK_BUFSZ] = {0};
   char tok2[SENSITIVE_TOK_BUFSZ] = {0};
 
-  ASSERT_TRUE(stok_store_create_token(store, 3u, &in, tok1) > 0);
-  ASSERT_TRUE(stok_store_create_token(store, 3u, &in, tok2) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in, tok2) > 0);
   ASSERT_TRUE(strcmp(tok1, tok2) == 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
 
@@ -266,23 +256,19 @@ static void test_create_token_null_value_deterministic(void) {
   ASSERT_TRUE(e0->value == NULL);
   ASSERT_TRUE(e0->value_len == 0);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies token creation rejects oversized connection names
  * (>CONN_NAME_MAX_LEN). */
 static void test_create_token_connection_name_too_long(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
 
   char long_name[CONN_NAME_MAX_LEN + 2];
   memset(long_name, 'a', sizeof(long_name));
   long_name[sizeof(long_name) - 1] = '\0';
 
-  ConnProfile cp = make_profile(long_name, SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
-  ASSERT_TRUE(store != NULL);
+  DbTokenStore *store = create_det_store(sess, long_name);
 
   SensitiveTokIn in = {
       .value = "abc",
@@ -292,19 +278,15 @@ static void test_create_token_connection_name_too_long(void) {
       .pg_oid = 23u,
   };
   char tok[SENSITIVE_TOK_BUFSZ] = {0};
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &in, tok) < 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in, tok) < 0);
   ASSERT_TRUE(stok_store_len(store) == 0);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 static void test_create_token_deterministic_reuse(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   char tok1[SENSITIVE_TOK_BUFSZ] = {0};
@@ -318,12 +300,12 @@ static void test_create_token_deterministic_reuse(void) {
       .pg_oid = 23u,
   };
 
-  int n1 = stok_store_create_token(store, 7u, &in, tok1);
+  int n1 = stok_store_create_token(store, &in, tok1);
   ASSERT_TRUE(n1 > 0);
-  ASSERT_TRUE(strcmp(tok1, "tok_pgmain_7_0") == 0);
+  ASSERT_TRUE(strcmp(tok1, "tok_pgmain_0_0") == 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
 
-  int n2 = stok_store_create_token(store, 7u, &in, tok2);
+  int n2 = stok_store_create_token(store, &in, tok2);
   ASSERT_TRUE(n2 == n1);
   ASSERT_TRUE(strcmp(tok2, tok1) == 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
@@ -340,19 +322,15 @@ static void test_create_token_deterministic_reuse(void) {
   const SensitiveTok *nul = stok_store_get(store, 1);
   ASSERT_TRUE(nul == NULL);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies deterministic mode reuses one token for the same (domain, value)
  * pair even across separate caller-owned input buffers.
  */
 static void test_create_token_deterministic_same_domain_same_value(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   char v1[] = "alice";
@@ -374,24 +352,20 @@ static void test_create_token_deterministic_same_domain_same_value(void) {
       .pg_oid = 23u,
   };
 
-  ASSERT_TRUE(stok_store_create_token(store, 11u, &in1, tok1) > 0);
-  ASSERT_TRUE(stok_store_create_token(store, 11u, &in2, tok2) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in2, tok2) > 0);
   ASSERT_TRUE(strcmp(tok1, tok2) == 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies deterministic mode separates equal plaintext values across
  * different sensitive domains.
  */
 static void test_create_token_deterministic_different_domain_same_value(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   char tok1[SENSITIVE_TOK_BUFSZ] = {0};
@@ -411,24 +385,20 @@ static void test_create_token_deterministic_different_domain_same_value(void) {
       .pg_oid = 25u,
   };
 
-  ASSERT_TRUE(stok_store_create_token(store, 11u, &in1, tok1) > 0);
-  ASSERT_TRUE(stok_store_create_token(store, 11u, &in2, tok2) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in2, tok2) > 0);
   ASSERT_TRUE(strcmp(tok1, tok2) != 0);
   ASSERT_TRUE(stok_store_len(store) == 2);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies deterministic mode separates different plaintext values inside the
  * same sensitive domain.
  */
 static void test_create_token_deterministic_same_domain_different_value(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   char tok1[SENSITIVE_TOK_BUFSZ] = {0};
@@ -448,13 +418,12 @@ static void test_create_token_deterministic_same_domain_different_value(void) {
       .pg_oid = 23u,
   };
 
-  ASSERT_TRUE(stok_store_create_token(store, 11u, &in1, tok1) > 0);
-  ASSERT_TRUE(stok_store_create_token(store, 11u, &in2, tok2) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in2, tok2) > 0);
   ASSERT_TRUE(strcmp(tok1, tok2) != 0);
   ASSERT_TRUE(stok_store_len(store) == 2);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies deterministic token identity remains isolated per connection even
@@ -462,13 +431,12 @@ static void test_create_token_deterministic_same_domain_different_value(void) {
  */
 static void
 test_create_token_deterministic_same_domain_same_value_diff_connection(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
 
   ConnProfile cp_a = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
   ConnProfile cp_b = make_profile("analytics", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store_a = stok_store_create(&cp_a, &arena);
-  DbTokenStore *store_b = stok_store_create(&cp_b, &arena);
+  DbTokenStore *store_a = stok_session_get_or_create_store(sess, &cp_a);
+  DbTokenStore *store_b = stok_session_get_or_create_store(sess, &cp_b);
   ASSERT_TRUE(store_a != NULL);
   ASSERT_TRUE(store_b != NULL);
 
@@ -482,24 +450,20 @@ test_create_token_deterministic_same_domain_same_value_diff_connection(void) {
       .pg_oid = 23u,
   };
 
-  ASSERT_TRUE(stok_store_create_token(store_a, 11u, &in, tok1) > 0);
-  ASSERT_TRUE(stok_store_create_token(store_b, 11u, &in, tok2) > 0);
+  ASSERT_TRUE(stok_store_create_token(store_a, &in, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store_b, &in, tok2) > 0);
   ASSERT_TRUE(strcmp(tok1, tok2) != 0);
   ASSERT_TRUE(stok_store_len(store_a) == 1);
   ASSERT_TRUE(stok_store_len(store_b) == 1);
 
-  stok_store_destroy(store_a);
-  stok_store_destroy(store_b);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 /* Verifies randomized mode never deduplicates equal (domain, value) inputs. */
 static void test_create_token_randomized_appends(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("analytics", SAFETY_COLSTRAT_RANDOMIZED);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store =
+      create_test_store(sess, "analytics", SAFETY_COLSTRAT_RANDOMIZED);
   ASSERT_TRUE(store != NULL);
 
   char tok1[SENSITIVE_TOK_BUFSZ] = {0};
@@ -513,14 +477,14 @@ static void test_create_token_randomized_appends(void) {
       .pg_oid = 25u,
   };
 
-  int n1 = stok_store_create_token(store, 3u, &in, tok1);
+  int n1 = stok_store_create_token(store, &in, tok1);
   ASSERT_TRUE(n1 > 0);
-  ASSERT_TRUE(strcmp(tok1, "tok_analytics_3_0") == 0);
+  ASSERT_TRUE(strcmp(tok1, "tok_analytics_0_0") == 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
 
-  int n2 = stok_store_create_token(store, 3u, &in, tok2);
+  int n2 = stok_store_create_token(store, &in, tok2);
   ASSERT_TRUE(n2 > 0);
-  ASSERT_TRUE(strcmp(tok2, "tok_analytics_3_1") == 0);
+  ASSERT_TRUE(strcmp(tok2, "tok_analytics_0_1") == 0);
   ASSERT_TRUE(stok_store_len(store) == 2);
 
   const SensitiveTok *e0 = stok_store_get(store, 0);
@@ -536,16 +500,75 @@ static void test_create_token_randomized_appends(void) {
   ASSERT_TRUE(memcmp(e0->domain, in.domain, in.domain_len) == 0);
   ASSERT_TRUE(memcmp(e1->domain, in.domain, in.domain_len) == 0);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
+}
+
+/* Verifies token creation resets the session token state when the bounded
+ * arena would be exceeded, bumps generation, and leaves old tokens stale.
+ */
+static void test_create_token_resets_session_on_arena_cap(void) {
+  SensitiveTokSession *sess = create_test_session(96u);
+  DbTokenStore *store =
+      create_test_store(sess, "analytics", SAFETY_COLSTRAT_RANDOMIZED);
+
+  char v1[40];
+  char v2[40];
+  char v3[40];
+  memset(v1, 'a', sizeof(v1));
+  memset(v2, 'b', sizeof(v2));
+  memset(v3, 'c', sizeof(v3));
+
+  SensitiveTokIn in1 = {
+      .value = v1,
+      .value_len = (uint32_t)sizeof(v1),
+      .domain = "payload",
+      .domain_len = (uint32_t)strlen("payload"),
+      .pg_oid = 25u,
+  };
+  SensitiveTokIn in2 = in1;
+  in2.value = v2;
+  SensitiveTokIn in3 = in1;
+  in3.value = v3;
+
+  char tok1[SENSITIVE_TOK_BUFSZ] = {0};
+  char tok2[SENSITIVE_TOK_BUFSZ] = {0};
+  char tok3[SENSITIVE_TOK_BUFSZ] = {0};
+  ASSERT_TRUE(stok_store_create_token(store, &in1, tok1) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in2, tok2) > 0);
+  ASSERT_TRUE(strcmp(tok1, "tok_analytics_0_0") == 0);
+  ASSERT_TRUE(strcmp(tok2, "tok_analytics_0_1") == 0);
+  ASSERT_TRUE(stok_session_generation(sess) == 0u);
+  ASSERT_TRUE(stok_store_len(store) == 2);
+
+  ASSERT_TRUE(stok_store_create_token(store, &in3, tok3) > 0);
+  ASSERT_TRUE(strcmp(tok3, "tok_analytics_1_0") == 0);
+  ASSERT_TRUE(stok_session_generation(sess) == 1u);
+  ASSERT_TRUE(stok_store_len(store) == 1);
+  ASSERT_TRUE(stok_session_arena_used(sess) <= 48u);
+
+  char stale_copy[SENSITIVE_TOK_BUFSZ] = {0};
+  char fresh_copy[SENSITIVE_TOK_BUFSZ] = {0};
+  ASSERT_TRUE(strlen(tok1) < sizeof(stale_copy));
+  ASSERT_TRUE(strlen(tok3) < sizeof(fresh_copy));
+  strcpy(stale_copy, tok1);
+  strcpy(fresh_copy, tok3);
+
+  const SensitiveTok *resolved = NULL;
+  ASSERT_TRUE(stok_store_resolve_token(store, stale_copy, &resolved) ==
+              STOK_RESOLVE_ERR_STALE);
+  ASSERT_TRUE(resolved == NULL);
+  ASSERT_TRUE(stok_store_resolve_token(store, fresh_copy, &resolved) ==
+              STOK_RESOLVE_OK);
+  ASSERT_TRUE(resolved != NULL);
+  ASSERT_TRUE(resolved->value_len == sizeof(v3));
+  ASSERT_TRUE(memcmp(resolved->value, v3, sizeof(v3)) == 0);
+
+  stok_session_destroy(sess);
 }
 
 static void test_create_token_input_validation(void) {
-  Arena arena = {0};
-  init_test_arena(&arena);
-
-  ConnProfile cp = make_profile("pgmain", SAFETY_COLSTRAT_DETERMINISTIC);
-  DbTokenStore *store = stok_store_create(&cp, &arena);
+  SensitiveTokSession *sess = create_test_session(4u * 1024u * 1024u);
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   char tok[SENSITIVE_TOK_BUFSZ] = {0};
@@ -557,30 +580,29 @@ static void test_create_token_input_validation(void) {
       .pg_oid = 23u,
   };
 
-  ASSERT_TRUE(stok_store_create_token(NULL, 1u, &in, tok) < 0);
-  ASSERT_TRUE(stok_store_create_token(store, 1u, NULL, tok) < 0);
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &in, NULL) < 0);
+  ASSERT_TRUE(stok_store_create_token(NULL, &in, tok) < 0);
+  ASSERT_TRUE(stok_store_create_token(store, NULL, tok) < 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in, NULL) < 0);
 
   SensitiveTokIn bad = in;
   bad.domain = NULL;
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
+  ASSERT_TRUE(stok_store_create_token(store, &bad, tok) < 0);
   bad = in;
   bad.domain_len = 0;
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
+  ASSERT_TRUE(stok_store_create_token(store, &bad, tok) < 0);
   bad = in;
   bad.domain = "";
   bad.domain_len = 0u;
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
+  ASSERT_TRUE(stok_store_create_token(store, &bad, tok) < 0);
   bad = in;
   bad.value = NULL;
   bad.value_len = 1u;
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &bad, tok) < 0);
+  ASSERT_TRUE(stok_store_create_token(store, &bad, tok) < 0);
 
-  ASSERT_TRUE(stok_store_create_token(store, 1u, &in, tok) > 0);
+  ASSERT_TRUE(stok_store_create_token(store, &in, tok) > 0);
   ASSERT_TRUE(stok_store_len(store) == 1);
 
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
 }
 
 int main(void) {
@@ -602,6 +624,7 @@ int main(void) {
   test_create_token_deterministic_same_domain_different_value();
   test_create_token_deterministic_same_domain_same_value_diff_connection();
   test_create_token_randomized_appends();
+  test_create_token_resets_session_on_arena_cap();
   test_create_token_input_validation();
   fprintf(stderr, "OK: test_sensitive_tok\n");
   return 0;

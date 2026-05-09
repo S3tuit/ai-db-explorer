@@ -49,7 +49,6 @@ typedef struct QueryResultBuilder {
   QueryResult *qr;
   const ValidatorPlan *plan;
   DbTokenStore *store;
-  uint32_t generation;
 } QueryResultBuilder;
 
 /* Optional tokenization policy used while building one QueryResult.
@@ -60,7 +59,6 @@ typedef struct QueryResultBuilder {
 typedef struct QueryResultBuildPolicy {
   const ValidatorPlan *plan;
   DbTokenStore *store;
-  uint32_t generation;
 } QueryResultBuildPolicy;
 
 /* Initializes one QueryResultBuilder context.

@@ -298,6 +298,74 @@ def test_my_postgres_run_sql_query_tokens_still_masks_sensitive_output():
             shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+def test_my_postgres_tokens_resolve_after_generation_bump():
+    broker = None
+    server = None
+    privdir = None
+    runtime_dir = None
+    try:
+        broker, server, privdir, runtime_dir, _ = do_full_handshake(
+            req_id=145, broker_env={"ADBX_TEST_TOKEN_ARENA_CAP_BYTES": "96"}
+        )
+
+        resp = send_tools_call(
+            server,
+            "my-gen-bump-src",
+            "MyPostgres",
+            "SELECT i.fighter_id, i.scouter_serial, i.home_coordinates "
+            "FROM zfighter_intel i ORDER BY i.fighter_id LIMIT 5;",
+        )
+        data = _assert_tools_call_ok(resp, "my-gen-bump-src")
+        rows = data["rows"]
+        assert len(rows) == 5
+
+        generations = []
+        scouter_tokens = []
+        for row in rows:
+            fighter_id = row[0]
+            scouter_tok = row[1]
+            home_tok = row[2]
+
+            scouter_conn, scouter_gen, _ = _parse_token(scouter_tok)
+            home_conn, home_gen, _ = _parse_token(home_tok)
+            assert scouter_conn == "MyPostgres"
+            assert home_conn == "MyPostgres"
+
+            generations.append(scouter_gen)
+            generations.append(home_gen)
+            scouter_tokens.append((scouter_gen, fighter_id, scouter_tok))
+
+        latest_generation = max(generations)
+        assert latest_generation > min(generations)
+
+        latest_scouter_tokens = [
+            item for item in scouter_tokens if item[0] == latest_generation
+        ]
+        assert latest_scouter_tokens
+        _, expected_fighter_id, fresh_tok = latest_scouter_tokens[-1]
+
+        resp = send_tokens_tools_call(
+            server,
+            "my-gen-bump-run",
+            "MyPostgres",
+            "SELECT i.fighter_id, i.scouter_serial FROM zfighter_intel i "
+            "WHERE i.scouter_serial = $1 LIMIT 1;",
+            [fresh_tok],
+        )
+        data = _assert_tools_call_ok(resp, "my-gen-bump-run")
+        assert len(data["rows"]) == 1
+        row = data["rows"][0]
+        assert row[0] == expected_fighter_id
+        _assert_is_token(row[1], "MyPostgres")
+    finally:
+        stop_proc(server)
+        stop_proc(broker)
+        if privdir:
+            shutil.rmtree(privdir, ignore_errors=True)
+        if runtime_dir:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
 def test_another_postgres_run_sql_query_tokens_still_masks_sensitive_output():
     broker = None
     server = None
@@ -345,6 +413,7 @@ def main():
     test_another_postgres_same_value_same_domain_yields_same_token()
     test_another_postgres_only_sensitive_columns_are_tokenized()
     test_my_postgres_run_sql_query_tokens_still_masks_sensitive_output()
+    test_my_postgres_tokens_resolve_after_generation_bump()
     test_another_postgres_run_sql_query_tokens_still_masks_sensitive_output()
     print("OK: test_token_generation")
 

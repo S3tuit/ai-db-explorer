@@ -6,7 +6,7 @@
 
 // Return types that must be used for "mutators"; functions that do a thing,
 // for example, append, connect, exec.
-typedef enum { OK = 0, STATUS_ERR = -1 } AdbxStatus;
+typedef enum { OK = 0, AS_ERR = -1, AS_CAP = -2 } AdbxStatus;
 
 // Return types that must be used for functions that answer a question, for
 // example is_null, contains.

@@ -13,6 +13,9 @@ DEFAULT_APPDIR = os.path.join(ROOT, "build", "appdir")
 CONFIG = os.path.join(ROOT, "tests", "integration", "postgres", "config.json")
 MCP_PROTOCOL_VERSION = "2025-11-25"
 
+with open(os.path.join(ROOT, "VERSION")) as _vf:
+    SERVER_VERSION = _vf.read().strip()
+
 
 def appdir_root(appdir):
     return appdir
@@ -210,7 +213,7 @@ def test_handshake_ok():
         assert "tools" in resp["result"]["capabilities"]
         assert "resources" not in resp["result"]["capabilities"]
         assert resp["result"]["serverInfo"]["name"] == "adbxplorer"
-        assert resp["result"]["serverInfo"]["version"] == "0.0.1"
+        assert resp["result"]["serverInfo"]["version"] == SERVER_VERSION
 
         # Double initialize should fail.
         resp = do_user_handshake(server, "second", MCP_PROTOCOL_VERSION)

@@ -235,7 +235,7 @@ static int read_handshake_status_with_timeout(int fd, int timeout_ms,
   int rc = ERR;
   StrBuf payload;
   sb_init(&payload);
-  if (frame_read_len(bc, &payload) != OK)
+  if (frame_read_len(bc, &payload, 0) != FRAME_READ_LEN_OK)
     goto done;
   handshake_resp_t resp = {0};
   if (handshake_resp_decode(&resp, (const uint8_t *)payload.data,
@@ -421,7 +421,7 @@ static int client_handshake_req_on_fd(int cfd, const handshake_req_t *req,
   if (frame_write_len(bc, req_wire, (uint32_t)sizeof(req_wire)) != OK)
     goto done;
 
-  if (frame_read_len(bc, &payload) != OK)
+  if (frame_read_len(bc, &payload, 0) != FRAME_READ_LEN_OK)
     goto done;
   if (handshake_resp_decode(out_resp, (const uint8_t *)payload.data,
                             payload.len) != OK) {
@@ -1102,6 +1102,39 @@ static void test_post_hs_truncated_request_drops_session(void) {
   stop_running_broker(b, tid, appd, tmpdir);
 }
 
+/* Verifies post-handshake request frames above the Broker request cap are
+ * rejected based on the declared length before the Broker waits for or
+ * allocates the body. The declared length intentionally stays below the
+ * generic StrBuf cap to cover the Broker-specific admission limit.
+ */
+static void test_post_hs_declared_over_broker_cap_drops_immediately(void) {
+  Broker *b = NULL;
+  pthread_t tid = {0};
+  char *tmpdir = NULL;
+  AppDir *appd = NULL;
+  uint8_t secret[SECRET_TOKEN_LEN] = {0};
+  ASSERT_TRUE(start_running_broker(&b, &tid, &tmpdir, &appd, secret) == OK);
+
+  uint8_t resume_tok[RESUME_TOKEN_LEN] = {0};
+  int cfd = connect_client_hs_ok(appd->sock_path, secret, resume_tok);
+  ASSERT_TRUE(cfd >= 0);
+
+  const uint32_t broker_req_cap = 8u * 1024u * 1024u;
+  const uint32_t declared_len = broker_req_cap + 1u;
+  ASSERT_TRUE(declared_len < STRBUF_MAX_BYTES);
+  ASSERT_TRUE(write_len_frame_raw(cfd, declared_len, NULL, 0) == OK);
+
+  ASSERT_TRUE(wait_for_fd_hangup(cfd, 250) == OK);
+
+  close(cfd);
+  handshake_status st = HS_OK;
+  ASSERT_TRUE(connect_client_resume_status(appd->sock_path, secret, resume_tok,
+                                           &st, NULL) == OK);
+  ASSERT_TRUE(st == HS_ERR_TOKEN_UNKNOWN);
+  assert_broker_accepts_new_client(appd->sock_path, secret);
+  stop_running_broker(b, tid, appd, tmpdir);
+}
+
 /* Verifies that oversize post-handshake request frames are rejected and the
  * active session is dropped.
  */
@@ -1149,6 +1182,7 @@ int main(void) {
   test_hs_partial_header_keep_open_timeout_rejected();
   test_hs_no_payload_timeout_rejected();
   test_post_hs_truncated_request_drops_session();
+  test_post_hs_declared_over_broker_cap_drops_immediately();
   test_post_hs_oversized_request_drops_session();
 
   fprintf(stderr, "OK: test_broker\n");

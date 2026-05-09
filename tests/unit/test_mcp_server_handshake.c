@@ -148,8 +148,8 @@ static int mock_handle_handshake(int cfd, const uint8_t expected_secret[32],
 
   StrBuf payload;
   sb_init(&payload);
-  int rc = frame_read_len(bc, &payload);
-  if (rc != OK) {
+  FrameReadLenStatus rc = frame_read_len(bc, &payload, 0);
+  if (rc != FRAME_READ_LEN_OK) {
     sb_clean(&payload);
     bufch_destroy(bc);
     return ERR;

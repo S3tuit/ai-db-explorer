@@ -70,45 +70,68 @@ static void assert_stmt_flags(const QirQuery *q, bool explain, bool analyze,
 #define ASSERT_STMT_FLAGS(q, explain, analyze)                                 \
   assert_stmt_flags((q), (explain), (analyze), __FILE__, __LINE__)
 
-/* Extracts a touch report for a parsed query.
- * Ownership: caller must destroy the report with qir_touch_report_destroy().
- * Side effects: allocates memory for the report.
- * Returns pointer; assertions abort on failure. */
-static QirTouchReport *extract_touches(const QirQueryHandle *h) {
+/* Binds one parsed query in place.
+ * Ownership: borrows 'h' and mutates the bound metadata inside its QueryIR.
+ * Side effects: prints the binder error on failure before asserting.
+ * Returns void; assertions abort on failure. */
+static void assert_bind_ok(const QirQueryHandle *h, const char *file, int line) {
   ASSERT_TRUE(h != NULL);
   ASSERT_TRUE(h->q != NULL);
-  QirTouchReport *tr = qir_extract_touches(h->q);
-  ASSERT_TRUE(tr != NULL);
-  return tr;
+  QirBindErr err = {0};
+  AdbxTriStatus rc = bind_query_ir(h->q, &err);
+  if (rc != YES && err.msg[0] != '\0')
+    fprintf(stderr, "BIND FAILED: %s\n", err.msg);
+  ASSERT_TRUE_AT(rc == YES, file, line);
+}
+#define ASSERT_BIND_OK(h) assert_bind_ok((h), __FILE__, __LINE__)
+
+typedef struct TouchMatchCtx {
+  QirScope scope;
+  QirTouchKind kind;
+  const char *qual;
+  const char *col;
+  bool found;
+} TouchMatchCtx;
+
+static AdbxStatus touch_match_cb(QirScope scope, const QirQuery *owner_query,
+                                 const QirColRef *colref, QirTouchKind kind,
+                                 void *vctx) {
+  TouchMatchCtx *ctx = (TouchMatchCtx *)vctx;
+  (void)owner_query;
+
+  if (!ctx || !colref)
+    return ERR;
+  if (scope != ctx->scope || kind != ctx->kind)
+    return OK;
+  if (!colref->qualifier.name || !colref->column.name)
+    return OK;
+  if (strcmp(colref->qualifier.name, ctx->qual) != 0)
+    return OK;
+  if (strcmp(colref->column.name, ctx->col) != 0)
+    return OK;
+  ctx->found = true;
+  return OK;
 }
 
 /* Asserts that a touch matching the given fields exists. */
-static void assert_touch_has(const QirTouchReport *tr, QirScope scope,
+static void assert_touch_has(const QirQuery *q, QirScope scope,
                              QirTouchKind kind, const char *qual,
                              const char *col, const char *file, int line) {
-  ASSERT_TRUE_AT(tr != NULL, file, line);
+  ASSERT_TRUE_AT(q != NULL, file, line);
   ASSERT_TRUE_AT(qual != NULL, file, line);
   ASSERT_TRUE_AT(col != NULL, file, line);
-  for (uint32_t i = 0; i < tr->ntouches; i++) {
-    const QirTouch *t = tr->touches ? tr->touches[i] : NULL;
-    if (!t)
-      continue;
-    if (t->scope != scope)
-      continue;
-    if (t->kind != kind)
-      continue;
-    if (!t->col.qualifier.name || !t->col.column.name)
-      continue;
-    if (strcmp(t->col.qualifier.name, qual) != 0)
-      continue;
-    if (strcmp(t->col.column.name, col) != 0)
-      continue;
-    return;
-  }
-  ASSERT_TRUE_AT(false, file, line);
+  TouchMatchCtx ctx = {
+      .scope = scope,
+      .kind = kind,
+      .qual = qual,
+      .col = col,
+      .found = false,
+  };
+  ASSERT_TRUE_AT(qir_walk_touches(q, touch_match_cb, &ctx) == OK, file, line);
+  ASSERT_TRUE_AT(ctx.found, file, line);
 }
-#define ASSERT_TOUCH(tr, scope, kind, qual, col)                               \
-  assert_touch_has((tr), (scope), (kind), (qual), (col), __FILE__, __LINE__)
+#define ASSERT_TOUCH(q, scope, kind, qual, col)                                \
+  assert_touch_has((q), (scope), (kind), (qual), (col), __FILE__, __LINE__)
 
 /* 1. AND + comparisons + params. */
 static void test_pg_params_predicates(void) {
@@ -271,12 +294,9 @@ static void test_pg_recursive_cte(void) {
   ASSERT_TRUE(h.q->nctes == 1);
   ASSERT_IDENT_EQ(&h.q->ctes[0]->name, "t");
 
-  QirTouchReport *tr = extract_touches(&h);
-  ASSERT_TRUE(tr->has_unknown_touches == false);
-  ASSERT_TRUE(tr->has_unsupported == false);
-  ASSERT_TOUCH(tr, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "id");
-  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "t", "id");
-  qir_touch_report_destroy(tr);
+  ASSERT_BIND_OK(&h);
+  ASSERT_TOUCH(h.q, QIR_SCOPE_NESTED, QIR_TOUCH_BASE, "p", "id");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_DERIVED, "t", "id");
 
   qir_handle_destroy(&h);
 }
@@ -294,9 +314,8 @@ static void test_pg_quoted_identifiers(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
 
-  QirTouchReport *tr = extract_touches(&h);
-  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "age");
-  qir_touch_report_destroy(tr);
+  ASSERT_BIND_OK(&h);
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "age");
 
   qir_handle_destroy(&h);
 }
@@ -387,12 +406,9 @@ static void test_pg_filter_normalized_to_case(void) {
               QIR_LIT_INT64);
   ASSERT_TRUE(count->args[0]->u.case_.whens[0]->then_expr->u.lit.v.i64 == 1);
 
-  QirTouchReport *tr = extract_touches(&h);
-  ASSERT_TRUE(tr->has_unknown_touches == false);
-  ASSERT_TRUE(tr->has_unsupported == false);
-  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "amount");
-  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "kind");
-  qir_touch_report_destroy(tr);
+  ASSERT_BIND_OK(&h);
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "amount");
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "kind");
 
   qir_handle_destroy(&h);
 }
@@ -412,9 +428,8 @@ static void test_pg_explain_select(void) {
   ASSERT_STMT_FLAGS(h.q, true, false);
   ASSERT_TRUE(h.q->limit_value == 10);
 
-  QirTouchReport *tr = extract_touches(&h);
-  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
-  qir_touch_report_destroy(tr);
+  ASSERT_BIND_OK(&h);
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "id");
 
   qir_handle_destroy(&h);
 }
@@ -536,9 +551,8 @@ static void test_pg_json_operator_touch(void) {
   ASSERT_TRUE(h.q != NULL);
   ASSERT_TRUE(h.q->status == QIR_OK);
 
-  QirTouchReport *tr = extract_touches(&h);
-  ASSERT_TOUCH(tr, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "profile");
-  qir_touch_report_destroy(tr);
+  ASSERT_BIND_OK(&h);
+  ASSERT_TOUCH(h.q, QIR_SCOPE_MAIN, QIR_TOUCH_BASE, "p", "profile");
 
   qir_handle_destroy(&h);
 }

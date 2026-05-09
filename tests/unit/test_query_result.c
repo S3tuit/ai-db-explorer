@@ -17,12 +17,18 @@ static int set_cell_plain(QueryResultBuilder *qb, uint32_t row, uint32_t col,
   return qb_set_cell(qb, row, col, value, value ? strlen(value) : 0u);
 }
 
-/* Creates one deterministic token store backed by the given arena.
- * It borrows 'arena' and returns a heap-owned store; caller must destroy it.
- */
-static DbTokenStore *create_det_store(Arena *arena, const char *conn_name) {
+static SensitiveTokSession *create_test_session(void) {
+  SensitiveTokSession *sess = stok_session_create(4u * 1024u * 1024u);
+  ASSERT_TRUE(sess != NULL);
+  return sess;
+}
+
+static DbTokenStore *create_det_store(SensitiveTokSession *sess,
+                                      const char *conn_name) {
   ConnProfile cp = make_profile(conn_name, SAFETY_COLSTRAT_DETERMINISTIC);
-  return stok_store_create(&cp, arena);
+  DbTokenStore *store = stok_session_get_or_create_store(sess, &cp);
+  ASSERT_TRUE(store != NULL);
+  return store;
 }
 
 static void test_create_and_basic_set_get(void) {
@@ -160,20 +166,17 @@ static void test_qb_init_policy_and_reset(void) {
   QueryResultBuildPolicy policy = {
       .plan = (const ValidatorPlan *)(uintptr_t)0x1,
       .store = (DbTokenStore *)(uintptr_t)0x2,
-      .generation = 42,
   };
   ASSERT_TRUE(qb_init(&qb, qr, &policy) == OK);
   ASSERT_TRUE(qb.qr == qr);
   ASSERT_TRUE(qb.plan == policy.plan);
   ASSERT_TRUE(qb.store == policy.store);
-  ASSERT_TRUE(qb.generation == policy.generation);
 
   // Re-init with NULL policy must clear any previous policy state.
   ASSERT_TRUE(qb_init(&qb, qr, NULL) == OK);
   ASSERT_TRUE(qb.qr == qr);
   ASSERT_TRUE(qb.plan == NULL);
   ASSERT_TRUE(qb.store == NULL);
-  ASSERT_TRUE(qb.generation == 0);
 
   qr_destroy(qr);
 }
@@ -194,7 +197,6 @@ static void test_qb_plan_plaintext_only_no_tokenization(void) {
   QueryResultBuildPolicy policy = {
       .plan = &out.plan,
       .store = NULL, // plaintext-only plan must not depend on token store
-      .generation = 1,
   };
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, &policy) == OK);
@@ -231,9 +233,8 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
   ASSERT_TRUE(vcol1->domain != NULL);
   ASSERT_TRUE(vcol1->domain_len > 0);
 
-  Arena arena = {0};
-  ASSERT_TRUE(arena_init(&arena, NULL, NULL) == OK);
-  DbTokenStore *store = create_det_store(&arena, "pgmain");
+  SensitiveTokSession *sess = create_test_session();
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   QueryResult *qr = qr_create(2, 1, 0, 0);
@@ -242,7 +243,6 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
   QueryResultBuildPolicy policy = {
       .plan = &out.plan,
       .store = store,
-      .generation = 42u,
   };
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, &policy) == OK);
@@ -271,7 +271,7 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
   ParsedTokView v = {0};
   ASSERT_TRUE(stok_parse_view_inplace(tok_copy, &v) == OK);
   ASSERT_STREQ(v.connection_name, "pgmain");
-  ASSERT_TRUE(v.generation == 42u);
+  ASSERT_TRUE(v.generation == 0u);
 
   const SensitiveTok *st = stok_store_get(store, v.index);
   ASSERT_TRUE(st != NULL);
@@ -284,8 +284,7 @@ static void test_qb_tokenizes_sensitive_column_and_store_roundtrip(void) {
   ASSERT_TRUE(st->pg_oid == 25u);
 
   qr_destroy(qr);
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
   vq_out_clean(&out);
 }
 
@@ -298,9 +297,8 @@ static void test_qb_sensitive_null_remains_null(void) {
   ValidateQueryOut out = {0};
   ASSERT_TRUE(get_validate_query_out(&out, sql) == OK);
 
-  Arena arena = {0};
-  ASSERT_TRUE(arena_init(&arena, NULL, NULL) == OK);
-  DbTokenStore *store = create_det_store(&arena, "pgmain");
+  SensitiveTokSession *sess = create_test_session();
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   QueryResult *qr = qr_create(2, 1, 0, 0);
@@ -309,7 +307,6 @@ static void test_qb_sensitive_null_remains_null(void) {
   QueryResultBuildPolicy policy = {
       .plan = &out.plan,
       .store = store,
-      .generation = 1u,
   };
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, &policy) == OK);
@@ -323,8 +320,7 @@ static void test_qb_sensitive_null_remains_null(void) {
   ASSERT_TRUE(stok_store_len(store) == 0);
 
   qr_destroy(qr);
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
   vq_out_clean(&out);
 }
 
@@ -341,7 +337,6 @@ static void test_qb_sensitive_col_missing_store_returns_err(void) {
   QueryResultBuildPolicy policy = {
       .plan = &out.plan,
       .store = NULL,
-      .generation = 1u,
   };
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, &policy) == OK);
@@ -370,9 +365,8 @@ static void test_qb_sensitive_col_missing_domain_returns_err(void) {
   ASSERT_TRUE(vcol1 != NULL);
   ASSERT_TRUE(vcol1->kind == VCOL_OUT_TOKEN);
 
-  Arena arena = {0};
-  ASSERT_TRUE(arena_init(&arena, NULL, NULL) == OK);
-  DbTokenStore *store = create_det_store(&arena, "pgmain");
+  SensitiveTokSession *sess = create_test_session();
+  DbTokenStore *store = create_det_store(sess, "pgmain");
   ASSERT_TRUE(store != NULL);
 
   QueryResult *qr = qr_create(2, 1, 0, 0);
@@ -381,7 +375,6 @@ static void test_qb_sensitive_col_missing_domain_returns_err(void) {
   QueryResultBuildPolicy policy = {
       .plan = &out.plan,
       .store = store,
-      .generation = 1u,
   };
   QueryResultBuilder qb = {0};
   ASSERT_TRUE(qb_init(&qb, qr, &policy) == OK);
@@ -397,8 +390,7 @@ static void test_qb_sensitive_col_missing_domain_returns_err(void) {
   ASSERT_TRUE(set_cell_plain(&qb, 0, 1, "RSSMRA80A01H501U") == ERR);
 
   qr_destroy(qr);
-  stok_store_destroy(store);
-  arena_clean(&arena);
+  stok_session_destroy(sess);
   vq_out_clean(&out);
 }
 

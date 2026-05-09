@@ -153,8 +153,9 @@ static AdbxStatus mcpser_read_broker_handshake_resp(McpServer *s,
 
   StrBuf payload;
   sb_init(&payload);
-  AdbxStatus rc = frame_read_len(&s->brok_bc, &payload);
-  if (rc != OK) {
+  FrameReadLenStatus rc = frame_read_len(&s->brok_bc, &payload,
+                                         HANDSHAKE_RESP_WIRE_SIZE);
+  if (rc != FRAME_READ_LEN_OK) {
     sb_clean(&payload);
     return ERR;
   }
@@ -776,7 +777,7 @@ AdbxStatus mcpser_run(McpServer *s) {
     //
     StrBuf resp;
     sb_init(&resp);
-    if (frame_read_len(&s->brok_bc, &resp) != OK) {
+    if (frame_read_len(&s->brok_bc, &resp, 0) != FRAME_READ_LEN_OK) {
       fprintf(stderr, "McpServer: broker read failed\n");
       sb_clean(&resp);
       TLOG("ERROR - failed to read response from broker");

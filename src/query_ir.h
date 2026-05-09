@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "adbx_err.h"
 #include "arena.h"
 #include "string_op.h"
 #include "utils.h"
@@ -51,10 +52,19 @@ typedef struct QirIdent {
   const char *name; // never NULL; may be "" if backend couldn't recover a name.
 } QirIdent;
 
-// alias.column
+typedef struct QirQuery QirQuery;
+typedef struct QirExpr QirExpr;
+typedef struct QirCaseWhen QirCaseWhen;
+typedef struct QirCaseExpr QirCaseExpr;
+typedef struct QirFromItem QirFromItem;
+typedef struct QirCte QirCte;
+
+// qualifier.column or bare column
 typedef struct QirColRef {
-  QirIdent qualifier; // table alias
-  QirIdent column;    // column name
+  QirIdent qualifier;              // table alias, or "" for bare column
+  QirIdent column;                 // column name
+  const QirFromItem *binding_from; // bound visible range item
+  uint32_t correlation_depth;      // 0=local, 1+=outer scope
 } QirColRef;
 
 // schema.table (views treated as tables)
@@ -73,13 +83,8 @@ typedef struct QirTypeRef {
 // Expressions
 // ----------------------------
 
-typedef struct QirQuery QirQuery;
-typedef struct QirExpr QirExpr;
-typedef struct QirCaseWhen QirCaseWhen;
-typedef struct QirCaseExpr QirCaseExpr;
-
 typedef enum QirExprKind {
-  QIR_EXPR_COLREF = 1, // alias.column
+  QIR_EXPR_COLREF = 1, // qualifier.column or bare column
   QIR_EXPR_PARAM,      // $n
   QIR_EXPR_LITERAL,    // backend may produce; validator may reject depending on
                        // policy
@@ -202,28 +207,31 @@ struct QirExpr {
 typedef enum QirFromKind {
   QIR_FROM_BASE_REL = 1, // table/view reference
   QIR_FROM_SUBQUERY,     // derived table: FROM (SELECT ...) AS alias
-  QIR_FROM_CTE_REF,      // FROM cte_name AS alias
   QIR_FROM_VALUES,       // FROM (VALUES ...) AS alias
   QIR_FROM_UNSUPPORTED
 } QirFromKind;
 
-typedef struct QirFromItem {
+struct QirFromItem {
   QirFromKind kind;
 
-  // Policy: every range item must have an alias; references must use that
-  // alias.
+  // Policy: every range item must have an alias; qualified references should
+  // use that alias. Binder may also allow bare columns in the conservative
+  // single-visible-range case.
   QirIdent alias;
 
   union {
     QirRelRef rel;        // BASE_REL
     QirQuery *subquery;   // SUBQUERY
-    QirIdent cte_name;    // CTE_REF
     struct {              // VALUES
       QirIdent *colnames; // optional column list from AS v(x,y)
       uint32_t ncolnames;
     } values;
   } u;
-} QirFromItem;
+
+  // Binder-owned metadata. When non-NULL, this BASE_REL syntactically refers
+  // to a visible CTE name rather than a database relation.
+  const QirCte *binding_cte;
+};
 
 // Join modeling
 typedef enum QirJoinKind {
@@ -255,16 +263,19 @@ typedef struct QirSelectItem {
 // CTE
 // ----------------------------
 
-typedef struct QirCte {
+struct QirCte {
   QirIdent name;
+  QirIdent *colnames; // optional WITH x(a,b,...) column list
+  uint32_t ncolnames;
   QirQuery *query;
-} QirCte;
+};
 
 // ----------------------------
 // Query
 // ----------------------------
 
 struct QirQuery {
+  Arena *arena; // owning arena used by the binder for safe IR rewrites
   QirStatus status;
   const char *status_reason; // arena-owned; NULL if unset. Indicates the
                              // reason why the status is not QIR_OK
@@ -272,7 +283,6 @@ struct QirQuery {
   QirStmtFlags stmt_flags;
 
   // Conservative feature flags (backend sets these).
-  bool has_star; // SELECT * or table.*
   bool has_distinct;
   bool has_offset;
 
@@ -311,8 +321,8 @@ struct QirQuery {
   int32_t limit_value;
 
   // Set operations (UNION ALL / INTERSECT / EXCEPT / …).
-  // The "father" query holds CTEs, stmt_flags, kind, limit, ORDER BY, etc.
-  // Each union_next is a "child" with its own body (SELECT, FROM, WHERE, ...)
+  // The lead query holds CTEs, stmt_flags, kind, limit, ORDER BY, etc.
+  // Each union_next is a branch with its own body (SELECT, FROM, WHERE, ...)
   // but default metadata (nctes=0, limit_value=-1, etc.).
   QirQuery *union_next; // NULL when no set operation follows
 };
@@ -347,37 +357,19 @@ static inline int qir_query_is_explain_analyze(const QirQuery *q) {
 /*---------------------------------------------------------------------------*/
 
 // ----------------------------
-// Touch extraction results
+// Touch walking
 // ----------------------------
 
 typedef enum QirTouchKind {
   QIR_TOUCH_BASE = 1, // qualifier resolves to BASE_REL alias
-  QIR_TOUCH_DERIVED,  // qualifier resolves to SUBQUERY or CTE_REF alias
-  QIR_TOUCH_UNKNOWN   // qualifier didn't resolve (policy violation) or
-                      // unsupported
+  QIR_TOUCH_DERIVED,  // qualifier resolves to SUBQUERY, bound CTE, or VALUES
+  QIR_TOUCH_UNKNOWN   // qualifier is still unbound or cannot be mapped to one
+                      // direct column reference (for example alias.*)
 } QirTouchKind;
 
-typedef struct QirTouch {
-  QirScope scope;               // where the qualifier.column is being used
-  QirTouchKind kind;            // what the qualifier is
-  QirColRef col;                // qualifier.column as written
-  const QirQuery *source_query; // query block that owns this touch
-} QirTouch;
-
-// A minimal touch report. Extractor should include touches from:
-// - select list
-// - where
-// - join ON expressions (if joins allowed globally)
-// - recursively into nested queries (scope=NESTED)
-typedef struct QirTouchReport {
-  Arena arena; // owns touch nodes and arrays
-  QirTouch **touches;
-  uint32_t ntouches;
-
-  // Convenience flags
-  bool has_unknown_touches; // true if any touch.kind == UNKNOWN
-  bool has_unsupported;     // true if unsupported exprs encountered
-} QirTouchReport;
+typedef AdbxStatus (*QirTouchFn)(QirScope scope, const QirQuery *owner_query,
+                                 const QirColRef *colref, QirTouchKind kind,
+                                 void *ctx);
 
 // ----------------------------
 // Memory / ownership
@@ -393,22 +385,37 @@ AdbxStatus qir_handle_init(QirQueryHandle *h);
 // Frees the arena owned by the handle and resets it.
 void qir_handle_destroy(QirQueryHandle *h);
 
-// Frees a touch report allocated by qir_extract_touches().
-void qir_touch_report_destroy(QirTouchReport *tr);
+typedef enum QirBindErrCode {
+  QIR_BINDERR_NONE = 0,
+  QIR_BINDERR_INPUT,
+  QIR_BINDERR_UNSUPPORTED,
+  QIR_BINDERR_INVALID_CTE,
+  QIR_BINDERR_STAR,
+  QIR_BINDERR_UNRESOLVED_COLREF,
+  QIR_BINDERR_UNRESOLVED_CTE,
+  QIR_BINDERR_AMBIGUOUS_COLREF,
+  QIR_BINDERR_AMBIGUOUS_CTE,
+} QirBindErrCode;
 
-/* Extract touches from a QueryIR.
- * The QirTouchReport checks that all the columns are referenced in the form
- * 'alias.column'.
- * It also checks that all the alias referenced are present in the QirQuery.
- * If one of these 2 conditions is false, the specific QirTouch that references
- * the column is set to QIR_TOUCH_UNKNOWN.
- * It only handles column references, it doesn't check wheter all the subqueries
- * or CTEs have an alias.
- *
- * - scope is MAIN for the top-level query and NESTED for any nested query.
- * - The extractor is conservative: if it sees unsupported expressions or cannot
- *   resolve a qualifier, it marks UNKNOWN touches and has_unsupported. */
-QirTouchReport *qir_extract_touches(const QirQuery *q);
+typedef struct QirBindErr {
+  QirBindErrCode code;
+  char msg[ADBX_ERRMSG_MAX];
+} QirBindErr;
+
+/* Binds column references and FROM/JOIN base relations against visible query
+ * scopes and CTE names. It may also rewrite SELECT * / alias.* into explicit
+ * derived column references using the query arena. Returns YES on success, NO
+ * on unresolved/ambiguous/unsafe bindings, and ERR on invalid input. */
+AdbxTriStatus bind_query_ir(QirQuery *q, QirBindErr *out_err);
+
+/* Walks every column reference reachable from 'q' in stable depth-first order.
+ * The walker expects bind_query_ir() to have populated bound metadata in
+ * QirColRef/QirFromItem. It visits colrefs from the lead query, nested queries,
+ * and set-op branches, passing MAIN for the lead query chain and NESTED for any
+ * nested query block. Unsupported expressions are skipped here because callers
+ * should enforce structural acceptance separately. Returns OK on success, ERR on
+ * invalid input or when the callback returns ERR. */
+AdbxStatus qir_walk_touches(const QirQuery *q, QirTouchFn fn, void *ctx);
 
 /* Renders a FROM item into 'out' and returns out->data (or "" on error).
  * Returned string is NUL-term. Ownership: caller owns 'out' and controls its
@@ -431,11 +438,5 @@ const char *qir_func_to_str(const QirFuncCall *fn, StrBuf *out);
  * Error semantics: no return value; on invalid input it is a no-op. */
 void qir_set_status(QirQuery *q, Arena *arena, QirStatus status,
                     const char *reason);
-
-/* Resolves ORDER BY alias references to SELECT item expressions.
- * Ownership: returned pointer is owned by the QueryIR arena.
- * Side effects: may mark QIR_UNSUPPORTED on ambiguous aliases.
- * Returns the resolved expression or the original expression if no match. */
-QirExpr *qir_resolve_order_alias(QirQuery *q, Arena *arena, QirExpr *expr);
 
 #endif // QUERY_IR_H

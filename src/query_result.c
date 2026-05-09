@@ -73,11 +73,15 @@ static AdbxStatus qr_set_col(QueryResult *qr, uint32_t col, const char *name,
   if (!qr || !qr->cols || col >= qr->ncols || !name)
     return ERR;
 
-  char *new_name = arena_add_nul(&qr->text_arena, (void *)name, strlen(name));
+  char *new_name = NULL;
+  if (arena_add_nul(&qr->text_arena, (void *)name, strlen(name),
+                    (void **)&new_name) != OK) {
+    return ERR;
+  }
   const char *safe_type = type ? type : "unknown";
-  char *new_type =
-      arena_add_nul(&qr->text_arena, (void *)safe_type, strlen(safe_type));
-  if (!new_name || !new_type) {
+  char *new_type = NULL;
+  if (arena_add_nul(&qr->text_arena, (void *)safe_type, strlen(safe_type),
+                    (void **)&new_type) != OK) {
     return ERR;
   }
 
@@ -117,10 +121,12 @@ static AdbxTriStatus qr_set_cell(QueryResult *qr, uint32_t row, uint32_t col,
     }
   }
 
-  char *copy =
-      value ? arena_add_nul(&qr->text_arena, (void *)value, val_len) : NULL;
-  if (value && !copy)
+  char *copy = NULL;
+  if (value &&
+      arena_add_nul(&qr->text_arena, (void *)value, val_len, (void **)&copy) !=
+          OK) {
     return ERR;
+  }
 
   qr->cells[idx] = copy;
   qr->used_query_bytes =
@@ -179,11 +185,9 @@ AdbxStatus qb_init(QueryResultBuilder *qb, QueryResult *qr,
   if (policy) {
     qb->plan = policy->plan;
     qb->store = policy->store;
-    qb->generation = policy->generation;
   } else {
     qb->plan = NULL;
     qb->store = NULL;
-    qb->generation = 0;
   }
   return OK;
 }
@@ -251,7 +255,7 @@ AdbxTriStatus qb_set_cell(QueryResultBuilder *qb, uint32_t row, uint32_t col,
       .pg_oid = qcol->pg_oid,
   };
   char tok[SENSITIVE_TOK_BUFSZ];
-  int tok_len = stok_store_create_token(qb->store, qb->generation, &in, tok);
+  int tok_len = stok_store_create_token(qb->store, &in, tok);
   if (tok_len < 0)
     return ERR;
 

@@ -266,7 +266,7 @@ static AdbxStatus client_handshake_req_on_fd(int cfd,
   sb_init(&payload);
   if (frame_write_len(bc, req_wire, (uint32_t)sizeof(req_wire)) != OK)
     goto done;
-  if (frame_read_len(bc, &payload) != OK)
+  if (frame_read_len(bc, &payload, 0) != FRAME_READ_LEN_OK)
     goto done;
   if (handshake_resp_decode(out_resp, (const uint8_t *)payload.data,
                             payload.len) != OK)
@@ -436,7 +436,7 @@ AdbxStatus broker_test_request_json(const BrokerRunTestCtx *ctx,
   if (frame_write_len(bc, (const uint8_t *)req_json,
                       (uint32_t)strlen(req_json)) != OK)
     goto err;
-  if (frame_read_len(bc, out_resp_json) != OK)
+  if (frame_read_len(bc, out_resp_json, 0) != FRAME_READ_LEN_OK)
     goto err;
 
   bufch_destroy(bc);

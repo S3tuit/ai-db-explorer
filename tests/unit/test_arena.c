@@ -5,6 +5,34 @@
 #include "arena.h"
 #include "test.h"
 
+static void *test_arena_add_ok(Arena *ar, void *src, uint32_t len) {
+  void *out = NULL;
+  ASSERT_TRUE(arena_add(ar, src, len, &out) == OK);
+  ASSERT_TRUE(out != NULL);
+  return out;
+}
+
+static void *test_arena_add_nul_ok(Arena *ar, void *src, uint32_t len) {
+  void *out = NULL;
+  ASSERT_TRUE(arena_add_nul(ar, src, len, &out) == OK);
+  ASSERT_TRUE(out != NULL);
+  return out;
+}
+
+static void *test_arena_alloc_ok(Arena *ar, uint32_t len) {
+  void *out = NULL;
+  ASSERT_TRUE(arena_alloc(ar, len, &out) == OK);
+  ASSERT_TRUE(out != NULL);
+  return out;
+}
+
+static void *test_arena_calloc_ok(Arena *ar, uint32_t len) {
+  void *out = NULL;
+  ASSERT_TRUE(arena_calloc(ar, len, &out) == OK);
+  ASSERT_TRUE(out != NULL);
+  return out;
+}
+
 /* These tests validate the arena's public contract:
  * - data is stored and retrieved intact
  * - returned payload pointers are aligned
@@ -16,8 +44,7 @@ static void test_basic_add_get(void) {
   ASSERT_TRUE(ar != NULL);
 
   const char *s1 = "abc";
-  char *v1 = (char *)arena_add(ar, (void *)s1, 3);
-  ASSERT_TRUE(v1 != NULL);
+  char *v1 = (char *)test_arena_add_ok(ar, (void *)s1, 3);
   ASSERT_TRUE(memcmp(v1, "abc", 3) == 0);
   ASSERT_TRUE(arena_get_used(ar) > 0);
 
@@ -28,15 +55,14 @@ static void test_alignment_and_empty(void) {
   Arena *ar = arena_create(NULL, NULL);
   ASSERT_TRUE(ar != NULL);
 
-  char *v1 = (char *)arena_add(ar, "a", 1);
-  ASSERT_TRUE(v1 != NULL);
+  char *v1 = (char *)test_arena_add_ok(ar, "a", 1);
+  (void)v1;
 
-  char *v2 = (char *)arena_add(ar, "bbbb", 4);
-  ASSERT_TRUE(v2 != NULL);
+  char *v2 = (char *)test_arena_add_ok(ar, "bbbb", 4);
   ASSERT_TRUE(((uintptr_t)v2 % sizeof(uintptr_t)) == 0);
 
-  char *v3 = (char *)arena_add(ar, NULL, 0);
-  ASSERT_TRUE(v3 != NULL);
+  char *v3 = (char *)test_arena_add_ok(ar, NULL, 0);
+  (void)v3;
 
   arena_destroy(ar);
 }
@@ -56,14 +82,14 @@ static void test_grow_blocks_and_stability(void) {
 
   char payload1[900];
   memset(payload1, 'a', sizeof(payload1));
-  char *p1 = (char *)arena_add(ar, payload1, (uint32_t)sizeof(payload1));
-  ASSERT_TRUE(p1 != NULL);
+  char *p1 =
+      (char *)test_arena_add_ok(ar, payload1, (uint32_t)sizeof(payload1));
 
   // This should spill into a new block.
   char payload2[900];
   memset(payload2, 'b', sizeof(payload2));
-  char *p2 = (char *)arena_add(ar, payload2, (uint32_t)sizeof(payload2));
-  ASSERT_TRUE(p2 != NULL);
+  char *p2 =
+      (char *)test_arena_add_ok(ar, payload2, (uint32_t)sizeof(payload2));
   ASSERT_TRUE(((uintptr_t)p2 % sizeof(uintptr_t)) == 0);
 
   // Original payload must still be accessible after growth.
@@ -80,8 +106,7 @@ static void test_large_entry_and_cap(void) {
   // Entry larger than block size should still work.
   char big[60];
   memset(big, 'x', sizeof(big));
-  char *p = (char *)arena_add(ar, big, (uint32_t)sizeof(big));
-  ASSERT_TRUE(p != NULL);
+  char *p = (char *)test_arena_add_ok(ar, big, (uint32_t)sizeof(big));
   ASSERT_TRUE(memcmp(p, big, sizeof(big)) == 0);
 
   arena_destroy(ar);
@@ -92,10 +117,12 @@ static void test_large_entry_and_cap(void) {
   ar = arena_create(NULL, &cap);
   ASSERT_TRUE(ar != NULL);
 
-  char *p1 = (char *)arena_add(ar, "aaaaaaaaaaaaaaaaaaaa", 20);
-  ASSERT_TRUE(p1 != NULL);
+  char *p1 = (char *)test_arena_add_ok(ar, "aaaaaaaaaaaaaaaaaaaa", 20);
+  (void)p1;
 
-  char *p2 = (char *)arena_add(ar, "bbbbbbbbbbbbbbbbbbbb", 20);
+  char *p2 = NULL;
+  ASSERT_TRUE(arena_add(ar, "bbbbbbbbbbbbbbbbbbbb", 20, (void **)&p2) ==
+              AS_CAP);
   ASSERT_TRUE(p2 == NULL);
   ASSERT_TRUE(arena_get_used(ar) > 0);
 
@@ -131,8 +158,7 @@ static void test_alloc_basic(void) {
   Arena *ar = arena_create(NULL, NULL);
   ASSERT_TRUE(ar != NULL);
 
-  uint8_t *p = (uint8_t *)arena_alloc(ar, 4);
-  ASSERT_TRUE(p != NULL);
+  uint8_t *p = (uint8_t *)test_arena_alloc_ok(ar, 4);
 
   p[0] = 0x11;
   p[1] = 0x22;
@@ -149,8 +175,8 @@ static void test_alloc_zero_len(void) {
   Arena *ar = arena_create(NULL, NULL);
   ASSERT_TRUE(ar != NULL);
 
-  uint8_t *p = (uint8_t *)arena_alloc(ar, 0);
-  ASSERT_TRUE(p != NULL);
+  uint8_t *p = (uint8_t *)test_arena_alloc_ok(ar, 0);
+  (void)p;
 
   arena_destroy(ar);
 }
@@ -159,8 +185,7 @@ static void test_calloc_zeroes_payload(void) {
   Arena *ar = arena_create(NULL, NULL);
   ASSERT_TRUE(ar != NULL);
 
-  uint8_t *p = (uint8_t *)arena_calloc(ar, 8);
-  ASSERT_TRUE(p != NULL);
+  uint8_t *p = (uint8_t *)test_arena_calloc_ok(ar, 8);
   for (size_t i = 0; i < 8; i++) {
     ASSERT_TRUE(p[i] == 0);
   }
@@ -173,7 +198,9 @@ static void test_alloc_rejects_overflow_len(void) {
   Arena *ar = arena_create(NULL, &cap);
   ASSERT_TRUE(ar != NULL);
 
-  ASSERT_TRUE(arena_alloc(ar, UINT32_MAX) == NULL);
+  void *p = NULL;
+  ASSERT_TRUE(arena_alloc(ar, UINT32_MAX, &p) == ERR);
+  ASSERT_TRUE(p == NULL);
 
   arena_destroy(ar);
 }
@@ -183,19 +210,16 @@ static void test_add_nul(void) {
   ASSERT_TRUE(ar != NULL);
 
   // NUL-terminated copy of a string.
-  char *s1 = (char *)arena_add_nul(ar, (void *)"hello", 5);
-  ASSERT_TRUE(s1 != NULL);
+  char *s1 = (char *)test_arena_add_nul_ok(ar, (void *)"hello", 5);
   ASSERT_TRUE(memcmp(s1, "hello", 5) == 0);
   ASSERT_TRUE(s1[5] == '\0');
 
   // Zero-length NUL-terminated string.
-  char *s2 = (char *)arena_add_nul(ar, (void *)"", 0);
-  ASSERT_TRUE(s2 != NULL);
+  char *s2 = (char *)test_arena_add_nul_ok(ar, (void *)"", 0);
   ASSERT_TRUE(s2[0] == '\0');
 
   // arena_add (without nul) must NOT guarantee a terminator.
-  char *raw = (char *)arena_add(ar, (void *)"xyz", 3);
-  ASSERT_TRUE(raw != NULL);
+  char *raw = (char *)test_arena_add_ok(ar, (void *)"xyz", 3);
   ASSERT_TRUE(memcmp(raw, "xyz", 3) == 0);
 
   arena_destroy(ar);
@@ -205,18 +229,16 @@ static void test_zero_mem(void) {
   Arena *ar = arena_create(NULL, NULL);
   ASSERT_TRUE(ar != NULL);
 
-  char *a = (char *)arena_add_nul(ar, (void *)"alpha", 5);
-  char *b = (char *)arena_add_nul(ar, (void *)"beta", 4);
-  ASSERT_TRUE(a != NULL);
-  ASSERT_TRUE(b != NULL);
+  char *a = (char *)test_arena_add_nul_ok(ar, (void *)"alpha", 5);
+  char *b = (char *)test_arena_add_nul_ok(ar, (void *)"beta", 4);
   ASSERT_TRUE(a[0] == 'a');
   ASSERT_TRUE(b[0] == 'b');
 
   // Grow to multiple blocks so zero pass covers chained blocks too.
   char blob[1500];
   memset(blob, 0x7A, sizeof(blob));
-  uint8_t *p = (uint8_t *)arena_add(ar, blob, (uint32_t)sizeof(blob));
-  ASSERT_TRUE(p != NULL);
+  uint8_t *p = (uint8_t *)test_arena_add_ok(ar, blob,
+                                            (uint32_t)sizeof(blob));
   ASSERT_TRUE(p[0] == 0x7A);
 
   arena_zero_mem(ar);
@@ -229,8 +251,7 @@ static void test_zero_mem(void) {
   ASSERT_TRUE(arena_is_ok(ar) == YES);
 
   // Arena remains usable after zeroing.
-  char *c = (char *)arena_add_nul(ar, (void *)"ok", 2);
-  ASSERT_TRUE(c != NULL);
+  char *c = (char *)test_arena_add_nul_ok(ar, (void *)"ok", 2);
   ASSERT_TRUE(c[0] == 'o');
   ASSERT_TRUE(c[1] == 'k');
   ASSERT_TRUE(c[2] == '\0');

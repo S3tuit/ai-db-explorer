@@ -54,7 +54,7 @@ static void test_frame_read_len(void) {
 
   StrBuf payload;
   sb_init(&payload);
-  ASSERT_TRUE(frame_read_len(bc, &payload) == OK);
+  ASSERT_TRUE(frame_read_len(bc, &payload, 0) == FRAME_READ_LEN_OK);
   ASSERT_TRUE(payload.len == 5);
   ASSERT_TRUE(memcmp(payload.data, "hello", 5) == 0);
 
@@ -63,7 +63,7 @@ static void test_frame_read_len(void) {
   fclose(in);
 }
 
-static void test_frame_read_len_too_large(void) {
+static void test_frame_read_len_truncated(void) {
   unsigned char buf[4];
   write_be_u32(buf, 9);
 
@@ -78,7 +78,36 @@ static void test_frame_read_len_too_large(void) {
 
   StrBuf payload;
   sb_init(&payload);
-  ASSERT_TRUE(frame_read_len(bc, &payload) == ERR);
+  ASSERT_TRUE(frame_read_len(bc, &payload, 0) == FRAME_READ_LEN_ERR_IO);
+
+  sb_clean(&payload);
+  bufch_destroy(bc);
+  fclose(in);
+}
+
+static void test_frame_read_len_cap_rejects_before_payload(void) {
+  unsigned char buf[4 + 6];
+  write_be_u32(buf, 6);
+  memcpy(buf + 4, "abcdef", 6);
+
+  FILE *in = MEMFILE_OUT();
+  fwrite(buf, 1, sizeof(buf), in);
+  fflush(in);
+  fseek(in, 0, SEEK_SET);
+
+  ByteChannel *ch = stdio_bytechannel_wrap_fd(fileno(in), -1);
+  BufChannel *bc = bufch_create(ch);
+  ASSERT_TRUE(bc != NULL);
+
+  StrBuf payload;
+  sb_init(&payload);
+  ASSERT_TRUE(frame_read_len(bc, &payload, 5) ==
+              FRAME_READ_LEN_ERR_OVERSIZE);
+  ASSERT_TRUE(payload.len == 0);
+
+  unsigned char body[6] = {0};
+  ASSERT_TRUE(bufch_read_exact(bc, body, sizeof(body)) == OK);
+  ASSERT_TRUE(memcmp(body, "abcdef", sizeof(body)) == 0);
 
   sb_clean(&payload);
   bufch_destroy(bc);
@@ -384,7 +413,8 @@ static void test_frame_write_rpc_jsonl(void) {
 int main(void) {
   test_frame_write_len();
   test_frame_read_len();
-  test_frame_read_len_too_large();
+  test_frame_read_len_truncated();
+  test_frame_read_len_cap_rejects_before_payload();
   test_frame_write_cl();
   test_frame_read_cl();
   test_frame_read_cl_lowercase_content_length();

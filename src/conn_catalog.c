@@ -493,9 +493,9 @@ static AdbxStatus parse_sensitive_domains(const JsonGetter *jg,
     return ERR;
   }
 
-  out->sens_policy.storage = (SensitiveRule *)arena_alloc(
-      &out->sens_policy.arena, (uint32_t)(n_rules * sizeof(SensitiveRule)));
-  if (!out->sens_policy.storage) {
+  if (arena_alloc(&out->sens_policy.arena,
+                  (uint32_t)(n_rules * sizeof(SensitiveRule)),
+                  (void **)&out->sens_policy.storage) != OK) {
     set_parse_err(err_out, "%s.sensitiveDomains: internal allocation error.",
                   path_prefix);
     goto error;
@@ -543,11 +543,12 @@ static AdbxStatus parse_sensitive_domains(const JsonGetter *jg,
       goto error;
     }
 
-    char *domain_ar =
-        (char *)arena_add_nul(&out->sens_policy.arena, decoded_domain,
-                              (uint32_t)strlen(decoded_domain));
+    char *domain_ar = NULL;
+    AdbxStatus ar_rc =
+        arena_add_nul(&out->sens_policy.arena, decoded_domain,
+                      (uint32_t)strlen(decoded_domain), (void **)&domain_ar);
     free(decoded_domain);
-    if (!domain_ar) {
+    if (ar_rc != OK) {
       set_parse_err(err_out, "%s.sensitiveDomains: internal allocation error.",
                     path_prefix);
       goto error;
@@ -588,10 +589,12 @@ static AdbxStatus parse_sensitive_domains(const JsonGetter *jg,
       str_lower_inplace(decoded_pat);
 
       // we first add the string to the arena, then mutate it with split_*
-      char *pat_ar = (char *)arena_add_nul(&out->sens_policy.arena, decoded_pat,
-                                           (uint32_t)strlen(decoded_pat));
+      char *pat_ar = NULL;
+      ar_rc = arena_add_nul(&out->sens_policy.arena, decoded_pat,
+                            (uint32_t)strlen(decoded_pat),
+                            (void **)&pat_ar);
       free(decoded_pat);
-      if (!pat_ar) {
+      if (ar_rc != OK) {
         set_parse_err(err_out,
                       "%s.sensitiveDomains: internal allocation error.",
                       path_prefix);
@@ -748,9 +751,9 @@ static AdbxStatus parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
       uniq++;
   }
 
-  out->safe_funcs.rules = (SafeFunctionRule *)arena_calloc(
-      &out->safe_funcs.arena, (uint32_t)(uniq * sizeof(SafeFunctionRule)));
-  if (!out->safe_funcs.rules)
+  if (arena_calloc(&out->safe_funcs.arena,
+                   (uint32_t)(uniq * sizeof(SafeFunctionRule)),
+                   (void **)&out->safe_funcs.rules) != OK)
     goto error;
   out->safe_funcs.n_rules = uniq;
 
@@ -774,18 +777,17 @@ static AdbxStatus parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
     }
 
     SafeFunctionRule *r = &out->safe_funcs.rules[ri++];
-    r->name = (const char *)arena_add_nul(&out->safe_funcs.arena, name,
-                                          (uint32_t)strlen(name));
-    if (!r->name)
+    if (arena_add_nul(&out->safe_funcs.arena, name, (uint32_t)strlen(name),
+                      (void **)&r->name) != OK)
       goto error;
     r->is_global = is_global;
     r->n_schemas = (uint32_t)scount;
     if (scount == 0) {
       r->schemas = NULL;
     } else {
-      r->schemas = (const char **)arena_calloc(
-          &out->safe_funcs.arena, (uint32_t)(scount * sizeof(char *)));
-      if (!r->schemas)
+      if (arena_calloc(&out->safe_funcs.arena,
+                       (uint32_t)(scount * sizeof(char *)),
+                       (void **)&r->schemas) != OK)
         goto error;
       size_t k = 0;
       const char *prev = NULL;
@@ -794,11 +796,11 @@ static AdbxStatus parse_safe_functions(const JsonGetter *jg, ConnProfile *out,
           continue;
         if (prev && strcmp(prev, tmp[t].schema) == 0)
           continue;
-        r->schemas[k++] =
-            (const char *)arena_add_nul(&out->safe_funcs.arena, tmp[t].schema,
-                                        (uint32_t)strlen(tmp[t].schema));
-        if (!r->schemas[k - 1])
+        if (arena_add_nul(&out->safe_funcs.arena, tmp[t].schema,
+                          (uint32_t)strlen(tmp[t].schema),
+                          (void **)&r->schemas[k]) != OK)
           goto error;
+        k++;
         prev = tmp[t].schema;
       }
     }

@@ -4,10 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "arena.h"
 #include "conn_catalog.h"
 #include "utils.h"
 typedef struct DbTokenStore DbTokenStore;
+typedef struct SensitiveTokSession SensitiveTokSession;
 
 /* Token prefix for sensitive-value handles. */
 #define SENSITIVE_TOK_PREFIX "tok_"
@@ -36,14 +36,50 @@ typedef struct ParsedTokView {
   uint32_t index;
 } ParsedTokView;
 
-/* Creates one heap-owned DbTokenStore from a connection profile.
+typedef enum StokResolveStatus {
+  STOK_RESOLVE_OK = 0,
+  STOK_RESOLVE_ERR_INPUT = -1,
+  STOK_RESOLVE_ERR_FORMAT = -2,
+  STOK_RESOLVE_ERR_CONNECTION = -3,
+  STOK_RESOLVE_ERR_STALE = -4,
+  STOK_RESOLVE_ERR_UNKNOWN = -5,
+} StokResolveStatus;
+
+/* Creates one heap-owned sensitive-token session state.
  * Ownership:
- * - borrows 'profile' and 'arena';
- * - caller owns returned store and must call stok_store_destroy().
- * Side effects: allocates token array and optional deterministic hash index.
- * Returns a valid store on success, NULL on invalid input/allocation failure.
+ * - caller owns returned session and must call stok_session_destroy().
+ * Side effects: allocates the bounded token arena and store registry.
+ * Returns a valid session on success, NULL on invalid input/allocation failure.
  */
-DbTokenStore *stok_store_create(const ConnProfile *profile, Arena *arena);
+SensitiveTokSession *stok_session_create(uint32_t arena_cap);
+
+/* Destroys one heap-owned sensitive-token session and every store it owns.
+ * Error semantics: none (safe on NULL).
+ */
+void stok_session_destroy(SensitiveTokSession *sess);
+
+/* Checks whether a sensitive-token session is initialized and internally
+ * usable.
+ */
+AdbxTriStatus stok_session_is_ok(const SensitiveTokSession *sess);
+
+/* Returns the current session generation, or 0 for NULL input. */
+uint32_t stok_session_generation(const SensitiveTokSession *sess);
+
+/* Returns the number of bytes currently used in the session token arena.
+ * This is intended for focused tests and diagnostics.
+ */
+uint32_t stok_session_arena_used(SensitiveTokSession *sess);
+
+/* Resolves per-session token store for 'profile', creating it if needed.
+ * Ownership: returned store is borrowed from 'sess' and remains valid until
+ * the session is destroyed. If token creation resets the session after arena
+ * cap exhaustion, the store that triggered the reset remains valid but is
+ * reinitialized with empty token state; all other borrowed stores are
+ * invalidated and must be reacquired.
+ */
+DbTokenStore *stok_session_get_or_create_store(SensitiveTokSession *sess,
+                                               const ConnProfile *profile);
 
 /* Destroys one heap-owned DbTokenStore.
  * Ownership: releases store-owned internals and invalidates 'store'.
@@ -94,9 +130,15 @@ typedef struct SensitiveTokIn {
  * Returns token byte length (without NUL) on success, -1 on invalid input or
  * allocation failure.
  */
-int stok_store_create_token(DbTokenStore *store, uint32_t generation,
-                            const SensitiveTokIn *in,
+int stok_store_create_token(DbTokenStore *store, const SensitiveTokIn *in,
                             char out_tok[SENSITIVE_TOK_BUFSZ]);
+
+/* Parses, validates, and resolves one caller-owned token string against a
+ * store. The token buffer is modified only when the raw token format is valid.
+ * On STOK_RESOLVE_OK, '*out_tok' receives a borrowed SensitiveTok entry.
+ */
+StokResolveStatus stok_store_resolve_token(DbTokenStore *store, char *token,
+                                           const SensitiveTok **out_tok);
 
 /* Parses one token in-place.
  * Expected format: tok_<connection_name>_<generation>_<index>
